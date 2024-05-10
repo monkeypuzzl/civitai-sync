@@ -1,0 +1,31 @@
+{
+  "private": true,
+  "name": "civitai-sync",
+  "version": "0.0.1",
+  "license": "MIT",
+  "scripts": {
+    "cli": "node .",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.2.0",
+    "eslint": "^9.2.0",
+    "globals": "^15.2.0"
+  },
+  "dependencies": {
+    "@inquirer/confirm": "^3.1.0",
+    "@inquirer/input": "^2.1.0",
+    "@inquirer/password": "^2.1.0",
+    "@inquirer/rawlist": "^2.1.0",
+    "@inquirer/select": "^2.2.0",
+    "chalk": "^5.3.0",
+    "inquirer": "^9.2.16",
+    "mkdirp": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "index.mjs",
+  "author": "Prem Rose",
+  "description": "Civitai on-site generations downloader, unofficial"
+}
