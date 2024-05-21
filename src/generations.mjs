@@ -10,7 +10,7 @@ import { readFile, listDirectory, isDate } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
 import { fetchCivitaiImage } from './civitaiApi.mjs';
 
-export function filenameFromURL(url, defaultExtension) {
+export function filenameFromURL (url, defaultExtension) {
   const { pathname } = new URL(url);
   let filename = pathname.slice(pathname.lastIndexOf('/') + 1);
 
@@ -29,14 +29,14 @@ export function imageFilepath (date, url) {
   return destination;
 }
 
-export async function getGenerationDates() {
+export async function getGenerationDates () {
   const names = await listDirectory(`${CONFIG.generationsDataPath}`);
   const dates = names.filter(isDate);
 
   return dates;
 }
 
-export async function getGenerationIdsByDate(date) {
+export async function getGenerationIdsByDate (date) {
   const filenames = await listDirectory(`${CONFIG.generationsDataPath}/${date}`);
   const ids = filenames
     .filter(f => f.endsWith('.json'))  
@@ -46,7 +46,7 @@ export async function getGenerationIdsByDate(date) {
   return ids;
 } 
 
-export async function getFirstGenerationId() {
+export async function getFirstGenerationId () {
   const dates = await getGenerationDates();
   const ids = await getGenerationIdsByDate(dates[0]);
 

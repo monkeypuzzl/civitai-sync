@@ -3,11 +3,16 @@
 Download and save your Civitai on-site generations to your computer.  
 Unofficial, third-party software.
 
+Download a zip of the app:  
+https://github.com/premasagar/civitai-sync/archive/refs/heads/main.zip
+
 ## About
 Using your secret key from the Civitai website, this performs the
 equivalent of scrolling through your on-site generations and downloading
 each image individually. It downloads the generation data and media into
 date-ordered subdirectories.
+
+![cli-01](https://github.com/premasagar/civitai-sync/assets/116809/6fef785b-746f-4a95-9cbd-205ebf736777)
 
 ## Install
 
@@ -48,11 +53,17 @@ npm run cli /bob/civitai/alice.json
 - Open the "**Cookies**" list, and click on "**`https://civitai.com`**".
 - Click the cookie named "**`__Secure-civitai-token`**" and copy the value.
 
+
+https://github.com/premasagar/civitai-sync/assets/116809/eb516635-a766-43a2-8e53-7c43d497a8be
+
+
 ## Set your secret key
 
 - Back here, in the menu, choose "**Set secret key**".
 - Paste your secret key (right-click, or use "Ctrl+Shift+V" or equivalent).
 - Optionally, you can encrypt your key with a password.
+
+![cli_05](https://github.com/premasagar/civitai-sync/assets/116809/119a324c-df2d-49f6-88c3-cbbfd3d315f6)
 
 The key will expire within a month.
 The expiry date is shown in the browser Cookies list.

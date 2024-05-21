@@ -6,7 +6,7 @@ export function toDateString (isoString) {
   return isoString.slice(0, isoString.indexOf('T'));
 }
 
-export function isDate(dateString) {
+export function isDate (dateString) {
   return !isNaN((new Date(dateString)).getTime());
 }
 
