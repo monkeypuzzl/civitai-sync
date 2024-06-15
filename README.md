@@ -84,6 +84,9 @@ Change download location and other options in "**Download options**".
 Once you've downloaded your back catalogue, you can do so again at any
 time, and only your latest will be downloaded.
 
+If you only want to download your data (prompts and parameters) but _not_ images,
+choose "**Download options**" > "**Change download type to: only data**".
+
 If your first download was stopped early or interrupted, to resume downloading older items,
 choose "**Download options**" > "**Download oldest**".
 

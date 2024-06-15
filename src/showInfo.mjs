@@ -57,8 +57,12 @@ Change download location and other options in "${chalk.bold('Download options')}
 Once you've downloaded your back catalogue, you can do so again at any
 time, and only your latest will be downloaded.
 
+If you only want to download data (prompts and parameters) but ${chalk.italic('not')} images,
+choose "${chalk.bold('Download options')}" > "${chalk.bold('Change download type to: only data')}".
+
 If your first download was stopped early or interrupted, to resume
-downloading older items, choose "${chalk.bold('Download options')}" > "${chalk.bold('Download oldest')}".
+downloading older items,
+choose "${chalk.bold('Download options')}" > "${chalk.bold('Download oldest')}".
 
 If you need to fill any gaps in your download record, e.g. because
 of deleted files, or you download only data and then want images,
