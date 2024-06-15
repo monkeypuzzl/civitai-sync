@@ -57,9 +57,12 @@ Change download location and other options in "${chalk.bold('Download options')}
 Once you've downloaded your back catalogue, you can do so again at any
 time, and only your latest will be downloaded.
 
-If you need to fill any gaps in your download record, e.g. an
-interrupted download, or you download only data and then want images,
-choose "${chalk.bold('Download options')}" > "${chalk.bold('Download missing')}".
+If your first download was stopped early or interrupted, to resume
+downloading older items, choose "${chalk.bold('Download options')}" > "${chalk.bold('Download oldest')}".
+
+If you need to fill any gaps in your download record, e.g. because
+of deleted files, or you download only data and then want images,
+choose "${chalk.bold('Download options')}" > "${chalk.bold('Download oldest')}".
 
 By Prem, https://premasagar.com
 `);

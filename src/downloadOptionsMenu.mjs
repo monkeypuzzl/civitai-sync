@@ -8,6 +8,7 @@ import { mainMenu } from './mainMenu.mjs';
 import { getSecretKey } from './keyActions.mjs';
 import { setConfigParam } from './config.mjs';
 import { fetchGenerations, countGenerations, openDataDirectory, openMediaDirectory } from './downloadActions.mjs';
+import { getFirstGenerationId } from './generations.mjs';
 
 export async function setDownloadOptions () {
   const choices = [];
@@ -20,9 +21,15 @@ export async function setDownloadOptions () {
   if (dataDirExists) {
     choices.push(
       {
+        name: 'Download oldest',
+        value: 'download-oldest',
+        description: `For when a download has been stopped early, this resumes downloading older generations.`,
+      },
+
+      {
         name: 'Download missing',
         value: 'download-missing',
-        description: `For when a download stops abruptly or if you download only data and later change to download media, this download anything missing.`,
+        description: `If you have deleted data, or it you download only data and later change to download media, this downloads anything missing.`,
       }
     );
   }
@@ -105,7 +112,7 @@ export async function setDownloadOptions () {
     message: 'Download options:',
     choices,
     theme: customTheme,
-    pageSize: 9,
+    pageSize: choices.length,
     loop: false
   });
 
@@ -114,6 +121,31 @@ export async function setDownloadOptions () {
   switch (answer) {
     case 'set-download-type':
     await setConfigParam('excludeImages', !CONFIG.excludeImages);
+    return setDownloadOptions();
+
+    case 'download-oldest':
+    secretKey = await getSecretKey();
+    
+    if (!secretKey) {
+      return setDownloadOptions();
+    }
+
+    ui = new inquirer.ui.BottomBar();
+
+    try {
+      const cursor = await getFirstGenerationId();
+
+      if (!cursor) {
+        return setDownloadOptions();
+      }
+
+      await fetchGenerations({ secretKey, cursor, withImages: !CONFIG.excludeImages }, txt => ui.updateBottomBar(txt));
+    }
+
+    catch (err) {
+      console.error(err);
+    }
+
     return setDownloadOptions();
 
     case 'download-missing':
