@@ -80,10 +80,9 @@ export async function mainMenu () {
       return mainMenu();
     }
 
-    ui = new inquirer.ui.BottomBar();
-
     try {
-      await fetchGenerations({ secretKey, overwrite: false, withimages: !CONFIG.excludeImages }, txt => ui.updateBottomBar(txt));
+      ui = new inquirer.ui.BottomBar();
+      await fetchGenerations({ secretKey, overwrite: false, withImages: !CONFIG.excludeImages }, txt => ui.updateBottomBar(txt));
     }
 
     catch (err) {

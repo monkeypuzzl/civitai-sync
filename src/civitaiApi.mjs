@@ -50,7 +50,7 @@ export async function getAllRequests (progressFn, options, cursor, _previousCurs
 
 export async function fetchCivitaiImage (url, secretKey) {
   const response = await fetch(url, {
-    headers: { ...headers.sharedHeaders, ...headers.imageHeadersHeaders, cookie: `__Secure-civitai-token=${secretKey}` }
+    headers: { ...headers.sharedHeaders, ...headers.imageHeaders, cookie: `__Secure-civitai-token=${secretKey}` }
   });
 
   if (response.status === 200) {
