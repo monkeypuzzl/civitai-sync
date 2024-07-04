@@ -1,96 +1,73 @@
 # civitai-sync
 
-Download and save your Civitai on-site generations to your computer.  
-Unofficial, third-party software.
+A tool to download your onsite Civitai generations in one go. It downloads every image in your generation feed, and also saves the generation data so that prompts can be searched as text.
 
-Download a zip of the app:  
-https://github.com/premasagar/civitai-sync/archive/refs/heads/main.zip
+Everything is saved in date-ordered folders. You can re-run it after you have generated more, and it will only download your latest.
 
-## About
-Using your secret key from the Civitai website, this performs the
-equivalent of scrolling through your on-site generations and downloading
-each image individually. It downloads the generation data and media into
-date-ordered subdirectories.
+Tool page, for full details:
+https://civitai.com/models/526058
 
-![cli-01](https://github.com/premasagar/civitai-sync/assets/116809/6fef785b-746f-4a95-9cbd-205ebf736777)
+The original article on the downloader, with discussion:
+https://civitai.com/articles/5676
+
+
+The program is a Command Line Interface (CLI).  
+It runs in your computer terminal / command prompt.
+
 
 ## Install
 
-Install node.js v18+, and download civitai-sync
+Install [Node.js](https://nodejs.org)  
+If you already have Node, it needs version 18 or above.
+
+Download the zip archive of the program from the tool page.  
+Or download/checkout the repository.
+
+On Windows, you can double-click the `install_win` file to install, or continue...
+
+In the terminal/command prompt (not the Node.js console),  
+`cd` change directory to the program folder:
 
 ```
-  cd civitai-sync
+    ## Linux, Mac
+    cd Downloads/civitai-sync
+
+    ## Windows – use backslashes, not forward slashes
+    cd C:\Downloads\civitai-sync
+```
+
+Install the software dependencies (npm = Node Package Manager):
+
+```
   npm install
 ```
 
-## Usage
+You'll need to create a Civitai API key in your account:  
+https://civitai.com/user/account
+
+
+## Run
 
 ```
-  cd civitai-sync
   npm run cli
 ```
-
-By default, a config file is saved at "`config/default.json`".
-
-Specify a custom config location, with optional "`.json`":
-
-```
-  npm run cli config/bob
-```
-
-The config location can be anywhere on the filesystem: 
-
-```
-npm run cli /bob/civitai/alice.json
-```
-
-## Find your secret key
-
-- In your browser, go to the [Civitai website](https://civitai.com) (you must be logged in)
-- Open **"Developer Tools"** (press "Ctrl+Shift+I" / "F12", or choose
-"More tools" in the browser menu).
-- Open the "**Storage**" tab (Firefox) or "**Application**" tab (Chrome/Brave)
-- Open the "**Cookies**" list, and click on "**`https://civitai.com`**".
-- Click the cookie named "**`__Secure-civitai-token`**" and copy the value.
+A configuration file for user settings will be saved in the program folder, at  
+"/config/default.json"
 
 
-https://github.com/premasagar/civitai-sync/assets/116809/eb516635-a766-43a2-8e53-7c43d497a8be
+## Multiple accounts
+To download more than one account, specify a unique name and path for the config file:
+
+npm run cli config/bob
+
+This will save a config file "bob.json" inside the program folder within the "config" folder.  
+You can give a full path to anywhere on the file system, and the config file will be loaded from there.
 
 
-## Set your secret key
+## Download location
+You can set the location to be anywhere on the file system.
 
-- Back here, in the menu, choose "**Set secret key**".
-- Paste your secret key (right-click, or use "Ctrl+Shift+V" or equivalent).
-- Optionally, you can encrypt your key with a password.
+It is recommended to change the download location to a folder outside of the program - because if you later update or re-install the program, you may accidentally copy over the whole folder, including your downloads.
 
-![cli_05](https://github.com/premasagar/civitai-sync/assets/116809/119a324c-df2d-49f6-88c3-cbbfd3d315f6)
-
-The key will expire within a month.
-The expiry date is shown in the browser Cookies list.
-
-When it expires, go to "**Key options**" > "**Update secret key**".
-
-In future, this process could be automated via a browser extension.
-Or an official API.
-
-## Download generations
-
-Once your key is saved, you'll have the option "**Download generations**".
-Wait until any current on-site generations are complete, to ensure
-those images are saved.
-
-Change download location and other options in "**Download options**".
-
-Once you've downloaded your back catalogue, you can do so again at any
-time, and only your latest will be downloaded.
-
-If you only want to download your data (prompts and parameters) but _not_ images,
-choose "**Download options**" > "**Change download type to: only data**".
-
-If your first download was stopped early or interrupted, to resume downloading older items,
-choose "**Download options**" > "**Download oldest**".
-
-If you need to fill any gaps in your download record, e.g. because of deleted files, or you download only data and then want images,
-choose "**Download options**" > "**Download missing**".
-
-By [Prem](https://premasagar.com)
+Select "Download options" > "Data download location"  
+And "Download options" > "Media download location"

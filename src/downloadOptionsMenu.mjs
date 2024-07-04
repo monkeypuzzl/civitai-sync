@@ -158,7 +158,7 @@ export async function setDownloadOptions () {
     ui = new inquirer.ui.BottomBar();
 
     try {
-      await fetchGenerations({ secretKey, resume: true, overwrite: false, withImages: !CONFIG.excludeImages }, txt => ui.updateBottomBar(txt));
+      await fetchGenerations({ secretKey, resume: true, overwrite: false, withImages: !CONFIG.excludeImages, checkImages: !CONFIG.excludeImages }, txt => ui.updateBottomBar(txt));
     }
 
     catch (err) {

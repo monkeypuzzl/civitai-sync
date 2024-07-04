@@ -27,17 +27,17 @@ export async function mainMenu () {
 
       {
         name: 'Key options',
-        value: 'options-secretkey',
-        description: 'Update, add/remove password, delete your secret key',
+        value: 'options-key',
+        description: 'Update, add/remove password, delete your API key',
       }
     );
   }
 
   else {
     choices.unshift({
-      name: 'Set secret key',
-      value: 'set-secretkey',
-      description: 'Set your secret key. Read "Show info" for how to get it.',
+      name: 'Set API key',
+      value: 'set-key',
+      description: 'Set your API key. Read "Show info" for how to get it.',
     });
   }
 
@@ -66,11 +66,11 @@ export async function mainMenu () {
   let secretKey, ui;
 
   switch (answer) {
-    case 'set-secretkey':
+    case 'set-key':
     await requestKey();
     return mainMenu();
 
-    case 'options-secretkey':
+    case 'options-key':
     return keyOptions();
 
     case 'download-generations':

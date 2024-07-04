@@ -2,17 +2,12 @@ import fs from 'node:fs';
 import { fileExists, readFile, writeFile } from './utils.mjs';
 
 const DEFAULT_CONFIG = {
-  dataRateLimit: 1000,
-  mediaRateLimit: 1000,
-
   generationsDataPath: `generations/data`,
   generationsMediaPath: `generations/media`,
-
-  keySave: true,
   keyEncrypt: false,
   excludeImages: false,
-  downloadMissing: false
-}
+  secretKey: ''
+};
 
 const currentConfig = {};
 let currentConfigPath;

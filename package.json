@@ -1,7 +1,7 @@
 {
   "private": true,
   "name": "civitai-sync",
-  "version": "0.0.1",
+  "version": "2.0.0",
   "license": "MIT",
   "scripts": {
     "cli": "node .",
@@ -26,6 +26,6 @@
     "node": ">=18"
   },
   "main": "index.mjs",
-  "author": "Prem Rose",
-  "description": "Civitai on-site generations downloader, unofficial"
+  "author": "monkeypuzzle",
+  "description": "Civitai generations downloader"
 }

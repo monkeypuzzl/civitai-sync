@@ -20,10 +20,11 @@ const customTheme = {
 };
 
 const appName = `${chalk.white.bgBlack.bold('ᴄɪᴠɪᴛ')}${chalk.hex('#4ca1f0').bgBlack.bold('ᴀɪ')}${chalk.white.bgBlack.bold('-sync')}`;
-const appHeader = `\n ${appName} [on-site generations downloader]\n`;
+const appHeader = `\n ${appName} generations downloader\n`;
 
 const COMMANDS = getCommandLineArgs();
-const CONFIG_PATH = COMMANDS.configPath || 'config/default.json';
+const DEFAULT_CONFIG_PATH = 'config/default.json';
+const CONFIG_PATH = COMMANDS.configPath || DEFAULT_CONFIG_PATH;
 const OS = os.platform();
 let CONFIG, APP_DIRECTORY;
 
@@ -45,9 +46,12 @@ export async function launchCLI (appDirectory) {
   clearTerminal();
   
   console.log(appHeader);
-  console.log(`  Config: "${CONFIG_PATH}"\n`);
 
-  mainMenu();
+  if (CONFIG_PATH !== DEFAULT_CONFIG_PATH) {
+    console.log(`  config: ${CONFIG_PATH}\n`);
+  }
+
+  await mainMenu();
 }
 
 function getCommandLineArgs () {

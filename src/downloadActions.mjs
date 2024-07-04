@@ -31,12 +31,13 @@ function stopListeningForKeyPress (fn) {
 let aborted;
 
 export async function fetchGenerations ({
-  withImages = true,
-  latest = false,
-  resume = false,
-  overwrite = false,
-  cursor,
-  secretKey,
+  withImages = true,   // download images
+  checkImages = false, // refresh broken downloaded images
+  latest = false,      // check latest generations
+  resume = false,      // keep checking for gaps in generations
+  overwrite = false,   // overwrite existing generations
+  cursor,              // fetch generations earlier than this generation id 
+  secretKey,           // authentication key
   listeningForKeyPress = true
 } = {}, log = console.log) {
   function onKeyPress (char, key) {
@@ -56,13 +57,13 @@ export async function fetchGenerations ({
   }
 
   if (latest && resume) {
-    const shouldContinue = await fetchGenerations({ withImages, resume: false, latest, secretKey, listeningForKeyPress: false }, log);
+    const shouldContinue = await fetchGenerations({ withImages, checkImages, resume: false, latest, secretKey, listeningForKeyPress: false }, log);
 
     if (aborted || !shouldContinue) {
       return false;
     }
 
-    return await fetchGenerations({ withImages, resume, latest: false, cursor, secretKey, listeningForKeyPress: false }, log);
+    return await fetchGenerations({ withImages, checkImages, resume, latest: false, cursor, secretKey, listeningForKeyPress: false }, log);
   }
 
   else if (resume && !cursor) {
@@ -86,7 +87,7 @@ export async function fetchGenerations ({
 
         if (data.error) {
           if (data.error.json.data.code === 'UNAUTHORIZED') {
-            const answer = await confirm({ message: chalk.red('Fetch failed. Your secret key needs updating. Update now?'), default: true });
+            const answer = await confirm({ message: chalk.red('Fetch failed. Your API key needs updating. Update now?'), default: true });
 
             if (answer) {
               await requestKey();
@@ -98,7 +99,7 @@ export async function fetchGenerations ({
         }
 
         // Save data
-        const items = await saveGenerations(data, { overwrite });
+        const items = await saveGenerations(data, { overwrite, checkImages: withImages && checkImages });
 
         if (aborted) {
           return false;

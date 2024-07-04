@@ -16,7 +16,7 @@ export async function getGenerations (cursor, { secretKey }) {
   const url = getGenerationsUrl(cursor);
 
   const response = await fetch(url, {
-    headers: { ...headers.sharedHeaders, ...headers.jsonHeaders, cookie: `__Secure-civitai-token=${secretKey}` }
+    headers: { ...headers.sharedHeaders, ...headers.jsonHeaders, Authorization: `Bearer ${secretKey}` }
   });
 
   const data = await response.json();

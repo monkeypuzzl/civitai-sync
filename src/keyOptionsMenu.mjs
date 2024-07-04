@@ -8,37 +8,31 @@ import { getSecretKey, requestKey, testKey, removeKey, encryptKey, unEncryptKey 
 export async function keyOptions () {
   const choices = [
     {
-      name: 'Test secret key',
-      value: 'test-secretkey',
+      name: 'Test API key',
+      value: 'test-key',
       description: 'Test your key'
     },
 
     {
-      name: 'View secret key',
-      value: 'view-secretkey',
-      description: 'View your key'
-    },
-
-    {
-      name: 'Update secret key',
-      value: 'update-secretkey',
+      name: 'Update API key',
+      value: 'update-key',
       description: 'Update your key'
     },
 
     CONFIG.keyEncrypt ? {
-      name: 'Remove password-protection from key',
-      value: 'remove-password-secretkey',
-      description: 'Remove password from secret key'
+      name: 'Remove password-protection',
+      value: 'remove-password-key',
+      description: 'Remove password from key'
     } : {
-      name: 'Encrypt key with password',
-      value: 'add-password-secretkey',
-      description: 'Add password to secret key'
+      name: 'Add password-protection',
+      value: 'add-password-key',
+      description: 'Add password to key'
     },
 
     {
-      name: 'Delete secret key',
-      value: 'delete-secretkey',
-      description: 'Delete secret key'
+      name: 'Delete API key',
+      value: 'delete-key',
+      description: 'Delete key'
     },
 
     new Separator(),
@@ -59,7 +53,7 @@ export async function keyOptions () {
   let secretKey, result, confirmDelete;
 
   switch (answer) {
-    case 'test-secretkey':
+    case 'test-key':
     secretKey = await getSecretKey();
 
     if (!secretKey) {
@@ -69,7 +63,7 @@ export async function keyOptions () {
     result = await testKey(secretKey);
 
     if (result.success) {
-      console.log(chalk.green(`Your secret key works.`));
+      console.log(chalk.green(`Your API key works.`));
     }
 
     else if (result.error) {
@@ -78,26 +72,26 @@ export async function keyOptions () {
       }
 
       else {
-        console.log(chalk.red(`Your secret key does not work. Does it need updating?`));
+        console.log(chalk.red(`Your API key does not work. Does it need updating?`));
       }
     }
     return keyOptions();
 
-    case 'view-secretkey':
+    case 'view-key':
     secretKey = await getSecretKey();
 
     if (!secretKey) {
       return keyOptions();
     }
 
-    await confirm({ message: `Your secret key is: "${secretKey}". (Press Enter)`, default: true });
+    await confirm({ message: `Your API key is: "${secretKey}". (Press Enter)`, default: true });
     return keyOptions();
 
-    case 'update-secretkey':
+    case 'update-key':
     await requestKey();
     return keyOptions();
 
-    case 'delete-secretkey':
+    case 'delete-key':
     confirmDelete = await confirm({ message: 'Are you sure? This will delete the saved key?', default: false });
 
     if (confirmDelete) {
@@ -108,12 +102,12 @@ export async function keyOptions () {
 
     return keyOptions();
 
-    case 'add-password-secretkey':
+    case 'add-password-key':
     await encryptKey(CONFIG.secretKey);
     
     return keyOptions();
 
-    case 'remove-password-secretkey':
+    case 'remove-password-key':
     await unEncryptKey(CONFIG.secretKey);
     return keyOptions();
     

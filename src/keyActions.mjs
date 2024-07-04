@@ -147,7 +147,7 @@ export async function getSecretKey () {
 }
 
 export async function requestKey () {
-  const newKey = await input({ message: 'Enter secret key (or press Enter to cancel):' });
+  const newKey = await input({ message: 'Enter API key (or press Enter to cancel):' });
 
   if (!newKey) {
     return null;

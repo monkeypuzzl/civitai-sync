@@ -89,7 +89,7 @@ export async function forEachGeneration (fn) {
   }
 }
 
-export async function saveGenerations (data, { overwrite = false, checkImages = true } = false) {
+export async function saveGenerations (data, { overwrite = false, checkImages = false } = {}) {
   const savedItems = [];
 
   if (data.error) {
@@ -122,7 +122,7 @@ export async function saveGenerations (data, { overwrite = false, checkImages = 
     }
 
     // Discard verbose `jobToken`
-    item.images = item.images.map(({ jobToken, ...imageData }) => imageData);
+    item.images = item.images.map(({ jobToken = '', ...imageData }) => imageData);
 
     savedItems.push(item);
 
