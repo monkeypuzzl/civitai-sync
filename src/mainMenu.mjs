@@ -4,10 +4,10 @@ import { setDownloadOptions } from './downloadOptionsMenu.mjs';
 import { fetchGenerations } from './downloadActions.mjs';
 import { keyOptions } from './keyOptionsMenu.mjs';
 import { showInfo } from './showInfo.mjs';
-import { CONFIG, customTheme } from './cli.mjs';
+import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { getSecretKey, requestKey } from './keyActions.mjs';
 
-export async function mainMenu () {
+export async function mainMenu (doClearTerminal = true) {
   const keySaved = !!CONFIG.secretKey;
   const choices = [];
 
@@ -57,6 +57,10 @@ export async function mainMenu () {
     }
   );
 
+  if (doClearTerminal) {
+    clearTerminal();
+  }
+
   const answer = await select({
     message: 'Please select:',
     choices,
@@ -81,15 +85,16 @@ export async function mainMenu () {
     }
 
     try {
+      clearTerminal();
       ui = new inquirer.ui.BottomBar();
       await fetchGenerations({ secretKey, overwrite: false, withImages: !CONFIG.excludeImages }, txt => ui.updateBottomBar(txt));
     }
 
-    catch (err) {
-      console.error(err);
+    catch (error) {
+      console.error(error);
     }
 
-    return mainMenu();
+    return mainMenu(false);
 
     case 'download-options':
     return setDownloadOptions();

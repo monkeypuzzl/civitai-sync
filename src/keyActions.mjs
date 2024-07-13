@@ -60,8 +60,8 @@ export async function encryptKey (secretKey) {
     return encryptedKey;
   }
 
-  catch (err) {
-    console.log(chalk.red(`Could not encrypt key: ${err.message}`));
+  catch (error) {
+    console.log(chalk.red(`Could not encrypt key: ${error.message}`));
     return null;
   }
 }

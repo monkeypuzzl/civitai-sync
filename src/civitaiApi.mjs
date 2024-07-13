@@ -1,15 +1,42 @@
 import { wait } from './utils.mjs';
 import headers from './headers.mjs';
 
-const getGenerationsAPI =  `https://civitai.com/api/trpc/generation.getRequests`;
+const API_GET_REQUESTS = 'https://civitai.com/api/trpc/orchestrator.queryGeneratedImages';
+// const API_GET_REQUESTS = 'https://civitai.com/api/trpc/generation.getRequests';
 const dataRateLimit = 1000;
 
 function getGenerationsUrl (cursor) {
   const inputParams = { json: { authed: true, cursor } };
   const inputQuery = encodeURIComponent(JSON.stringify(inputParams));
-  const url = `${getGenerationsAPI}?input=${inputQuery}`;
+  const url = `${API_GET_REQUESTS}?input=${inputQuery}`;
 
   return url;
+}
+
+function errorResponse ({ httpStatus = 0, path = '' }) {
+  let message = '';
+  let code = '';
+
+  switch (httpStatus) {
+    case 500:
+    message = 'Server Error. Please try again.';
+    code = 'SERVER_ERROR';
+  }
+
+  // Same shape as Civitai API error response
+  return {
+    error: {
+      json: {
+        message,
+        code: 11000 + httpStatus, // Arbitrary
+        data: {
+          code,
+          httpStatus,
+          path
+        }
+      }
+    }
+  };
 }
 
 export async function getGenerations (cursor, { secretKey }) {
@@ -19,7 +46,18 @@ export async function getGenerations (cursor, { secretKey }) {
     headers: { ...headers.sharedHeaders, ...headers.jsonHeaders, Authorization: `Bearer ${secretKey}` }
   });
 
-  const data = await response.json();
+  let data;
+
+  try {
+    data = await response.json();
+  }
+
+  catch (error) {
+    return errorResponse({
+      httpStatus: 500,
+      path: 'generation.getRequests'
+    });
+  }
 
   return data;
 }
@@ -48,9 +86,11 @@ export async function getAllRequests (progressFn, options, cursor, _previousCurs
   return false;
 }
 
-export async function fetchCivitaiImage (url, secretKey) {
+// Headers: The only requirement is
+// "Referer": "https://civitai.com" or a path at the domain
+export async function fetchCivitaiImage (url) {
   const response = await fetch(url, {
-    headers: { ...headers.sharedHeaders, ...headers.imageHeaders, cookie: `__Secure-civitai-token=${secretKey}` }
+    headers: { ...headers.sharedHeaders, ...headers.imageHeaders }
   });
 
   if (response.status === 200) {

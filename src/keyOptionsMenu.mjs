@@ -1,11 +1,11 @@
 import chalk from 'chalk';
 import confirm from '@inquirer/confirm';
 import select, { Separator } from '@inquirer/select';
-import { CONFIG, customTheme } from './cli.mjs';
+import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { mainMenu } from './mainMenu.mjs';
 import { getSecretKey, requestKey, testKey, removeKey, encryptKey, unEncryptKey } from './keyActions.mjs';
 
-export async function keyOptions () {
+export async function keyOptions (message) {
   const choices = [
     {
       name: 'Test API key',
@@ -44,6 +44,12 @@ export async function keyOptions () {
     }
   ];
 
+  clearTerminal();
+
+  if (message) {
+    console.log(message);
+  }
+
   const answer = await select({
     message: 'Key options:',
     choices,
@@ -62,20 +68,22 @@ export async function keyOptions () {
 
     result = await testKey(secretKey);
 
+    let message = '';
+
     if (result.success) {
-      console.log(chalk.green(`Your API key works.`));
+      message = chalk.green(`Test API key: Your API key works.`);
     }
 
     else if (result.error) {
       if (result.httpStatus === 500) {
-        console.log(chalk.red(`It looks like the service is down. Please check again shortly.`));
+        message = chalk.red(`It looks like the service is down. Please check again shortly.`);
       }
 
       else {
-        console.log(chalk.red(`Your API key does not work. Does it need updating?`));
+        message = chalk.red(`Your API key does not work. Does it need updating?`);
       }
     }
-    return keyOptions();
+    return keyOptions(message);
 
     case 'view-key':
     secretKey = await getSecretKey();

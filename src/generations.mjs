@@ -1,6 +1,6 @@
 /*eslint no-unused-vars: ["error", { "ignoreRestSiblings": true }]*/
 
-import fsLib from 'node:fs';
+import fs from 'node:fs';
 import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
 import path from 'node:path';
@@ -10,7 +10,9 @@ import { readFile, listDirectory, isDate } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
 import { fetchCivitaiImage } from './civitaiApi.mjs';
 
-export function filenameFromURL (url, defaultExtension) {
+// const BROKEN_IMAGE_MAX_SIZE = 1024 * 100;
+
+export function filenameFromURL (url = '', defaultExtension = '') {
   const { pathname } = new URL(url);
   let filename = pathname.slice(pathname.lastIndexOf('/') + 1);
 
@@ -21,12 +23,27 @@ export function filenameFromURL (url, defaultExtension) {
   return filename;
 }
 
-export function imageFilepath (date, url) {
+export function generationFilepath ({ id = 0, createdAt = '' }) {
+  const date = toDateString(createdAt);
+  const filepath = `${CONFIG.generationsDataPath}/${date}/${id}.json`;
+
+  return filepath;
+}
+
+export function imageFilepathLegacy ({ date = '', url = '' }) {
   const filename = filenameFromURL(url, 'jpeg');
   const mediaDirectory = `${CONFIG.generationsMediaPath}/${date}`;
-  const destination = path.resolve(mediaDirectory, filename);
+  const filepath = path.resolve(mediaDirectory, filename);
 
-  return destination;
+  return filepath;
+}
+
+export function imageFilepath ({ date = '', generationId = '', seed = 0 }) {
+  const filename = `${generationId}_${String(seed)}.jpeg`;
+  const mediaDirectory = `${CONFIG.generationsMediaPath}/${date}`;
+  const filepath = path.resolve(mediaDirectory, filename);
+
+  return filepath;
 }
 
 export async function getGenerationDates () {
@@ -36,12 +53,11 @@ export async function getGenerationDates () {
   return dates;
 }
 
-export async function getGenerationIdsByDate (date) {
+export async function getGenerationIdsByDate (date = '') {
   const filenames = await listDirectory(`${CONFIG.generationsDataPath}/${date}`);
   const ids = filenames
     .filter(f => f.endsWith('.json'))  
-    .map(f => Number(f.slice(0, f.lastIndexOf('.json'))))
-    .filter(id => !isNaN(id));
+    .map(f => f.slice(0, f.lastIndexOf('.json')));
 
   return ids;
 } 
@@ -53,7 +69,7 @@ export async function getFirstGenerationId () {
   return ids[0];
 }
 
-export async function getGeneration (date, id) {
+export async function getGeneration (date = '', id) {
   const filename = `${CONFIG.generationsDataPath}/${date}/${id}.json`;
 
   try {
@@ -63,83 +79,129 @@ export async function getGeneration (date, id) {
       throw new Error('File empty');
     }
 
-    const item = JSON.parse(contents);
-    return item;
+    const generation = JSON.parse(contents);
+    return generation;
   }
 
-  catch (err) {
-    console.log(`Error retrieving generation, "${filename}", ${err.message}`);
+  catch (error) {
+    console.log(`Error retrieving generation, "${filename}", ${error.message}`);
     return null;
   }
 }
 
 export async function forEachGeneration (fn) {
-  const dates = await getGenerationDates();
+  try {
+    const dates = await getGenerationDates();
 
-  for (let date of dates) {
-    const ids = await getGenerationIdsByDate(date);
+    for (let date of dates) {
+      const ids = await getGenerationIdsByDate(date);
 
-    for (let id of ids) {
-      const item = await getGeneration(date, id);
+      for (let id of ids) {
+        const generation = await getGeneration(date, id);
 
-      if (item) {
-        await fn(item, { date });
+        if (generation) {
+          const result = await fn(generation, { date }) || true;
+
+          if (result === false) {
+            return false;
+          }
+        }
       }
     }
   }
-}
 
-export async function saveGenerations (data, { overwrite = false, checkImages = false } = {}) {
-  const savedItems = [];
-
-  if (data.error) {
-    console.log('Error in generation data', data.error.json);
-    return savedItems;
+  catch (error) {
+    console.error(error);
+    return false;
   }
 
-  const { items } = data.result.data.json;
+  return true;
+}
+
+// TODO: check status for images previously unavailable,
+// e.g. downloading while on-site queue is pending. It should
+// refresh the generation data and download missing media.
+// Workaround, use 'Download missing'
+export async function saveGeneration (generation) {
+  const { id, createdAt } = generation;
+  const filepath = generationFilepath({ id, createdAt });
+  
+  try {
+    await writeFile(filepath, JSON.stringify(generation, null, 2));
+    return true;
+  }
+
+  catch (error) {
+    console.error(error);
+    return false;
+  }
+}
+
+// TODO: check status for images previously unavailable,
+// e.g. downloading while on-site queue is , it should
+// -> refresh the generation data and download missing media.
+// Workaround, use 'Download missing'
+export async function saveGenerations (apiGenerationsResponse, {
+    overwrite = false,
+    withImages = true,
+    checkImages = false
+  } = {},
+  progressFn = () => {}
+) {
+  const { result, error } = apiGenerationsResponse;
+  const report = { generationsDownloaded: 0, generationsSaved: 0, imagesSaved: 0 };
+
+  if (error) {
+    console.log('Error in generation data', error.json);
+    report.error = error;
+    return report;
+  }
+
+  const { data } = result;
+
+  if (!data || !('json' in data) || !Array.isArray(data.json.items)) {
+    console.log('Unexpected API data', JSON.stringify(data, null, 2));
+    return report;
+  }
+
+  const { items } = data.json;
 
   if (!items.length) {
-    return savedItems;
+    return report;
   }
 
-  for (let item of items) {
-    const { id, createdAt } = item;
-    const date = toDateString(createdAt);
-    const filepath = `${CONFIG.generationsDataPath}/${date}/${id}.json`;
+  report.generationsDownloaded += items.length;
+
+  for (let generation of items) {
+    const { id, createdAt } = generation;
+    const filepath = generationFilepath({ id, createdAt });
     const exists = await fileExists(filepath);
 
-    // TODO: check status for images previously unavailable,
-    // e.g. downloading while on-site queue is pending
-    // -> update generation data and download missing media
-    // Current workaround, use 'Download missing' option
-    if (exists && !overwrite) {
-      if (checkImages) {
-        savedItems.push(item);
+    if (!exists || overwrite) {
+      const success = await saveGeneration(generation, { overwrite });
+
+      if (!success) {
+        console.error('Could not save generation');
+        return;
       }
-      
-      continue;
+
+      report.generationsSaved ++;
+      progressFn({ generationsSaved: 1 });
     }
 
-    // Discard verbose `jobToken`
-    item.images = item.images.map(({ jobToken = '', ...imageData }) => imageData);
+    if (withImages && (!exists || overwrite || checkImages)) {
+      const filepaths = await saveGenerationImages(generation, { overwrite });
 
-    savedItems.push(item);
-
-    try {
-      await writeFile(filepath, JSON.stringify(item, null, 2));
-    }
-
-    catch (err) {
-      console.err(err.message);
+      report.imagesSaved += filepaths.length;
+      progressFn({ imagesSaved: filepaths.length });
     }
   }
-
-  return savedItems;
+  
+  return report;
 }
 
-export async function saveGenerationImages (item, { secretKey, overwrite = false }) {
-  const date = toDateString(item.createdAt);
+export async function saveGenerationImages (generation, { overwrite = false }) {
+  const date = toDateString(generation.createdAt);
   const mediaDirectory = `${CONFIG.generationsMediaPath}/${date}`;
 
   if (!(await fileExists(mediaDirectory))) {
@@ -148,28 +210,57 @@ export async function saveGenerationImages (item, { secretKey, overwrite = false
 
   const filepaths = [];
   
-  for (let image of item.images) {
-    const destination = imageFilepath(date, image.url);
+  for (let step of generation.steps) {
+    for (let image of step.images) {
+      const { seed, url } = image;
+      const filepath = imageFilepath({ date, generationId: generation.id, seed });
+      const legacyFilepath = imageFilepathLegacy({ date, url });
 
-    // TODO: Use image.available and re-cache if needed,
-    // e.g. connection closed saves a partial download
-    if (!overwrite && await fileExists(destination)) {
-      continue;
+      // TODO: Use image.available and re-cache if needed,
+      // and check byte size to see if it needs
+      // overwriting, e.g. partial download
+      if (await fileExists(filepath)) {
+        if (overwrite) {
+          await fs.promises.unlink(filepath);
+        }
+
+        // const fileSize = (await fs.promises.stat(filepath)).size;
+        // const isBrokenImage = fileSize < BROKEN_IMAGE_MAX_SIZE;
+
+        // console.log('image broke', { fileSize, isBrokenImage });
+
+        // if (isBrokenImage) {
+        //   await fs.promises.unlink(filepath);
+        // }
+
+        else {
+          continue;
+        }
+      }
+
+      else {
+        if (await fileExists(legacyFilepath)) {
+          await fs.promises.rename(legacyFilepath, filepath);
+          continue;
+        }
+      }
+
+      const responseBody = await fetchCivitaiImage(image.url);
+
+      // TODO: Re-attempt download
+      if (!responseBody) {
+        console.error('No response for image', image.url);
+        continue;
+      }
+
+      const fileStream = fs.createWriteStream(filepath, { flags: 'wx' });
+
+      await finished(Readable.fromWeb(responseBody).pipe(fileStream));
+
+      filepaths.push(`${date}/${filepath}`);
+
+      await wait(CONFIG.imageRateLimit);
     }
-
-    const responseBody = await fetchCivitaiImage(image.url, secretKey);
-
-    if (!responseBody) {
-      continue;
-    }
-
-    const fileStream = fsLib.createWriteStream(destination, { flags: 'wx' });
-
-    await finished(Readable.fromWeb(responseBody).pipe(fileStream));
-
-    filepaths.push(`${date}/${destination}`);
-
-    await wait(CONFIG.imageRateLimit);
   }
 
   return filepaths;

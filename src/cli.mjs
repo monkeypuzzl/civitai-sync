@@ -33,25 +33,27 @@ export {
   CONFIG,
   CONFIG_PATH,
   OS,
-  customTheme
+  customTheme,
+  appHeader
 }
 
-function clearTerminal () {
+export async function useConfig (path = CONFIG_PATH) {
+  CONFIG = await getCurrentConfig(path);
+}
+
+export function clearTerminal () {
   process.stdout.write('\x1Bc');
-}
-
-export async function launchCLI (appDirectory) {
-  APP_DIRECTORY = appDirectory;
-  CONFIG = await getCurrentConfig(CONFIG_PATH);
-  clearTerminal();
-  
   console.log(appHeader);
 
   if (CONFIG_PATH !== DEFAULT_CONFIG_PATH) {
     console.log(`  config: ${CONFIG_PATH}\n`);
   }
+}
 
-  await mainMenu();
+export async function launchCLI (appDirectory) {
+  APP_DIRECTORY = appDirectory;
+  await useConfig(CONFIG_PATH);
+  return await mainMenu();
 }
 
 function getCommandLineArgs () {

@@ -28,16 +28,17 @@ function stopListeningForKeyPress (fn) {
 }
 
 
-let aborted;
+let aborted = false;
 
 export async function fetchGenerations ({
   withImages = true,   // download images
   checkImages = false, // refresh broken downloaded images
   latest = false,      // check latest generations
+  oldest = false,      // check oldest generations
   resume = false,      // keep checking for gaps in generations
   overwrite = false,   // overwrite existing generations
-  cursor,              // fetch generations earlier than this generation id 
-  secretKey,           // authentication key
+  cursor = 0,          // fetch generations earlier than this generation id 
+  secretKey = '',      // authentication key
   listeningForKeyPress = true
 } = {}, log = console.log) {
   function onKeyPress (char, key) {
@@ -52,31 +53,61 @@ export async function fetchGenerations ({
     listenForKeyPress(onKeyPress);
   }
 
-  if (!cursor) {
-    latest = true;
+  if (latest) {
+    cursor = undefined;
   }
 
-  if (latest && resume) {
-    const shouldContinue = await fetchGenerations({ withImages, checkImages, resume: false, latest, secretKey, listeningForKeyPress: false }, log);
-
-    if (aborted || !shouldContinue) {
-      return false;
-    }
-
-    return await fetchGenerations({ withImages, checkImages, resume, latest: false, cursor, secretKey, listeningForKeyPress: false }, log);
-  }
-
-  else if (resume && !cursor) {
+  else if (oldest) {
     cursor = await getFirstGenerationId();
   }
 
+  // if (!cursor) {
+  //   latest = true;
+  // }
+
+  // if (latest && resume) {
+    // First fetch latest
+    // return await fetchGenerations({ withImages, checkImages, resume: true, latest, secretKey, listeningForKeyPress: false }, log);
+
+    // if (aborted) {
+    //   return false;
+    // }
+
+    // // Then resume
+    // return await fetchGenerations({ withImages, checkImages, resume, latest: false, cursor, secretKey, listeningForKeyPress: false }, log);
+  // }
+
+  // if (resume && !cursor) {
+    // cursor = await getFirstGenerationId();
+  // }
+
   // TODO: Check if generation matching cursor already exists
   // Fetch only missing generation data
-  // Store API response request ids / nextCursor to keep track
+  // Store API response request ids and nextCursor, to better
+  // navigate the feed and minimise data downloads
 
-  let generationsCount = 0;
-  let imagesCount = 0;
-  let shouldContinue;
+  let shouldContinue = true;
+  let report = { fromDate: '', toDate: '', generationsDownloaded: 0, generationsSaved: 0, imagesSaved: 0 };
+        
+  function reportText ({ esc = true } = {}) {
+    return `\n${report.generationsDownloaded} generations downloaded, ${report.generationsSaved} saved, ${report.imagesSaved} images saved${esc ? '\nPress Esc to stop\n' : ''}`;
+  }
+
+  function logProgress () {
+    if (report.fromDate === report.toDate) {
+      log(`${report.fromDate}. ${reportText()}`);
+    }
+
+    else {
+      log(`${report.fromDate.slice(0, report.fromDate.indexOf('.'))} to ${report.toDate.slice(0, report.toDate.indexOf('.'))} ${reportText()}`);
+    }
+  }
+
+  function progressFn ({ generationsSaved = 0, imagesSaved = 0 }) {
+    report.generationsSaved += generationsSaved;
+    report.imagesSaved += imagesSaved;
+    logProgress();
+  }
 
   try {
     shouldContinue = await getAllRequests(
@@ -96,66 +127,58 @@ export async function fetchGenerations ({
             mainMenu();
             return false;
           }
-        }
 
-        // Save data
-        const items = await saveGenerations(data, { overwrite, checkImages: withImages && checkImages });
-
-        if (aborted) {
+          console.error(data.error.json.data);
           return false;
         }
-        
-        function reportText () {
-          return `\nDownloaded ${generationsCount} generations, ${imagesCount} images\nPress Esc to stop\n`;
+
+        const generations = data.result.data.json.items;
+        generations.forEach(({ createdAt }) => {
+          if (!report.fromDate) {
+            report.fromDate = createdAt; 
+            report.toDate = createdAt;
+          }
+      
+          else {
+            if (createdAt < report.fromDate) {
+              report.fromDate = createdAt;
+            }
+
+            if (createdAt > report.toDate) {
+              report.toDate = createdAt;
+            }
+          }
+        });
+
+        report.generationsDownloaded += generations.length;
+        logProgress();
+
+        // Save data
+        await saveGenerations(data, { overwrite, withImages, checkImages }, progressFn);
+
+        if (aborted) {
+          log(`Download aborted. ${reportText({ esc: true })}`);
+          return false;
         }
 
         // No new items
-        if (!items.length) {
-          // Returning `false` from getAllRequests progress callback exits process
-          log(`Download complete. ${reportText()}`);
+        if (!report.generationsSaved && !report.imagesDownloadedSaved && !resume) {
+          const alreadyUpToDate = report.generationsSaved === 0;
+          log(`Download complete. ${alreadyUpToDate ? 'You are up-to-date. \n' : reportText({ esc: true })}`);
           return false;
+          // Returning `false` from getAllRequests progress callback exits process
         }
 
-        generationsCount += items.length;
-        
-        const dates = items.reduce((dates, { createdAt }) => {
-          if (!dates.fromDate) {
-            dates.fromDate = createdAt; 
-            dates.toDate = createdAt;
-          }
-      
-          if (createdAt > dates.toDate) {
-            dates.toDate = createdAt;
-          }
-
-          return dates;
-        }, { fromDate: null, toDate: null });
-
-        log(`${dates.fromDate.slice(0, dates.fromDate.indexOf('T'))} to ${dates.fromDate.slice(0, dates.toDate.indexOf('T'))}. ${reportText()}`);
-
-        // Save images
-        if (withImages) {
-          for (let item of items) {
-            log(`${item.createdAt.slice(0, item.createdAt.lastIndexOf(':')).replace('T', ' ')} ${reportText()}`);
-            const filepaths = await saveGenerationImages(item, secretKey);
-
-            if (filepaths.length) {
-              imagesCount += filepaths.length;
-            }
-            
-            if (aborted) {
-              return false;
-            }
-          }
-        }
+        return true;
       },
       { secretKey },
-      cursor
+      cursor || undefined
     );
   }
 
-  catch (err) {
-    console.log(chalk.red(`Download error, ${err.message}`));
+  catch (error) {
+    console.log(chalk.red(`Download error, ${error.message}`));
+    console.error(error);
   }
 
   if (listeningForKeyPress) {
@@ -199,16 +222,16 @@ export async function openMediaDirectory () {
   return setDownloadOptions();
 }
 
-export async function countGenerations ({ withImages = false, withMissingImages = false } = {}) {
+export async function countGenerations ({ withImages = true, withMissingImages = false } = {}) {
   const startAt = Date.now();
   let generations = 0;
-  let fromDate;
-  let toDate;
+  let fromDate = '';
+  let toDate = '';
   let imagesCreated = 0;
   let imagesSaved = 0;
   const imagesMissing = [];
 
-  await forEachGeneration(async (item, { date }) => {
+  await forEachGeneration(async (generation, { date }) => {
     generations ++;
 
     if (!fromDate) {
@@ -221,22 +244,26 @@ export async function countGenerations ({ withImages = false, withMissingImages 
     }
 
     if (withImages) {
-      const { images } = item;
+      const { steps } = generation;
 
-      for (let image of images) {
-        const filepath = imageFilepath(date, image.url);
+      for (let step of steps) {
+        for (let image of step.images) {
+          const { seed, url } = image;
+          const filepath = imageFilepath({ date, generationId: generation.id, seed });
+          const legacyFilepath = imageFilepathLegacy({ date, url });
 
-        if (await fileExists(filepath)) {
-          imagesSaved ++;
-          imagesCreated ++;
-        }
+          if (await fileExists(filepath) || await fileExists(legacyFilepath)) {
+            imagesSaved ++;
+            imagesCreated ++;
+          }
 
-        else if (image.available) {
-          imagesCreated ++;
-        }
+          else if (image.available) {
+            imagesCreated ++;
+          }
 
-        else if (withMissingImages) {
-          imagesMissing.push({ generationId: item.id, date, url: image.url });
+          else if (withMissingImages) {
+            imagesMissing.push({ generationId: generation.id, date, url: image.url });
+          }
         }
       }
     }
@@ -256,4 +283,26 @@ export async function countGenerations ({ withImages = false, withMissingImages 
   }
 
   return report;
+}
+
+export async function renameImages () {
+  await forEachGeneration(async (generation, { date }) => {
+    for (let step of generation.steps) {
+      for (let image of step.images) {
+        const { seed, url } = image;
+        const filepath = imageFilepath({ date, generationId: generation.id, seed });
+        const legacyFilepath = imageFilepathLegacy({ date, url });
+
+        if (await fileExists(legacyFilepath)) {
+          if (await fileExists(filepath)) {
+            await fs.promises.unlink(legacyFilepath);
+          }
+
+          else {
+            await fs.promises.rename(legacyFilepath, filepath);
+          }
+        }
+      }
+    }
+  });
 }

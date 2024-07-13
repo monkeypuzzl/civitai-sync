@@ -1,3 +1,8 @@
+// Required header:
+// "Referer": "https://civitai.com" or a path at the domain.
+// API JSON requests, but not images, require authorization:
+// "Authorization": Bearer {API_TOKEN}"
+// Other headers optional.
 export default {
   "sharedHeaders": {
     "accept-language": "",

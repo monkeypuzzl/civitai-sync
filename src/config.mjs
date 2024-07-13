@@ -50,8 +50,8 @@ export async function loadConfig (configPath) {
     return JSON.parse(contents);
   }
 
-  catch (err) {
-    console.error(err);
+  catch (error) {
+    console.error(error);
   }
 }
 
@@ -64,11 +64,11 @@ export async function createConfig (configPath) {
 
 export async function removeConfig (configPath) {
   try {
-    return await fs.unlink(configPath);
+    return await fs.promises.unlink(configPath);
   }
 
-  catch (err) {
-    console.error(err);
+  catch (error) {
+    console.error(error);
   }
 }
 

@@ -3,14 +3,13 @@ import inquirer from 'inquirer';
 import confirm from '@inquirer/confirm';
 import select, { Separator } from '@inquirer/select';
 import { fileExists } from './utils.mjs';
-import { CONFIG, customTheme } from './cli.mjs';
+import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { mainMenu } from './mainMenu.mjs';
 import { getSecretKey } from './keyActions.mjs';
 import { setConfigParam } from './config.mjs';
-import { fetchGenerations, countGenerations, openDataDirectory, openMediaDirectory } from './downloadActions.mjs';
-import { getFirstGenerationId } from './generations.mjs';
+import { fetchGenerations, countGenerations, openDataDirectory, openMediaDirectory, renameImages } from './downloadActions.mjs';
 
-export async function setDownloadOptions () {
+export async function setDownloadOptions (doClearTerminal = true) {
   const choices = [];
 
   const [dataDirExists, mediaDirExists] = await Promise.all([
@@ -55,12 +54,6 @@ export async function setDownloadOptions () {
   if (dataDirExists) {
     choices.push(
       {
-        name: 'Count generations',
-        value: 'count-generations',
-        description: 'Show number of downloaded generations'
-      },
-
-      {
         name: `${!CONFIG.excludeImages && CONFIG.generationsMediaPath === CONFIG.generationsDataPath ? 'Open download directory' : 'Open data directory'}`,
         value: 'open-data-directory',
         description: `Open: "${CONFIG.generationsDataPath}"`,
@@ -74,6 +67,16 @@ export async function setDownloadOptions () {
         name: 'Open media directory',
         value: 'open-media-directory',
         description: `Open: "${CONFIG.generationsMediaPath}"`,
+      }
+    );
+  }
+
+  if (dataDirExists) {
+    choices.push(
+      {
+        name: 'Count generations',
+        value: 'count-generations',
+        description: 'Show number of downloaded generations'
       }
     );
   }
@@ -108,6 +111,10 @@ export async function setDownloadOptions () {
     }
   );
 
+  if (doClearTerminal) {
+    clearTerminal();
+  }
+
   const answer = await select({
     message: 'Download options:',
     choices,
@@ -130,42 +137,38 @@ export async function setDownloadOptions () {
       return setDownloadOptions();
     }
 
+    clearTerminal();
     ui = new inquirer.ui.BottomBar();
 
     try {
-      const cursor = await getFirstGenerationId();
-
-      if (!cursor) {
-        return setDownloadOptions();
-      }
-
-      await fetchGenerations({ secretKey, cursor, withImages: !CONFIG.excludeImages }, txt => ui.updateBottomBar(txt));
+      await fetchGenerations({ secretKey, oldest: true, withImages: !CONFIG.excludeImages }, txt => ui.updateBottomBar(txt));
     }
 
-    catch (err) {
-      console.error(err);
+    catch (error) {
+      console.error(error);
     }
 
-    return setDownloadOptions();
+    return setDownloadOptions(false);
 
     case 'download-missing':
     secretKey = await getSecretKey();
     
     if (!secretKey) {
-      return setDownloadOptions();
+      return setDownloadOptions(false);
     }
 
+    clearTerminal();
     ui = new inquirer.ui.BottomBar();
 
     try {
-      await fetchGenerations({ secretKey, resume: true, overwrite: false, withImages: !CONFIG.excludeImages, checkImages: !CONFIG.excludeImages }, txt => ui.updateBottomBar(txt));
+      await fetchGenerations({ secretKey, resume: true, withImages: !CONFIG.excludeImages, checkImages: !CONFIG.excludeImages }, txt => ui.updateBottomBar(txt));
     }
 
-    catch (err) {
-      console.error(err);
+    catch (error) {
+      console.error(error);
     }
 
-    return setDownloadOptions();
+    return setDownloadOptions(false);
 
     case 'set-data-location':
     return setDataDownloadLocation();
@@ -183,18 +186,20 @@ export async function setDownloadOptions () {
     console.log('Counting...');
     report = await countGenerations({ withImages: !CONFIG.excludeImages });
     
-    if (!report.generations) {
+    if (report.generations) {
+      reportText = `\nThere are ${report.generations} generations downloaded, between ${report.fromDate} and ${report.toDate}`;
+    
+      if (!CONFIG.excludeImages) {
+        reportText += `\n${report.imagesSaved} images are saved.`;
+      }
+      console.log(reportText + '\n');
+    }
+
+    else {
       console.log(`\nThere are no generations downloaded in the data directory.\n`);
     }
-
-    reportText = `\nThere are ${report.generations} generations downloaded, from ${report.fromDate} to ${report.toDate}.`;
     
-    if (!CONFIG.excludeImages) {
-      reportText += `\n${report.imagesSaved} images are saved.`;
-    }
-
-    console.log(reportText + '\n');
-    return setDownloadOptions();
+    return setDownloadOptions(false);
 
     case 'back':
     return mainMenu();

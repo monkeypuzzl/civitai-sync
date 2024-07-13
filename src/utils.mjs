@@ -20,12 +20,12 @@ export async function listDirectory (dir) {
     return files;
   }
 
-  catch (err) {
-    if (err.code === 'ENOENT') {
+  catch (error) {
+    if (error.code === 'ENOENT') {
       return [];
     }
 
-    throw err;
+    throw error;
   }
 }
 
