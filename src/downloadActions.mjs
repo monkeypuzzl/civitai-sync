@@ -5,7 +5,7 @@ import chalk from 'chalk';
 import confirm from '@inquirer/confirm';
 import { fileExists } from './utils.mjs';
 import { APP_DIRECTORY, CONFIG, OS } from './cli.mjs';
-import { forEachGeneration, imageFilepath, getFirstGenerationId, saveGenerations, saveGenerationImages } from './generations.mjs';
+import { forEachGeneration, imageFilepath, imageFilepathLegacy, getFirstGenerationId, saveGenerations, saveGenerationImages } from './generations.mjs';
 import { mainMenu } from './mainMenu.mjs';
 import { requestKey } from './keyActions.mjs';
 import { setDownloadOptions } from './downloadOptionsMenu.mjs';
@@ -61,31 +61,10 @@ export async function fetchGenerations ({
     cursor = await getFirstGenerationId();
   }
 
-  // if (!cursor) {
-  //   latest = true;
-  // }
-
-  // if (latest && resume) {
-    // First fetch latest
-    // return await fetchGenerations({ withImages, checkImages, resume: true, latest, secretKey, listeningForKeyPress: false }, log);
-
-    // if (aborted) {
-    //   return false;
-    // }
-
-    // // Then resume
-    // return await fetchGenerations({ withImages, checkImages, resume, latest: false, cursor, secretKey, listeningForKeyPress: false }, log);
-  // }
-
-  // if (resume && !cursor) {
-    // cursor = await getFirstGenerationId();
-  // }
-
   // TODO: Check if generation matching cursor already exists
   // Fetch only missing generation data
   // Store API response request ids and nextCursor, to better
   // navigate the feed and minimise data downloads
-
   let shouldContinue = true;
   let report = { fromDate: '', toDate: '', generationsDownloaded: 0, generationsSaved: 0, imagesSaved: 0 };
         
@@ -93,13 +72,23 @@ export async function fetchGenerations ({
     return `\n${report.generationsDownloaded} generations downloaded, ${report.generationsSaved} saved, ${report.imagesSaved} images saved${esc ? '\nPress Esc to stop\n' : ''}`;
   }
 
+  function niceDate (dateString = '1970-01-01T00:00:00.000000Z') {
+    const posTime = dateString.indexOf('T');
+    const posSeconds = dateString.lastIndexOf(':');
+    
+    return `${dateString.slice(0, posTime)} ${dateString.slice(posTime + 1, posSeconds)}`;
+  }
+
   function logProgress () {
+    const fromDateDisplay = niceDate(report.fromDate);
+    const toDateDisplay = niceDate(report.toDate);
+
     if (report.fromDate === report.toDate) {
-      log(`${report.fromDate}. ${reportText()}`);
+      log(`${fromDateDisplay}. ${reportText()}`);
     }
 
     else {
-      log(`${report.fromDate.slice(0, report.fromDate.indexOf('.'))} to ${report.toDate.slice(0, report.toDate.indexOf('.'))} ${reportText()}`);
+      log(`Downloading from ${fromDateDisplay} to ${toDateDisplay} ${reportText()}`);
     }
   }
 
@@ -161,15 +150,15 @@ export async function fetchGenerations ({
           return false;
         }
 
-        // No new items
-        if (!report.generationsSaved && !report.imagesDownloadedSaved && !resume) {
-          const alreadyUpToDate = report.generationsSaved === 0;
-          log(`Download complete. ${alreadyUpToDate ? 'You are up-to-date. \n' : reportText({ esc: true })}`);
-          return false;
-          // Returning `false` from getAllRequests progress callback exits process
+        // Continue download
+        if (report.generationsSaved > 0 || report.imagesSaved > 0 || resume || oldest) {
+          return true;
         }
 
-        return true;
+        const alreadyUpToDate = report.generationsSaved === 0;
+        
+        log(`Download complete. ${alreadyUpToDate ? 'You are up-to-date. \n' : reportText({ esc: true })}`);
+        return false; // Returning `false` from getAllRequests progress callback exits loop
       },
       { secretKey },
       cursor || undefined
