@@ -30,7 +30,7 @@ export function generationFilepath ({ id = 0, createdAt = '' }) {
   return filepath;
 }
 
-export function imageFilepathLegacy ({ date = '', url = '' }) {
+export function imageFilepathWithId ({ date = '', url = '' }) {
   const filename = filenameFromURL(url, 'jpeg');
   const mediaDirectory = `${CONFIG.generationsMediaPath}/${date}`;
   const filepath = path.resolve(mediaDirectory, filename);
@@ -53,18 +53,20 @@ export async function getGenerationDates () {
   return dates;
 }
 
-export async function getGenerationIdsByDate (date = '') {
+export async function getGenerationIdsByDate (date = '', includeLegacy = false) {
+  const LEGACY_GENERATION_ID_LENGTH = 8 + '.json'.length;
   const filenames = await listDirectory(`${CONFIG.generationsDataPath}/${date}`);
   const ids = filenames
-    .filter(f => f.endsWith('.json'))  
+    .filter(f => f.endsWith('.json'))
+    .filter(f => includeLegacy ? true : f.length > LEGACY_GENERATION_ID_LENGTH)
     .map(f => f.slice(0, f.lastIndexOf('.json')));
 
   return ids;
 } 
 
-export async function getFirstGenerationId () {
+export async function getFirstGenerationId (includeLegacy = false) {
   const dates = await getGenerationDates();
-  const ids = await getGenerationIdsByDate(dates[0]);
+  const ids = await getGenerationIdsByDate(dates[0], includeLegacy);
 
   return ids[0];
 }
@@ -214,20 +216,19 @@ export async function saveGenerationImages (generation, { overwrite = false }) {
     for (let image of step.images) {
       const { seed, url } = image;
       const filepath = imageFilepath({ date, generationId: generation.id, seed });
-      const legacyFilepath = imageFilepathLegacy({ date, url });
+      const filepathWithId = imageFilepathWithId({ date, url });
 
-      // TODO: Use image.available and re-cache if needed,
-      // and check byte size to see if it needs
-      // overwriting, e.g. partial download
       if (await fileExists(filepath)) {
         if (overwrite) {
           await fs.promises.unlink(filepath);
         }
 
+        // TODO: Use image.available and re-cache if needed,
+        // and check byte size to see if it needs
+        // overwriting, e.g. partial download
+      
         // const fileSize = (await fs.promises.stat(filepath)).size;
         // const isBrokenImage = fileSize < BROKEN_IMAGE_MAX_SIZE;
-
-        // console.log('image broke', { fileSize, isBrokenImage });
 
         // if (isBrokenImage) {
         //   await fs.promises.unlink(filepath);
@@ -239,15 +240,14 @@ export async function saveGenerationImages (generation, { overwrite = false }) {
       }
 
       else {
-        if (await fileExists(legacyFilepath)) {
-          await fs.promises.rename(legacyFilepath, filepath);
+        if (await fileExists(filepathWithId)) {
+          await fs.promises.rename(filepathWithId, filepath);
           continue;
         }
       }
 
       const responseBody = await fetchCivitaiImage(image.url);
 
-      // TODO: Re-attempt download
       if (!responseBody) {
         // console.error('No response for image', image.url);
         continue;

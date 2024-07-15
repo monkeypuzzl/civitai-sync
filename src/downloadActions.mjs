@@ -5,7 +5,7 @@ import chalk from 'chalk';
 import confirm from '@inquirer/confirm';
 import { fileExists } from './utils.mjs';
 import { APP_DIRECTORY, CONFIG, OS } from './cli.mjs';
-import { forEachGeneration, imageFilepath, imageFilepathLegacy, getFirstGenerationId, saveGenerations, saveGenerationImages } from './generations.mjs';
+import { forEachGeneration, imageFilepath, imageFilepathWithId, getFirstGenerationId, saveGenerations, saveGenerationImages } from './generations.mjs';
 import { mainMenu } from './mainMenu.mjs';
 import { requestKey } from './keyActions.mjs';
 import { setDownloadOptions } from './downloadOptionsMenu.mjs';
@@ -233,15 +233,19 @@ export async function countGenerations ({ withImages = true, withMissingImages =
     }
 
     if (withImages) {
-      const { steps } = generation;
+      let { steps } = generation;
+
+      if (!steps) {
+        steps = [{ images: generation.images }];
+      }
 
       for (let step of steps) {
         for (let image of step.images) {
           const { seed, url } = image;
           const filepath = imageFilepath({ date, generationId: generation.id, seed });
-          const legacyFilepath = imageFilepathLegacy({ date, url });
+          const filepathWithId = imageFilepathWithId({ date, url });
 
-          if (await fileExists(filepath) || await fileExists(legacyFilepath)) {
+          if (await fileExists(filepath) || await fileExists(filepathWithId)) {
             imagesSaved ++;
             imagesCreated ++;
           }
@@ -280,7 +284,7 @@ export async function renameImages () {
       for (let image of step.images) {
         const { seed, url } = image;
         const filepath = imageFilepath({ date, generationId: generation.id, seed });
-        const legacyFilepath = imageFilepathLegacy({ date, url });
+        const legacyFilepath = imageFilepathWithId({ date, url });
 
         if (await fileExists(legacyFilepath)) {
           if (await fileExists(filepath)) {

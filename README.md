@@ -1,13 +1,13 @@
 # civitai-sync
 
-A tool to download your onsite Civitai generations in one go. It downloads every image in your generation feed, and also saves the generation data so that prompts can be searched as text.
+civitai-sync is a computer-based tool to download your Civitai onsite generations, and to keep downloading in future when you create more.
 
-Everything is saved in date-ordered folders. You can re-run it after you have generated more, and it will only download your latest.
+It downloads each image in your generation feed, and saves the generation data so that prompts can be searched as text. Everything is saved in date-ordered folders. Images are named to be in chronological order.
 
 Tool page, for full details:
 https://civitai.com/models/526058
 
-The original article on the downloader, with discussion:
+Check the newest discussion on the article about the tool:
 https://civitai.com/articles/5676
 
 
@@ -21,7 +21,7 @@ Install [Node.js](https://nodejs.org)
 If you already have Node, it needs version 18 or above.
 
 Download the zip archive of the program from the tool page.  
-Or download/checkout the repository.
+Or download/clone the repository.
 
 On Windows, you can double-click the `install_win` file to install, or continue...
 
@@ -71,3 +71,12 @@ It is recommended to change the download location to a folder outside of the pro
 
 Select "Download options" > "Data download location"  
 And "Download options" > "Media download location"
+
+## Migrate from v2
+If you have already downloaded your generations with v2:
+
+- Rename your existing "generations/data" folder to something like "generations/data.old"
+- Download the latest program file and unzip it
+- Move your existing "config" and "generations" folder into the new version program folder
+
+When you next use "Download generations", all the data files will be downloaded again. Already downloaded images will not need to be re-downloaded; they will be renamed to be in chronological order.
