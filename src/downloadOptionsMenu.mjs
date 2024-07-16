@@ -7,7 +7,7 @@ import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { mainMenu } from './mainMenu.mjs';
 import { getSecretKey } from './keyActions.mjs';
 import { setConfigParam } from './config.mjs';
-import { fetchGenerations, countGenerations, openDataDirectory, openMediaDirectory, renameImages } from './downloadActions.mjs';
+import { fetchGenerations, countGenerations, openDataDirectory, openMediaDirectory } from './downloadActions.mjs';
 
 export async function setDownloadOptions (doClearTerminal = true) {
   const choices = [];
@@ -115,6 +115,10 @@ export async function setDownloadOptions (doClearTerminal = true) {
     clearTerminal();
   }
 
+  else {
+    console.log('\n');
+  }
+
   const answer = await select({
     message: 'Download options:',
     choices,
@@ -187,16 +191,17 @@ export async function setDownloadOptions (doClearTerminal = true) {
     report = await countGenerations({ withImages: !CONFIG.excludeImages });
     
     if (report.generations) {
-      reportText = `\nThere are ${report.generations} generations downloaded, between ${report.fromDate} and ${report.toDate}`;
+      reportText = `\nThere are ${report.generations} generations downloaded, between ${report.fromDate} and ${report.toDate}.`;
     
       if (!CONFIG.excludeImages) {
         reportText += `\n${report.imagesSaved} images are saved.`;
       }
-      console.log(reportText + '\n');
+
+      console.log(reportText);
     }
 
     else {
-      console.log(`\nThere are no generations downloaded in the data directory.\n`);
+      console.log(`\nThere are no generations downloaded in the data directory.`);
     }
     
     return setDownloadOptions(false);
@@ -221,6 +226,7 @@ async function setDataDownloadLocation () {
 
   if (newPath) {
     await setConfigParam('generationsDataPath', newPath);
+    
     console.log(chalk.green(`Data location changed to ${newPath}\n${newPath === CONFIG.generationsMediaPath ? chalk.hex('#FFA500')('(Media will download into the same directory as data)\n') : ''}`));
 
     const answer = await confirm({ message: `Also change the MEDIA location, currently: ${CONFIG.generationsMediaPath}?`, default: false });

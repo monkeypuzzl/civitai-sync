@@ -1,4 +1,4 @@
-/*eslint no-unused-vars: ["error", { "ignoreRestSiblings": true }]*/
+/*eslint no-unused-vars: "error"*/
 
 import fs from 'node:fs';
 import { Readable } from 'node:stream';
@@ -66,9 +66,28 @@ export async function getGenerationIdsByDate (date = '', includeLegacy = false) 
 
 export async function getFirstGenerationId (includeLegacy = false) {
   const dates = await getGenerationDates();
-  const ids = await getGenerationIdsByDate(dates[0], includeLegacy);
 
-  return ids[0];
+  if (!dates.length) {
+    return undefined;
+  }
+
+  const ids = await getGenerationIdsByDate(dates[0], includeLegacy);
+  
+  if (ids.length) {
+    return ids[0];
+  }
+
+  // Find oldest generation
+  // E.g. in data folder of mixed legacy API and new API generations.
+  for (let date of dates) {
+    const ids = await getGenerationIdsByDate(date, false);
+
+    if (ids.length) {
+      return ids[0];
+    }
+  }
+
+  return undefined;
 }
 
 export async function getGeneration (date = '', id) {
@@ -91,12 +110,12 @@ export async function getGeneration (date = '', id) {
   }
 }
 
-export async function forEachGeneration (fn) {
+export async function forEachGeneration (fn, includeLegacy = false) {
   try {
     const dates = await getGenerationDates();
 
     for (let date of dates) {
-      const ids = await getGenerationIdsByDate(date);
+      const ids = await getGenerationIdsByDate(date, includeLegacy);
 
       for (let id of ids) {
         const generation = await getGeneration(date, id);
@@ -151,7 +170,7 @@ export async function saveGenerations (apiGenerationsResponse, {
   progressFn = () => {}
 ) {
   const { result, error } = apiGenerationsResponse;
-  const report = { generationsDownloaded: 0, generationsSaved: 0, imagesSaved: 0 };
+  const report = { generationsDownloaded: 0, generationsSaved: 0, imagesSaved: 0, error: null };
 
   if (error) {
     console.log('Error in generation data', error.json);
@@ -183,8 +202,8 @@ export async function saveGenerations (apiGenerationsResponse, {
       const success = await saveGeneration(generation, { overwrite });
 
       if (!success) {
-        console.error('Could not save generation');
-        return;
+        report.error = 'Could not save generation';
+        return report;
       }
 
       report.generationsSaved ++;
@@ -202,6 +221,15 @@ export async function saveGenerations (apiGenerationsResponse, {
   return report;
 }
 
+export function getGenerationImages (generation) {
+  // Old API
+  if ('images' in generation) {
+    return generation.images;
+  }
+
+  return generation.steps.map(step => step.images).flat(); 
+}
+
 export async function saveGenerationImages (generation, { overwrite = false }) {
   const date = toDateString(generation.createdAt);
   const mediaDirectory = `${CONFIG.generationsMediaPath}/${date}`;
@@ -211,57 +239,87 @@ export async function saveGenerationImages (generation, { overwrite = false }) {
   }
 
   const filepaths = [];
+  const images = getGenerationImages(generation);
   
-  for (let step of generation.steps) {
-    for (let image of step.images) {
+  for (let image of images) {
+    const { seed, url } = image;
+    const filepath = imageFilepath({ date, generationId: generation.id, seed });
+    const filepathWithId = imageFilepathWithId({ date, url });
+
+    if (await fileExists(filepath)) {
+      if (overwrite) {
+        await fs.promises.unlink(filepath);
+      }
+
+      // TODO: Use image.available and re-cache if needed,
+      // and check byte size to see if it needs
+      // overwriting, e.g. partial download
+    
+      // const fileSize = (await fs.promises.stat(filepath)).size;
+      // const isBrokenImage = fileSize < BROKEN_IMAGE_MAX_SIZE;
+
+      // if (isBrokenImage) {
+      //   await fs.promises.unlink(filepath);
+      // }
+
+      else {
+        continue;
+      }
+    }
+
+    else {
+      if (await fileExists(filepathWithId)) {
+        await fs.promises.rename(filepathWithId, filepath);
+        continue;
+      }
+    }
+
+    const responseBody = await fetchCivitaiImage(image.url);
+
+    if (!responseBody) {
+      // console.error('No response for image', image.url);
+      continue;
+    }
+
+    const fileStream = fs.createWriteStream(filepath, { flags: 'wx' });
+
+    await finished(Readable.fromWeb(responseBody).pipe(fileStream));
+
+    filepaths.push(`${date}/${filepath}`);
+
+    await wait(CONFIG.imageRateLimit);
+  }
+
+  return filepaths;
+}
+
+export async function renameImages (chronological = true) {
+  await forEachGeneration(async (generation, { date }) => {
+    const images = getGenerationImages(generation);
+    
+    for (let image of images) {
       const { seed, url } = image;
       const filepath = imageFilepath({ date, generationId: generation.id, seed });
-      const filepathWithId = imageFilepathWithId({ date, url });
+      const legacyFilepath = imageFilepathWithId({ date, url });
 
-      if (await fileExists(filepath)) {
-        if (overwrite) {
-          await fs.promises.unlink(filepath);
-        }
+      if (chronological) {
+        if (await fileExists(legacyFilepath)) {
+          // Duplicate images
+          // if (await fileExists(filepath)) {
+          //   await fs.promises.unlink(legacyFilepath);
+          // }
 
-        // TODO: Use image.available and re-cache if needed,
-        // and check byte size to see if it needs
-        // overwriting, e.g. partial download
-      
-        // const fileSize = (await fs.promises.stat(filepath)).size;
-        // const isBrokenImage = fileSize < BROKEN_IMAGE_MAX_SIZE;
-
-        // if (isBrokenImage) {
-        //   await fs.promises.unlink(filepath);
-        // }
-
-        else {
-          continue;
+          // else {
+            await fs.promises.rename(legacyFilepath, filepath);
+          // }
         }
       }
 
       else {
-        if (await fileExists(filepathWithId)) {
-          await fs.promises.rename(filepathWithId, filepath);
-          continue;
+        if (await fileExists(filepath)) {
+          await fs.promises.rename(filepath, legacyFilepath);
         }
       }
-
-      const responseBody = await fetchCivitaiImage(image.url);
-
-      if (!responseBody) {
-        // console.error('No response for image', image.url);
-        continue;
-      }
-
-      const fileStream = fs.createWriteStream(filepath, { flags: 'wx' });
-
-      await finished(Readable.fromWeb(responseBody).pipe(fileStream));
-
-      filepaths.push(`${date}/${filepath}`);
-
-      await wait(CONFIG.imageRateLimit);
     }
-  }
-
-  return filepaths;
+  });
 }

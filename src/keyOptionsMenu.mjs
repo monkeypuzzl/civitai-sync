@@ -68,8 +68,6 @@ export async function keyOptions (message) {
 
     result = await testKey(secretKey);
 
-    let message = '';
-
     if (result.success) {
       message = chalk.green(`Test API key: Your API key works.`);
     }

@@ -5,7 +5,7 @@ import chalk from 'chalk';
 import confirm from '@inquirer/confirm';
 import { fileExists } from './utils.mjs';
 import { APP_DIRECTORY, CONFIG, OS } from './cli.mjs';
-import { forEachGeneration, imageFilepath, imageFilepathWithId, getFirstGenerationId, saveGenerations, saveGenerationImages } from './generations.mjs';
+import { forEachGeneration, imageFilepath, imageFilepathWithId, getFirstGenerationId, saveGenerations, getGenerationImages } from './generations.mjs';
 import { mainMenu } from './mainMenu.mjs';
 import { requestKey } from './keyActions.mjs';
 import { setDownloadOptions } from './downloadOptionsMenu.mjs';
@@ -117,7 +117,15 @@ export async function fetchGenerations ({
             return false;
           }
 
-          console.error(data.error.json.data);
+          try {
+            log(chalk.red(data.error.json.message));
+          }
+
+          catch (error) {
+            console.error(error.message, JSON.stringify(data, null, 2));
+            log('Download error');
+          }
+
           return false;
         }
 
@@ -143,10 +151,15 @@ export async function fetchGenerations ({
         logProgress();
 
         // Save data
-        await saveGenerations(data, { overwrite, withImages, checkImages }, progressFn);
+        const result = await saveGenerations(data, { overwrite, withImages, checkImages }, progressFn);
 
         if (aborted) {
           log(`Download aborted. ${reportText({ esc: true })}`);
+          return false;
+        }
+
+        if (result.error) {
+          log(`Error. ${result.error}`);
           return false;
         }
 
@@ -157,7 +170,7 @@ export async function fetchGenerations ({
 
         const alreadyUpToDate = report.generationsSaved === 0;
         
-        log(`Download complete. ${alreadyUpToDate ? 'You are up-to-date. \n' : reportText({ esc: true })}`);
+        log(`Download complete. ${alreadyUpToDate ? 'You are up-to-date.' : reportText({ esc: false })}`);
         return false; // Returning `false` from getAllRequests progress callback exits loop
       },
       { secretKey },
@@ -211,7 +224,7 @@ export async function openMediaDirectory () {
   return setDownloadOptions();
 }
 
-export async function countGenerations ({ withImages = true, withMissingImages = false } = {}) {
+export async function countGenerations ({ withImages = true, withMissingImages = false, includeLegacy = true } = {}) {
   const startAt = Date.now();
   let generations = 0;
   let fromDate = '';
@@ -233,34 +246,28 @@ export async function countGenerations ({ withImages = true, withMissingImages =
     }
 
     if (withImages) {
-      let { steps } = generation;
+      const images = getGenerationImages(generation);
 
-      if (!steps) {
-        steps = [{ images: generation.images }];
-      }
+      for (let image of images) {
+        const { seed, url } = image;
+        const filepath = imageFilepath({ date, generationId: generation.id, seed });
+        const filepathWithId = imageFilepathWithId({ date, url });
 
-      for (let step of steps) {
-        for (let image of step.images) {
-          const { seed, url } = image;
-          const filepath = imageFilepath({ date, generationId: generation.id, seed });
-          const filepathWithId = imageFilepathWithId({ date, url });
+        if (await fileExists(filepath) || await fileExists(filepathWithId)) {
+          imagesSaved ++;
+          imagesCreated ++;
+        }
 
-          if (await fileExists(filepath) || await fileExists(filepathWithId)) {
-            imagesSaved ++;
-            imagesCreated ++;
-          }
+        else if (image.available) {
+          imagesCreated ++;
+        }
 
-          else if (image.available) {
-            imagesCreated ++;
-          }
-
-          else if (withMissingImages) {
-            imagesMissing.push({ generationId: generation.id, date, url: image.url });
-          }
+        else if (withMissingImages) {
+          imagesMissing.push({ generationId: generation.id, date, url: image.url });
         }
       }
     }
-  });
+  }, includeLegacy);
 
   const elapsed = Date.now() - startAt;
 
@@ -278,24 +285,3 @@ export async function countGenerations ({ withImages = true, withMissingImages =
   return report;
 }
 
-export async function renameImages () {
-  await forEachGeneration(async (generation, { date }) => {
-    for (let step of generation.steps) {
-      for (let image of step.images) {
-        const { seed, url } = image;
-        const filepath = imageFilepath({ date, generationId: generation.id, seed });
-        const legacyFilepath = imageFilepathWithId({ date, url });
-
-        if (await fileExists(legacyFilepath)) {
-          if (await fileExists(filepath)) {
-            await fs.promises.unlink(legacyFilepath);
-          }
-
-          else {
-            await fs.promises.rename(legacyFilepath, filepath);
-          }
-        }
-      }
-    }
-  });
-}

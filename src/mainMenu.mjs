@@ -61,6 +61,10 @@ export async function mainMenu (doClearTerminal = true) {
     clearTerminal();
   }
 
+  else {
+    console.log('\n');
+  }
+
   const answer = await select({
     message: 'Please select:',
     choices,

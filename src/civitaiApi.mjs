@@ -2,8 +2,8 @@ import { wait } from './utils.mjs';
 import headers from './headers.mjs';
 
 const API_GET_REQUESTS = 'https://civitai.com/api/trpc/orchestrator.queryGeneratedImages';
-// const API_GET_REQUESTS = 'https://civitai.com/api/trpc/generation.getRequests';
-const dataRateLimit = 1000;
+const DATA_RATE_LIMIT = 1000;
+const MAX_ATTEMPTS = 10;
 
 function getGenerationsUrl (cursor) {
   const inputParams = { json: { authed: true, cursor } };
@@ -13,8 +13,7 @@ function getGenerationsUrl (cursor) {
   return url;
 }
 
-function errorResponse ({ httpStatus = 0, path = '' }) {
-  let message = '';
+function errorResponse ({ httpStatus = 0, path = '', message = '' }) {
   let code = '';
 
   switch (httpStatus) {
@@ -46,30 +45,38 @@ export async function getGenerations (cursor, { secretKey }) {
     headers: { ...headers.sharedHeaders, ...headers.jsonHeaders, Authorization: `Bearer ${secretKey}` }
   });
 
-  let data;
-
   try {
-    data = await response.json();
+    const data = await response.json();
+    return data;
   }
 
   catch (error) {
     return errorResponse({
       httpStatus: 500,
-      path: 'generation.getRequests'
+      path: 'orchestrator.queryGeneratedImages',
+      message: error.message
     });
   }
-
-  return data;
 }
 
-export async function getAllRequests (progressFn, options, cursor, _previousCursor) {
+export async function getAllRequests (progressFn, options, cursor, _previousCursor, _attempts = 0) {
   // First generation reached
   if (cursor && cursor === _previousCursor) {
     return false;
   }
 
   const data = await getGenerations(cursor, options);
-  const progressResult =  await progressFn(data);
+
+  if ('error' in data) {
+    if (data.error.json.data.httpStatus === 500) {
+      if (_attempts < MAX_ATTEMPTS) {
+        await wait(1000);
+        return await getAllRequests(progressFn, options, cursor, _previousCursor, _attempts + 1);
+      }
+    }
+  }
+
+  const progressResult = await progressFn(data);
 
   // Progress callback returned `false`, exit
   if (progressResult === false) {
@@ -79,7 +86,7 @@ export async function getAllRequests (progressFn, options, cursor, _previousCurs
   const nextCursor = data.result.data.json.nextCursor;
   
   if (nextCursor) {
-    await wait(dataRateLimit);
+    await wait(DATA_RATE_LIMIT);
     return await getAllRequests(progressFn, options, nextCursor, cursor);
   }
 
