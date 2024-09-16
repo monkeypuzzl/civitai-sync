@@ -8,6 +8,7 @@ import { mainMenu } from './mainMenu.mjs';
 import { getSecretKey } from './keyActions.mjs';
 import { setConfigParam } from './config.mjs';
 import { fetchGenerations, countGenerations, openDataDirectory, openMediaDirectory } from './downloadActions.mjs';
+import { renameAllGenerationImages } from './generations.mjs';
 
 export async function setDownloadOptions (doClearTerminal = true) {
   const choices = [];
@@ -102,6 +103,12 @@ export async function setDownloadOptions (doClearTerminal = true) {
   }
 
   choices.push(
+    {
+      name: `Update media filenames`,
+      value: 'update-media-filenames',
+      description: `Update filenames to latest naming format`,
+    },
+
     new Separator(),
 
     {
@@ -204,6 +211,19 @@ export async function setDownloadOptions (doClearTerminal = true) {
       console.log(`\nThere are no generations downloaded in the data directory.`);
     }
     
+    return setDownloadOptions(false);
+
+    case 'update-media-filenames':
+    console.log('Renaming...');
+    report = await renameAllGenerationImages();
+    
+    if (report) {
+      console.log(`${report} files renamed`);
+    }
+
+    else {
+      console.log(`No files renamed`);
+    }
     return setDownloadOptions(false);
 
     case 'back':

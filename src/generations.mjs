@@ -12,17 +12,6 @@ import { fetchCivitaiImage } from './civitaiApi.mjs';
 
 // const BROKEN_IMAGE_MAX_SIZE = 1024 * 100;
 
-export function filenameFromURL (url = '', defaultExtension = '') {
-  const { pathname } = new URL(url);
-  let filename = pathname.slice(pathname.lastIndexOf('/') + 1);
-
-  if (defaultExtension && !filename.includes('.')) {
-    filename += `.${defaultExtension}`;
-  }
-
-  return filename;
-}
-
 export function generationFilepath ({ id = 0, createdAt = '' }) {
   const date = toDateString(createdAt);
   const filepath = `${CONFIG.generationsDataPath}/${date}/${id}.json`;
@@ -30,16 +19,18 @@ export function generationFilepath ({ id = 0, createdAt = '' }) {
   return filepath;
 }
 
-export function imageFilepathWithId ({ date = '', url = '' }) {
-  const filename = filenameFromURL(url, 'jpeg');
+export function legacyImageFilepaths ({ date = '', generationId = '', imageId = '', seed = 0 }) {
+  const filename1 = `${imageId}.jpeg`;
+  const filename2 = `${generationId}_${String(seed)}.jpeg`;
   const mediaDirectory = `${CONFIG.generationsMediaPath}/${date}`;
-  const filepath = path.resolve(mediaDirectory, filename);
+  const filepath1 = path.resolve(mediaDirectory, filename1);
+  const filepath2 = path.resolve(mediaDirectory, filename2);
 
-  return filepath;
+  return [ filepath1, filepath2 ];
 }
 
-export function imageFilepath ({ date = '', generationId = '', seed = 0 }) {
-  const filename = `${generationId}_${String(seed)}.jpeg`;
+export function imageFilepath ({ date = '', generationId = '', imageId = '', seed = 0 }) {
+  const filename = `${generationId}_${String(seed)}_${imageId}.jpeg`;
   const mediaDirectory = `${CONFIG.generationsMediaPath}/${date}`;
   const filepath = path.resolve(mediaDirectory, filename);
 
@@ -242,13 +233,18 @@ export async function saveGenerationImages (generation, { overwrite = false }) {
   const images = getGenerationImages(generation);
   
   for (let image of images) {
-    const { seed, url } = image;
-    const filepath = imageFilepath({ date, generationId: generation.id, seed });
-    const filepathWithId = imageFilepathWithId({ date, url });
+    const { id, seed } = image;
+    const imageInfo = { date, generationId: generation.id, imageId: id, seed };
+    const filepath = imageFilepath(imageInfo);
+    const legacyFilepaths = legacyImageFilepaths(imageInfo);
 
     if (await fileExists(filepath)) {
       if (overwrite) {
         await fs.promises.unlink(filepath);
+      }
+
+      else {
+        continue;
       }
 
       // TODO: Use image.available and re-cache if needed,
@@ -261,16 +257,14 @@ export async function saveGenerationImages (generation, { overwrite = false }) {
       // if (isBrokenImage) {
       //   await fs.promises.unlink(filepath);
       // }
-
-      else {
-        continue;
-      }
     }
 
     else {
-      if (await fileExists(filepathWithId)) {
-        await fs.promises.rename(filepathWithId, filepath);
-        continue;
+      for (let legacyFilepath of legacyFilepaths) {
+        if (await fileExists(legacyFilepath)) {
+          await fs.promises.rename(legacyFilepath, filepath);
+          continue;
+        }
       }
     }
 
@@ -293,33 +287,49 @@ export async function saveGenerationImages (generation, { overwrite = false }) {
   return filepaths;
 }
 
-export async function renameImages (chronological = true) {
-  await forEachGeneration(async (generation, { date }) => {
-    const images = getGenerationImages(generation);
-    
-    for (let image of images) {
-      const { seed, url } = image;
-      const filepath = imageFilepath({ date, generationId: generation.id, seed });
-      const legacyFilepath = imageFilepathWithId({ date, url });
+export async function renameGenerationImages (generation) {
+  const date = toDateString(generation.createdAt);
+  const mediaDirectory = `${CONFIG.generationsMediaPath}/${date}`;
 
-      if (chronological) {
+  if (!(await fileExists(mediaDirectory))) {
+    return;
+  }
+
+  const images = getGenerationImages(generation);
+  let renamedCount = 0;
+  
+  for (let image of images) {
+    const { id, seed } = image;
+    const imageInfo = { date, generationId: generation.id, imageId: id, seed };
+    const filepath = imageFilepath(imageInfo);
+
+    if (await fileExists(filepath)) {
+      continue;
+    }
+
+    else {
+      const legacyFilepaths = legacyImageFilepaths(imageInfo);
+
+      for (let legacyFilepath of legacyFilepaths) {
         if (await fileExists(legacyFilepath)) {
-          // Duplicate images
-          // if (await fileExists(filepath)) {
-          //   await fs.promises.unlink(legacyFilepath);
-          // }
-
-          // else {
-            await fs.promises.rename(legacyFilepath, filepath);
-          // }
-        }
-      }
-
-      else {
-        if (await fileExists(filepath)) {
-          await fs.promises.rename(filepath, legacyFilepath);
+          await fs.promises.rename(legacyFilepath, filepath);
+          renamedCount ++;
+          continue;
         }
       }
     }
+  }
+
+  return renamedCount;
+}
+
+export async function renameAllGenerationImages () {
+  let totalRenamedCount = 0;
+
+  await forEachGeneration(async (generation) => {
+    const renamedCount = await renameGenerationImages(generation);
+    totalRenamedCount += renamedCount;
   });
+
+  return totalRenamedCount;
 }

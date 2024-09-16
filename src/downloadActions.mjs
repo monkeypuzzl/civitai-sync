@@ -5,7 +5,7 @@ import chalk from 'chalk';
 import confirm from '@inquirer/confirm';
 import { fileExists } from './utils.mjs';
 import { APP_DIRECTORY, CONFIG, OS } from './cli.mjs';
-import { forEachGeneration, imageFilepath, imageFilepathWithId, getFirstGenerationId, saveGenerations, getGenerationImages } from './generations.mjs';
+import { forEachGeneration, imageFilepath, legacyImageFilepaths, getFirstGenerationId, saveGenerations, getGenerationImages } from './generations.mjs';
 import { mainMenu } from './mainMenu.mjs';
 import { requestKey } from './keyActions.mjs';
 import { setDownloadOptions } from './downloadOptionsMenu.mjs';
@@ -164,7 +164,7 @@ export async function fetchGenerations ({
         }
 
         // Continue download
-        if (report.generationsSaved > 0 || report.imagesSaved > 0 || resume || oldest) {
+        if (result.generationsSaved > 0 || result.imagesSaved > 0 || resume || oldest) {
           return true;
         }
 
@@ -179,6 +179,7 @@ export async function fetchGenerations ({
   }
 
   catch (error) {
+    console.error(error);
     console.log(chalk.red(`Download error, ${error.message}`));
     console.error(error);
   }
@@ -249,21 +250,32 @@ export async function countGenerations ({ withImages = true, withMissingImages =
       const images = getGenerationImages(generation);
 
       for (let image of images) {
-        const { seed, url } = image;
-        const filepath = imageFilepath({ date, generationId: generation.id, seed });
-        const filepathWithId = imageFilepathWithId({ date, url });
+        const { id, seed } = image;
+        const imageInfo = { date, generationId: generation.id, imageId: id, seed };
+        const filepath = imageFilepath(imageInfo);
+        const legacyFilepaths = legacyImageFilepaths(imageInfo);
 
-        if (await fileExists(filepath) || await fileExists(filepathWithId)) {
+        if (await fileExists(filepath)) {
           imagesSaved ++;
           imagesCreated ++;
         }
+        
+        else {
+          for (let legacyFilepath of legacyFilepaths) {
+            if (await fileExists(legacyFilepath)) {
+              imagesSaved ++;
+              imagesCreated ++;
+              return;
+            }
+          }
 
-        else if (image.available) {
-          imagesCreated ++;
-        }
+          if (image.available) {
+            imagesCreated ++;
+          }
 
-        else if (withMissingImages) {
-          imagesMissing.push({ generationId: generation.id, date, url: image.url });
+          else if (withMissingImages) {
+            imagesMissing.push({ generationId: generation.id, date, url: image.url });
+          }
         }
       }
     }
