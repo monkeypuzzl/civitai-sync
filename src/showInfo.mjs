@@ -4,45 +4,37 @@ import { customTheme } from './cli.mjs';
 import { mainMenu } from './mainMenu.mjs';
 
 export async function showInfo () {
-  console.log(`${chalk.bold('civitai-sync')} downloads your Civitai onsite generations
-to your computer.
+  console.log(`${chalk.bold('civitai-sync')} downloads your Civitai creations.
 
-${chalk.bold('Tool page')} for details:  
+${chalk.bold('Model page')}:
 https://civitai.com/models/526058
+
+${chalk.bold('Discussion page')} for ideas, issues, newest comments:  
+https://civitai.com/articles/5676
 
 ${chalk.bold('Create API key')}:
 https://civitai.com/user/account
 
 ${chalk.bold('Download generations')}
-Downloads are saved inside the program folder in "generations".
-Change the location in "${chalk.bold('Download options')}".
+Data and media is saved inside the program folder in "generations".
 
-${chalk.bold('Download only data')}
-For just the data files with prompts and parameters:
-Select "${chalk.bold('Download options')}" > "${chalk.bold('Change download type to: only data')}".
-
-${chalk.bold('Download problems?')}
-Resume downloading oldest generations after an interruption:
-Choose "${chalk.bold('Download options')}" > "${chalk.bold('Download oldest')}".
-
-Fill gaps in your downloads:
-Choose "${chalk.bold('Download options')}" > "${chalk.bold('Download missing')}".
+Change the download directory, choose to download all or favorite generations,
+or only data, in "${chalk.bold('Download generations')}" > "${chalk.bold('Options')}".
 
 ${chalk.bold('Multiple accounts')}
-You can run the CLI without specifying an account name:
+The program is normally run as:
 
   ${chalk.bold.italic('npm run cli')}
 
 This saves a config file at "config/default.json".
+To download from an alternative account, specify a unique name for it:
 
-To use another account, specify a unique name and path
-for the config file:
+  ${chalk.bold.italic('npm run cli bob')}
 
-  ${chalk.bold.italic('npm run cli config/bob')}
+This will save a config file at "config/bob.json".
 
-This will save a config file at "config/bob.json".  
-You can give a full path to anywhere on the file system, and the
-config file will be loaded from there.
+Or give the name as a full path to anywhere on the file system, and
+the config file will be loaded from or created there.
 `);
 
   const choices = [

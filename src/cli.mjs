@@ -1,37 +1,41 @@
 import process from 'node:process';
 import os from 'node:os';
 import chalk from 'chalk';
-import { getCurrentConfig } from './config.mjs';
+import { getCurrentConfig, DEFAULT_CONFIG } from './config.mjs';
 import { mainMenu } from './mainMenu.mjs';
-
+import { checkForSoftwareUpdate } from './softwareUpdate.mjs';
+import { migrate } from './migrate.mjs';
 
 /////
 
 const customTheme = {
   prefix: chalk.green('➜'),
   style: {
-    message: chalk.yellow,
-    answer: chalk.green,
-    error: chalk.red,
-    help: chalk.yellow,
+    message: chalk.yellowBright,
+    answer: chalk.greenBright,
+    error: chalk.redBright,
+    help: chalk.yellowBright,
     highlight: chalk.hex('#a5d8ff').bgHex('#1971c2'),
     disabled: chalk.dim
-  }
+  },
+  helpMode: 'always'
 };
-
-const appName = `${chalk.white.bgBlack.bold('ᴄɪᴠɪᴛ')}${chalk.hex('#4ca1f0').bgBlack.bold('ᴀɪ')}${chalk.white.bgBlack.bold('-sync')}`;
-const appHeader = `\n ${appName} generations downloader\n`;
 
 const COMMANDS = getCommandLineArgs();
 const DEFAULT_CONFIG_PATH = 'config/default.json';
 const CONFIG_PATH = COMMANDS.configPath || DEFAULT_CONFIG_PATH;
 const OS = os.platform();
+const appName = `${chalk.white.bgBlack.bold('ᴄɪᴠɪᴛ')}${chalk.hex('#4ca1f0').bgBlack.bold('ᴀɪ')}${chalk.white.bgBlack.bold('-sync')}`;
+const appHeader = `\n ${appName}${COMMANDS.configPathOrig ? `: ${COMMANDS.configPathOrig}` : ''}\n`;
+
 let CONFIG, APP_DIRECTORY;
 
 export {
   APP_DIRECTORY,
   CONFIG,
   CONFIG_PATH,
+  DEFAULT_CONFIG_PATH,
+  DEFAULT_CONFIG,
   OS,
   customTheme,
   appHeader
@@ -44,16 +48,22 @@ export async function useConfig (path = CONFIG_PATH) {
 export function clearTerminal () {
   process.stdout.write('\x1Bc');
   console.log(appHeader);
-
-  if (CONFIG_PATH !== DEFAULT_CONFIG_PATH) {
-    console.log(`  config: ${CONFIG_PATH}\n`);
-  }
 }
 
 export async function launchCLI (appDirectory) {
   APP_DIRECTORY = appDirectory;
   await useConfig(CONFIG_PATH);
-  return await mainMenu();
+  await migrate();
+  
+  const abortController = new AbortController();
+
+  checkForSoftwareUpdate()
+  .then(() => {
+    abortController.abort();
+  })
+  .catch(console.error);
+  
+  mainMenu({ abortSignal: abortController.signal });
 }
 
 function getCommandLineArgs () {
@@ -63,8 +73,16 @@ function getCommandLineArgs () {
   if (commandlineArgs.length) {
     let configPath = commandlineArgs[0];
 
+    if (configPath) {
+      args.configPathOrig = configPath;
+    }
+
     if (!configPath.endsWith('.json')) {
       configPath += '.json';
+    }
+
+    if (!configPath.includes('/')) {
+      configPath = `config/${configPath}`;
     }
 
     args.configPath = configPath;

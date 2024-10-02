@@ -1,9 +1,11 @@
 import fs from 'node:fs';
 import { fileExists, readFile, writeFile } from './utils.mjs';
 
-const DEFAULT_CONFIG = {
+export const DEFAULT_CONFIG = {
   generationsDataPath: `generations/data`,
   generationsMediaPath: `generations/media`,
+  generationMediaTypes: [ 'all', 'favorite' ].sort(),
+  generationDataTypes: ['all'],
   keyEncrypt: false,
   excludeImages: false,
   secretKey: ''
@@ -73,7 +75,23 @@ export async function removeConfig (configPath) {
 }
 
 export async function getConfig (configPath) {
-  if (await fileExists(configPath)) {
+  const hasNoParentDirectory = !configPath.includes('/') && !configPath.includes('\\');
+  
+  if (hasNoParentDirectory) {
+    const expandedConfigPath = `config/${configPath}`;
+
+    if (await fileExists(expandedConfigPath)) {
+      return await loadConfig(expandedConfigPath);
+    }
+
+    if (await fileExists(configPath)) {
+      // Move to config folder
+      await fs.promises.rename(configPath, expandedConfigPath);
+      return await loadConfig(expandedConfigPath);
+    }
+  }
+
+  else if (await fileExists(configPath)) {
     return await loadConfig(configPath);
   }
 

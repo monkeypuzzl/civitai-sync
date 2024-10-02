@@ -5,11 +5,11 @@ import chalk from 'chalk';
 import confirm from '@inquirer/confirm';
 import { fileExists } from './utils.mjs';
 import { APP_DIRECTORY, CONFIG, OS } from './cli.mjs';
-import { forEachGeneration, imageFilepath, legacyImageFilepaths, getFirstGenerationId, saveGenerations, getGenerationImages } from './generations.mjs';
-import { mainMenu } from './mainMenu.mjs';
+import { forEachGeneration, mediaFilepath, getFirstGenerationId, saveGenerations, getGenerationImages, DOWNLOAD_TYPES_MOD } from './generations.mjs';
 import { requestKey } from './keyActions.mjs';
-import { setDownloadOptions } from './downloadOptionsMenu.mjs';
 import { getAllRequests } from './civitaiApi.mjs';
+
+const MAX_FETCH_ATTEMPTS = 10;
 
 let listeningForKeyPress = false;
 
@@ -30,20 +30,35 @@ function stopListeningForKeyPress (fn) {
 
 let aborted = false;
 
-export async function fetchGenerations ({
-  withImages = true,   // download images
-  checkImages = false, // refresh broken downloaded images
-  latest = false,      // check latest generations
-  oldest = false,      // check oldest generations
-  resume = false,      // keep checking for gaps in generations
-  overwrite = false,   // overwrite existing generations
-  cursor = 0,          // fetch generations earlier than this generation id 
-  secretKey = '',      // authentication key
-  listeningForKeyPress = true
-} = {}, log = console.log) {
+export async function fetchGenerations (args = {}, log = console.log) {
+  const {
+    withImages = true,   // download images
+    latest = false,      // check latest generations
+    oldest = false,      // check oldest generations
+    resume = false,      // keep checking for gaps in generations
+    overwrite = false,   // overwrite existing generations
+    overwriteIfModified = true,
+    tags = [],           // "favorite", "liked", "disliked"
+    secretKey = '',      // authentication key
+    listeningForKeyPress = true
+  } = args;
+
+  let { cursor, attempts = 0 } = args;
+  let shouldContinue = true;
+  let nextCursor;
+  let report = { fromDate: '', toDate: '', generationsDownloaded: 0, generationsSaved: 0, generationsNew: 0, imagesSaved: 0, currentTag: tags.length ? DOWNLOAD_TYPES_MOD[tags[0]] || tags[0] : '' };
+
+  if (tags.length > 1) {
+    for (let tag of tags) {
+      await fetchGenerations({...args, tags: [ tag ]}, log);
+    }
+
+    return !aborted && shouldContinue;
+  }
+
   function onKeyPress (char, key) {
     if (key.name === 'escape') {
-      console.log('Stopping');
+      console.log('Stopping. Please wait...');
       aborted = true;
     }
   }
@@ -65,11 +80,12 @@ export async function fetchGenerations ({
   // Fetch only missing generation data
   // Store API response request ids and nextCursor, to better
   // navigate the feed and minimise data downloads
-  let shouldContinue = true;
-  let report = { fromDate: '', toDate: '', generationsDownloaded: 0, generationsSaved: 0, imagesSaved: 0 };
         
   function reportText ({ esc = true } = {}) {
-    return `\n${report.generationsDownloaded} generations downloaded, ${report.generationsSaved} saved, ${report.imagesSaved} images saved${esc ? '\nPress Esc to stop\n' : ''}`;
+    const daysAgo = Math.round((Date.now() - new Date(report.fromDate).getTime()) / (1000 * 60 * 60 * 24));
+    const fromDateDisplay = `${niceDate(report.fromDate)}${daysAgo ? ` (${daysAgo} day${daysAgo === 1 ? '' : 's'} ago)` : ''}`;
+
+    return `Downloading ${report.currentTag || 'all'}:\n${report.generationsDownloaded} generations downloaded (${report.generationsNew} saved), ${report.imagesSaved} images downloaded\nCurrent: ${fromDateDisplay}\n${esc ? '\nPress Esc to stop\n' : ''}`;
   }
 
   function niceDate (dateString = '1970-01-01T00:00:00.000000Z') {
@@ -80,20 +96,12 @@ export async function fetchGenerations ({
   }
 
   function logProgress () {
-    const fromDateDisplay = niceDate(report.fromDate);
-    const toDateDisplay = niceDate(report.toDate);
-
-    if (report.fromDate === report.toDate) {
-      log(`${fromDateDisplay}. ${reportText()}`);
-    }
-
-    else {
-      log(`Downloading from ${fromDateDisplay} to ${toDateDisplay} ${reportText()}`);
-    }
+    log(reportText());
   }
 
-  function progressFn ({ generationsSaved = 0, imagesSaved = 0 }) {
+  function progressFn ({ generationsSaved = 0, generationsNew = 0, imagesSaved = 0 }) {
     report.generationsSaved += generationsSaved;
+    report.generationsNew += generationsNew;
     report.imagesSaved += imagesSaved;
     logProgress();
   }
@@ -107,13 +115,12 @@ export async function fetchGenerations ({
 
         if (data.error) {
           if (data.error.json.data.code === 'UNAUTHORIZED') {
-            const answer = await confirm({ message: chalk.red('Fetch failed. Your API key needs updating. Update now?'), default: true });
+            const answer = await confirm({ message: chalk.red('\nFetch failed. Your API key needs updating. Update now?'), default: true });
 
             if (answer) {
               await requestKey();
             }
           
-            mainMenu();
             return false;
           }
 
@@ -130,6 +137,7 @@ export async function fetchGenerations ({
         }
 
         const generations = data.result.data.json.items;
+
         generations.forEach(({ createdAt }) => {
           if (!report.fromDate) {
             report.fromDate = createdAt; 
@@ -147,11 +155,14 @@ export async function fetchGenerations ({
           }
         });
 
+        nextCursor = data.result.data.json.nextCursor;
+
         report.generationsDownloaded += generations.length;
+        attempts = 0;
         logProgress();
 
         // Save data
-        const result = await saveGenerations(data, { overwrite, withImages, checkImages }, progressFn);
+        const result = await saveGenerations(data, { overwrite, overwriteIfModified, withImages }, progressFn);
 
         if (aborted) {
           log(`Download aborted. ${reportText({ esc: true })}`);
@@ -163,25 +174,41 @@ export async function fetchGenerations ({
           return false;
         }
 
-        // Continue download
-        if (result.generationsSaved > 0 || result.imagesSaved > 0 || resume || oldest) {
+        if (report.generationsDownloaded && (result.generationsNew > 0 || result.imagesSaved > 0 || resume || oldest)) {
           return true;
         }
 
         const alreadyUpToDate = report.generationsSaved === 0;
         
-        log(`Download complete. ${alreadyUpToDate ? 'You are up-to-date.' : reportText({ esc: false })}`);
+        log(`${alreadyUpToDate ? 'You are up-to-date.' : reportText({ esc: false })}`);
         return false; // Returning `false` from getAllRequests progress callback exits loop
       },
       { secretKey },
-      cursor || undefined
+      cursor || undefined,
+      tags
     );
   }
 
   catch (error) {
-    console.error(error);
-    console.log(chalk.red(`Download error, ${error.message}`));
-    console.error(error);
+    if (attempts < MAX_FETCH_ATTEMPTS) {
+      attempts ++;
+      log(chalk.yellowBright(`\nCould not connect to the web service. Retrying...`));
+      return !aborted && await fetchGenerations({...args, cursor: nextCursor || cursor }, log);
+    }
+
+    const code = error.code || (error.cause && error.cause.code);
+
+    if (code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'UND_ERR_SOCKET' || code ==='ECONNRESET') {
+      log(chalk.red(`\nDownload failed. Could not connect to the web service. Please try again.`));
+    }
+
+    else {
+      log(chalk.red(`\nDownload failed. Please try again. "${error.message} ${code}"`));
+    }
+
+    if (report.generationsSaved) {
+      log(chalk.red('Download "All" to make sure nothing is missed.'));
+    }
   }
 
   if (listeningForKeyPress) {
@@ -204,8 +231,6 @@ export async function openDataDirectory () {
       console.log('The directory does not exist. It will be created when you start downloading.');
     }
   });
-
-  return setDownloadOptions();
 }
 
 export async function openMediaDirectory () {
@@ -221,8 +246,6 @@ export async function openMediaDirectory () {
       console.log('The directory does not exist. It will be created when you start downloading.');
     }
   });
-
-  return setDownloadOptions();
 }
 
 export async function countGenerations ({ withImages = true, withMissingImages = false, includeLegacy = true } = {}) {
@@ -251,24 +274,15 @@ export async function countGenerations ({ withImages = true, withMissingImages =
 
       for (let image of images) {
         const { id, seed } = image;
-        const imageInfo = { date, generationId: generation.id, imageId: id, seed };
-        const filepath = imageFilepath(imageInfo);
-        const legacyFilepaths = legacyImageFilepaths(imageInfo);
-
+        const mediaInfo = { date, generationId: generation.id, mediaId: id, seed };
+        const filepath = mediaFilepath(mediaInfo);
+        
         if (await fileExists(filepath)) {
           imagesSaved ++;
           imagesCreated ++;
         }
         
         else {
-          for (let legacyFilepath of legacyFilepaths) {
-            if (await fileExists(legacyFilepath)) {
-              imagesSaved ++;
-              imagesCreated ++;
-              return;
-            }
-          }
-
           if (image.available) {
             imagesCreated ++;
           }

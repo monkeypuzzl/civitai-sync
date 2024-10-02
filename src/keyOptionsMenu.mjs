@@ -5,6 +5,9 @@ import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { mainMenu } from './mainMenu.mjs';
 import { getSecretKey, requestKey, testKey, removeKey, encryptKey, unEncryptKey } from './keyActions.mjs';
 
+
+let previousMenuItem;
+
 export async function keyOptions (message) {
   const choices = [
     {
@@ -13,20 +16,20 @@ export async function keyOptions (message) {
       description: 'Test your key'
     },
 
+    CONFIG.keyEncrypt ? {
+      name: 'Remove password protection',
+      value: 'remove-password-key',
+      description: 'Remove password from key'
+    } : {
+      name: 'Add password protection',
+      value: 'add-password-key',
+      description: 'Add password to key'
+    },
+
     {
       name: 'Update API key',
       value: 'update-key',
       description: 'Update your key'
-    },
-
-    CONFIG.keyEncrypt ? {
-      name: 'Remove password-protection',
-      value: 'remove-password-key',
-      description: 'Remove password from key'
-    } : {
-      name: 'Add password-protection',
-      value: 'add-password-key',
-      description: 'Add password to key'
     },
 
     {
@@ -51,10 +54,13 @@ export async function keyOptions (message) {
   }
 
   const answer = await select({
-    message: 'Key options:',
+    message: 'Settings:',
     choices,
-    theme: customTheme
+    theme: customTheme,
+    default: previousMenuItem !== 'back' ? previousMenuItem : undefined
   });
+
+  previousMenuItem = answer;
 
   let secretKey, result, confirmDelete;
 
@@ -74,7 +80,7 @@ export async function keyOptions (message) {
 
     else if (result.error) {
       if (result.httpStatus === 500) {
-        message = chalk.red(`It looks like the service is down. Please check again shortly.`);
+        message = chalk.red(`The web service is down. Please check again shortly.`);
       }
 
       else {
@@ -83,15 +89,15 @@ export async function keyOptions (message) {
     }
     return keyOptions(message);
 
-    case 'view-key':
-    secretKey = await getSecretKey();
+    // case 'view-key':
+    // secretKey = await getSecretKey();
 
-    if (!secretKey) {
-      return keyOptions();
-    }
+    // if (!secretKey) {
+    //   return keyOptions();
+    // }
 
-    await confirm({ message: `Your API key is: "${secretKey}". (Press Enter)`, default: true });
-    return keyOptions();
+    // await confirm({ message: `Your API key is: "${secretKey}". (Press Enter)`, default: true });
+    // return keyOptions();
 
     case 'update-key':
     await requestKey();
@@ -102,7 +108,7 @@ export async function keyOptions (message) {
 
     if (confirmDelete) {
       await removeKey();
-      console.log(chalk.green(`Key deleted`));
+      console.log(chalk.green(`API key deleted`));
       return mainMenu();
     }
 

@@ -1,13 +1,16 @@
-import inquirer from 'inquirer';
+/*eslint no-unused-vars: ["error", { "caughtErrors": "all", "caughtErrorsIgnorePattern": "^ignore" }]*/
+import chalk from 'chalk';
 import select, { Separator } from '@inquirer/select';
-import { setDownloadOptions } from './downloadOptionsMenu.mjs';
-import { fetchGenerations } from './downloadActions.mjs';
+import { downloadGenerationsMenu } from './downloadGenerationsMenu.mjs';
 import { keyOptions } from './keyOptionsMenu.mjs';
 import { showInfo } from './showInfo.mjs';
 import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
-import { getSecretKey, requestKey } from './keyActions.mjs';
+import { requestKey, getSecretKey } from './keyActions.mjs';
+import { SOFTWARE, updateSoftware } from './softwareUpdate.mjs';
 
-export async function mainMenu (doClearTerminal = true) {
+let previousMenuItem;
+
+export async function mainMenu ({ clear = true, defaultValue = '', abortSignal = undefined } = {}) {
   const keySaved = !!CONFIG.secretKey;
   const choices = [];
 
@@ -16,19 +19,13 @@ export async function mainMenu (doClearTerminal = true) {
       {
         name: 'Download generations',
         value: 'download-generations',
-        description: 'Download latest data and images'
+        description: `Download generation data${CONFIG.excludeImages ? '' : ' and media'}`
       },
 
       {
-        name: 'Download options',
-        value: 'download-options',
-        description: 'Select options for downloads'
-      },
-
-      {
-        name: 'Key options',
-        value: 'options-key',
-        description: 'Update, add/remove password, delete your API key',
+        name: 'Settings',
+        value: 'settings',
+        description: 'Update API key, add/remove password',
       }
     );
   }
@@ -43,11 +40,23 @@ export async function mainMenu (doClearTerminal = true) {
 
   choices.push(
     {
-      name: 'Show info',
+      name: 'About',
       value: 'info',
       description: 'About this software',
-    },
+    }
+  );
 
+  if (SOFTWARE.hasUpdate) {
+    choices.push(
+      {
+        name: `${chalk.hex('#a5d8ff')(`Install software update, v${SOFTWARE.latest.version}`)}`,
+        value: 'software-update',
+        description: SOFTWARE.latest.summary
+      }
+    );
+  }
+
+  choices.push(
     new Separator(),
 
     {
@@ -57,7 +66,7 @@ export async function mainMenu (doClearTerminal = true) {
     }
   );
 
-  if (doClearTerminal) {
+  if (clear) {
     clearTerminal();
   }
 
@@ -65,48 +74,48 @@ export async function mainMenu (doClearTerminal = true) {
     console.log('\n');
   }
 
-  const answer = await select({
-    message: 'Please select:',
-    choices,
-    theme: customTheme
-  });
+  try {
+    const answer = await select({
+      message: 'Please select:',
+      choices,
+      theme: customTheme,
+      default: defaultValue || previousMenuItem
+    }, { signal: abortSignal });
 
-  let secretKey, ui;
+    previousMenuItem = answer;
 
-  switch (answer) {
-    case 'set-key':
-    await requestKey();
-    return mainMenu();
+    let secretKey;
 
-    case 'options-key':
-    return keyOptions();
+    switch (answer) {
+      case 'set-key':
+      await requestKey();
+      break;
 
-    case 'download-generations':
-    secretKey = await getSecretKey();
-    
-    if (!secretKey) {
-      return mainMenu();
+      case 'settings':
+      return keyOptions();
+
+      case 'download-generations':
+      return downloadGenerationsMenu();
+
+      case 'info':
+      return showInfo();
+
+      case 'software-update':
+      secretKey = await getSecretKey(); 
+      if (await updateSoftware({ secretKey }) === true) {
+        return;
+      }
+      break;
+
+      case 'exit':
+      return;
     }
-
-    try {
-      clearTerminal();
-      ui = new inquirer.ui.BottomBar();
-      await fetchGenerations({ secretKey, overwrite: false, withImages: !CONFIG.excludeImages }, txt => ui.updateBottomBar(txt));
-    }
-
-    catch (error) {
-      console.error(error);
-    }
-
-    return mainMenu(false);
-
-    case 'download-options':
-    return setDownloadOptions();
-
-    case 'info':
-    return showInfo();
-
-    case 'exit':
-    return;
   }
+
+  catch (ignoreErr) {
+    // Abort signal
+  }
+
+  return mainMenu();
 }
+

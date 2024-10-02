@@ -1,11 +1,12 @@
 {
   "private": true,
   "name": "civitai-sync",
-  "version": "3.0.3",
+  "version": "4.0.0",
   "license": "MIT",
   "scripts": {
     "cli": "node .",
-    "lint": "eslint ."
+    "remove-deleted": "node src/commands.mjs remove-deleted",
+    "lint": "eslint index.mjs && eslint src"
   },
   "devDependencies": {
     "@eslint/js": "^9.2.0",
@@ -13,12 +14,14 @@
     "globals": "^15.2.0"
   },
   "dependencies": {
+    "@inquirer/checkbox": "^4.0.1",
     "@inquirer/confirm": "^3.1.0",
     "@inquirer/input": "^2.1.0",
     "@inquirer/password": "^2.1.0",
     "@inquirer/rawlist": "^2.1.0",
     "@inquirer/select": "^2.2.0",
     "chalk": "^5.3.0",
+    "extract-zip": "^2.0.1",
     "inquirer": "^9.2.16",
     "mkdirp": "^3.0.1"
   },

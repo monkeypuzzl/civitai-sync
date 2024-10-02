@@ -10,7 +10,7 @@ import { getGenerations } from './civitaiApi.mjs';
 let SECRET_KEY;
 
 export async function requestPassword () {
-  const pass = await password({ message: 'Enter password (or press Enter to cancel):' });
+  const pass = await password({ message: 'Type password and press Enter (or just press Enter to cancel):' });
 
   if (!pass) {
     return null;
@@ -20,7 +20,7 @@ export async function requestPassword () {
 }
 
 export async function requestNewPassword () {
-  const pass = await password({ message: 'Enter password (or press Enter for no password):' });
+  const pass = await password({ message: 'Type password and press Enter (or just press Enter to cancel):' });
 
   if (!pass) {
     return null;
@@ -106,7 +106,7 @@ export async function unEncryptKey (encryptedKey) {
 }
 
 export async function testKey (secretKey) {
-  const data = await getGenerations(undefined, { secretKey });
+  const data = await getGenerations(undefined, undefined, { secretKey });
 
   if (!data) {
     return { error: true };
