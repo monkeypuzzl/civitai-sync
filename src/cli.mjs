@@ -16,7 +16,8 @@ const customTheme = {
     error: chalk.redBright,
     help: chalk.yellowBright,
     highlight: chalk.hex('#a5d8ff').bgHex('#1971c2'),
-    disabled: chalk.dim
+    disabled: chalk.dim,
+    description: chalk.hex('#a5d8ff')
   },
   helpMode: 'always'
 };

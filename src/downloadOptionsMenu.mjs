@@ -8,7 +8,7 @@ import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { downloadGenerationsMenu } from './downloadGenerationsMenu.mjs';
 import { setConfigParam } from './config.mjs';
 import { countGenerations, openDataDirectory, openMediaDirectory } from './downloadActions.mjs';
-import { copyAllGeneratedMediaTypes, MEDIA_DIRECTORIES } from './generations.mjs';
+import { copyAllGeneratedMediaTypes, MEDIA_DIRECTORIES, deleteAllDeletedMedia } from './generations.mjs';
 
 let COUNT_REPORT;
 let previousMenuItem;
@@ -16,6 +16,7 @@ let previousMenuItem;
 export async function setDownloadOptions ({ clear = true, defaultValue = '' } = {}) {
   const choices = [];
   const dataDirExists = await fileExists(CONFIG.generationsDataPath);
+  const mediaDirExists = await fileExists(CONFIG.generationsMediaPath);
   const currentMediaDirectories = (CONFIG.generationMediaTypes || []).map(type => MEDIA_DIRECTORIES[type]);
   const currentDataTypes = (CONFIG.generationDataTypes || []).map(type => MEDIA_DIRECTORIES[type]);
 
@@ -115,6 +116,16 @@ export async function setDownloadOptions ({ clear = true, defaultValue = '' } = 
     );
   }
 
+  if (mediaDirExists && !CONFIG.excludeImages) {
+    choices.push(
+      {
+        name: 'Remove deleted media',
+        value: 'remove-deleted-media',
+        description: `Remove downloaded media that has been deleted from the onsite generator.\n\nIf you delete media onsite that has already been downloaded:\nFirst, ${chalk.bold('download all generations')} to update your data, then run this.\nCurrently, deletion isn't detected when ${chalk.italic('every image')} in a generation has been deleted.`
+      }
+    );
+  }
+
   choices.push(
     new Separator(),
 
@@ -202,6 +213,10 @@ export async function setDownloadOptions ({ clear = true, defaultValue = '' } = 
       console.log(`\nThere are no generations downloaded in the data directory.`);
     }
     
+    return setDownloadOptions({ clear: false });
+
+    case 'remove-deleted-media':
+    await deleteAllDeletedMedia();
     return setDownloadOptions({ clear: false });
 
     case 'back':

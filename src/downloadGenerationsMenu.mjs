@@ -69,7 +69,7 @@ export async function downloadGenerationsMenu (doClearTerminal = true) {
   const oldestDate = dates[0];
   const hasOldGenerations = hasGenerations && dateIsOlderThanDays(oldestDate, 30);
   const downloadTypes = getDownloadTypes(CONFIG.excludeImages ? 'data' : 'media');
-  const typesSentenceCase = downloadTypes[0][0].toUpperCase() + downloadTypes.join('/').slice(1);
+  const typesSentenceCase = downloadTypes.length ? downloadTypes[0][0].toUpperCase() + downloadTypes.join('/').slice(1) : '';
   const choices = [];
 
   choices.push(
