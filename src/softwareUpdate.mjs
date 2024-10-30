@@ -272,7 +272,7 @@ export async function installSoftwareUpdate (version) {
     console.log('Installing dependencies...');
 
     try {
-      await fs.promises.cp(`${APP_DIRECTORY}/node_modules`, unzipDirectory, { recursive: true });
+      await fs.promises.cp(`${APP_DIRECTORY}/node_modules`, `${unzipDirectory}/node_modules`, { recursive: true });
       await spawnChild('npm', ['install'], { cwd: unzipDirectory }, txt => npmLog += txt);
 
       // Move node_modules
@@ -411,7 +411,7 @@ export async function updateSoftware ({ secretKey } = {}) {
     success = await unzipSoftwareUpdate(latest.version);
     
     if (success) {
-      console.log('installing...')
+      console.log('Installing new version...')
       success = await installSoftwareUpdate(latest.version);
     }
 

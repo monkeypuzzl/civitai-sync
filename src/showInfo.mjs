@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import select from '@inquirer/select';
 import { customTheme } from './cli.mjs';
 import { mainMenu } from './mainMenu.mjs';
+import { getCurrentVersion } from './softwareUpdate.mjs';
 
 export async function showInfo () {
   console.log(`${chalk.bold('civitai-sync')} downloads your Civitai creations.
@@ -26,15 +27,11 @@ The program is normally run as:
 
   ${chalk.bold.italic('npm run cli')}
 
-This saves a config file at "config/default.json".
 To download from an alternative account, specify a unique name for it:
 
   ${chalk.bold.italic('npm run cli bob')}
 
-This will save a config file at "config/bob.json".
-
-Or give the name as a full path to anywhere on the file system, and
-the config file will be loaded from or created there.
+Or give the name as a file system path to where a config file can be created.
 `);
 
   const choices = [
