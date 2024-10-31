@@ -3,7 +3,7 @@ import os from 'node:os';
 import chalk from 'chalk';
 import { getCurrentConfig, DEFAULT_CONFIG } from './config.mjs';
 import { mainMenu } from './mainMenu.mjs';
-import { checkForSoftwareUpdate } from './softwareUpdate.mjs';
+import { checkForSoftwareUpdate, getCurrentVersion } from './softwareUpdate.mjs';
 import { migrate } from './migrate.mjs';
 
 /////
@@ -27,12 +27,13 @@ const DEFAULT_CONFIG_PATH = 'config/default.json';
 const CONFIG_PATH = COMMANDS.configPath || DEFAULT_CONFIG_PATH;
 const OS = os.platform();
 const appName = `${chalk.white.bgBlack.bold('ᴄɪᴠɪᴛ')}${chalk.hex('#4ca1f0').bgBlack.bold('ᴀɪ')}${chalk.white.bgBlack.bold('-sync')}`;
-const appHeader = `\n ${appName}${COMMANDS.configPathOrig ? `: ${COMMANDS.configPathOrig}` : ''}\n`;
+const appHeader = `\n ${appName}${COMMANDS.configPathOrig ? `: ${COMMANDS.configPathOrig}` : ''}`;
 
-let CONFIG, APP_DIRECTORY;
+let CONFIG, APP_DIRECTORY, CURRENT_VERSION;
 
 export {
   APP_DIRECTORY,
+  CURRENT_VERSION,
   CONFIG,
   CONFIG_PATH,
   DEFAULT_CONFIG_PATH,
@@ -46,13 +47,14 @@ export async function useConfig (path = CONFIG_PATH) {
   CONFIG = await getCurrentConfig(path);
 }
 
-export function clearTerminal () {
+export function clearTerminal ({ suffix = '\n' } = {}) {
   process.stdout.write('\x1Bc');
-  console.log(appHeader);
+  console.log(`${appHeader}${suffix}`);
 }
 
 export async function launchCLI (appDirectory) {
   APP_DIRECTORY = appDirectory;
+  CURRENT_VERSION = await getCurrentVersion();
   await useConfig(CONFIG_PATH);
   await migrate();
   

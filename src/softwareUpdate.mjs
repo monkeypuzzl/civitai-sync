@@ -5,7 +5,7 @@ import extractZip from 'extract-zip';
 import { mkdirp } from 'mkdirp';
 import { getModel, fetchFile } from './civitaiApi.mjs';
 import { fileExists, readFile, writeFile, listFiles, listDirectories } from './utils.mjs';
-import { APP_DIRECTORY } from './cli.mjs';
+import { APP_DIRECTORY, CURRENT_VERSION } from './cli.mjs';
 import { spawnChild } from './childProcess.mjs';
 
 
@@ -165,10 +165,11 @@ export async function saveSoftwareUpdateInfo (data) {
 }
 
 export async function checkForSoftwareUpdate ({ force = false } = {}) {
-  if (!SOFTWARE.checkedAt && !force) {
+  if (!force && !SOFTWARE.checkedAt) {
     const cached = await loadSoftwareUpdateInfo();
+    const hasValidFileCache = !!cached && cached.currentVersion === CURRENT_VERSION;
     
-    if (cached) {
+    if (hasValidFileCache) {
       Object.keys(cached)
       .forEach(key => SOFTWARE[key] = cached[key]);
     }
@@ -183,7 +184,7 @@ export async function checkForSoftwareUpdate ({ force = false } = {}) {
     
     SOFTWARE.latest = latest;
     SOFTWARE.checkedAt = Date.now();
-    SOFTWARE.currentVersion = await getCurrentVersion();
+    SOFTWARE.currentVersion = CURRENT_VERSION;
     SOFTWARE.hasUpdate = isLaterVersionThan(SOFTWARE.latest.version, SOFTWARE.currentVersion);
 
     await saveSoftwareUpdateInfo(SOFTWARE);

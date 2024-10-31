@@ -1,12 +1,12 @@
 import chalk from 'chalk';
 import select from '@inquirer/select';
-import { customTheme } from './cli.mjs';
+import { customTheme, CURRENT_VERSION, clearTerminal } from './cli.mjs';
 import { mainMenu } from './mainMenu.mjs';
-import { getCurrentVersion } from './softwareUpdate.mjs';
 
 export async function showInfo () {
-  console.log(`${chalk.bold('civitai-sync')} downloads your Civitai creations.
+  clearTerminal({ suffix: ` / v${CURRENT_VERSION}` });
 
+  console.log(`
 ${chalk.bold('Model page')}:
 https://civitai.com/models/526058
 
@@ -24,14 +24,13 @@ or only data, in "${chalk.bold('Download generations')}" > "${chalk.bold('Option
 
 ${chalk.bold('Multiple accounts')}
 The program is normally run as:
-
   ${chalk.bold.italic('npm run cli')}
 
-To download from an alternative account, specify a unique name for it:
-
+To download an alternative account, give a unique name for it:
   ${chalk.bold.italic('npm run cli bob')}
 
-Or give the name as a file system path to where a config file can be created.
+Or give a file system path to where a config file can be created.
+By default, config files are saved in the "config" folder.
 `);
 
   const choices = [

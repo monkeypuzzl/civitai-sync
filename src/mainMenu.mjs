@@ -4,7 +4,7 @@ import select, { Separator } from '@inquirer/select';
 import { downloadGenerationsMenu } from './downloadGenerationsMenu.mjs';
 import { keyOptions } from './keyOptionsMenu.mjs';
 import { showInfo } from './showInfo.mjs';
-import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
+import { CONFIG, CURRENT_VERSION, customTheme, clearTerminal } from './cli.mjs';
 import { requestKey, getSecretKey } from './keyActions.mjs';
 import { SOFTWARE, updateSoftware } from './softwareUpdate.mjs';
 
@@ -25,7 +25,7 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
       {
         name: 'Settings',
         value: 'settings',
-        description: 'Update API key, add/remove password',
+        description: 'Update API key, add/remove password'
       }
     );
   }
@@ -34,7 +34,7 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
     choices.unshift({
       name: 'Set API key',
       value: 'set-key',
-      description: 'Set your API key. Read "Show info" for how to get it.',
+      description: 'Set your API key. Read "Show info" for how to get it.'
     });
   }
 
@@ -42,7 +42,7 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
     {
       name: 'About',
       value: 'info',
-      description: 'About this software',
+      description: `About this software, ${chalk.italic(`version ${CURRENT_VERSION}`)}`
     }
   );
 
