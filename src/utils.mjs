@@ -2,8 +2,20 @@
 import fs from 'node:fs/promises';
 import { mkdirp } from 'mkdirp';
 
-export function toDateString (isoString) {
-  return isoString.slice(0, isoString.indexOf('T'));
+export function toDateString (input) {
+  if (typeof input === 'string') {
+    return input.slice(0, input.indexOf('T'));
+  }
+
+  else if (input === undefined) {
+    return toDateString((new Date()).toISOString());
+  }
+
+  else if (input.constructor === Date) {
+    return toDateString(input.toISOString());
+  }
+
+  return '';
 }
 
 export function dateIsOlderThanDays (isoString, numDays) {

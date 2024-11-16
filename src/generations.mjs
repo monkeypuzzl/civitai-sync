@@ -44,7 +44,9 @@ export function generationFilepath ({ id = 0, createdAt = '' }) {
 }
 
 export function mediaFilepath ({ date = '', generationId = '', mediaId = '', seed = 0, directory = MEDIA_DIRECTORIES['all'] }) {
-  const filename = `${generationId}_${String(seed)}_${mediaId}.jpeg`;
+  const hasExtension = mediaId.includes('.');
+  const suffix = hasExtension ? '' : '.jpeg';
+  const filename = `${generationId}_${String(seed)}_${mediaId}${suffix}`;
   const mediaDirectory = `${CONFIG.generationsMediaPath}/${directory.length ? `${directory}/` : '' }${date}`;
   const filepath = path.resolve(mediaDirectory, filename);
 
@@ -53,10 +55,12 @@ export function mediaFilepath ({ date = '', generationId = '', mediaId = '', see
 
 export function legacyMediaFilepaths ({ date = '', generationId = '', mediaId = '', seed = 0 }) {
   const legacyMediaDirectory = `${CONFIG.generationsMediaPath}/${date}`;
+  const hasExtension = mediaId.includes('.');
+  const suffix = hasExtension ? '' : '.jpeg';
   const filepaths = [
-    `${mediaId}.jpeg`,
-    `${generationId}_${String(seed)}.jpeg`,
-    `${generationId}_${String(seed)}_${mediaId}.jpeg`
+    `${mediaId}${suffix}`,
+    `${generationId}_${String(seed)}${suffix}`,
+    `${generationId}_${String(seed)}_${mediaId}${suffix}`
   ].map(filepath =>
     path.resolve(legacyMediaDirectory, filepath)
   );
