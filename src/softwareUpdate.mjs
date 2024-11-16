@@ -274,7 +274,7 @@ export async function installSoftwareUpdate (version) {
 
     try {
       await fs.promises.cp(`${APP_DIRECTORY}/node_modules`, `${unzipDirectory}/node_modules`, { recursive: true });
-      await spawnChild('npm', ['run', 'setup'], { cwd: unzipDirectory }, txt => npmLog += txt);
+      await spawnChild('npm', ['ci', '--omit-dev'], { cwd: unzipDirectory }, txt => npmLog += txt);
 
       // Move node_modules
       undo.push(async () => {
@@ -288,6 +288,8 @@ export async function installSoftwareUpdate (version) {
       });
 
       await fs.promises.rename(`${unzipDirectory}/node_modules`, `${APP_DIRECTORY}/node_modules`);
+      await spawnChild('npm', ['link'], { cwd: APP_DIRECTORY }, txt => npmLog += txt);
+      await writeFile(`${backupDirectory}/npm-log.txt`, npmLog);
     }
 
     catch (error) {
