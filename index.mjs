@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 import { launchCLI } from './src/cli.mjs';

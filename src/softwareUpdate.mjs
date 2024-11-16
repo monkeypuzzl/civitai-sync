@@ -274,7 +274,7 @@ export async function installSoftwareUpdate (version) {
 
     try {
       await fs.promises.cp(`${APP_DIRECTORY}/node_modules`, `${unzipDirectory}/node_modules`, { recursive: true });
-      await spawnChild('npm', ['install'], { cwd: unzipDirectory }, txt => npmLog += txt);
+      await spawnChild('npm', ['run', 'setup'], { cwd: unzipDirectory }, txt => npmLog += txt);
 
       // Move node_modules
       undo.push(async () => {

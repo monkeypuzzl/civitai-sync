@@ -41,7 +41,7 @@ In the terminal/command prompt (not the Node.js console),
 Install the software dependencies by typing:
 
 ```
-  npm install
+  npm run setup
 ```
 
 Create a Civitai API key in your account:  
