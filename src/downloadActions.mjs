@@ -193,6 +193,11 @@ export async function fetchGenerations (args = {}, log = console.log) {
     if (attempts < MAX_FETCH_ATTEMPTS) {
       attempts ++;
       log(chalk.yellowBright(`\nCould not connect to the web service. Retrying...`));
+
+      if (listeningForKeyPress) {
+        stopListeningForKeyPress(onKeyPress);
+      }
+      
       return !aborted && await fetchGenerations({...args, cursor: nextCursor || cursor }, log);
     }
 
