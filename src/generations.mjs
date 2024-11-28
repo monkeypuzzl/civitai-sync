@@ -340,7 +340,7 @@ export async function saveGenerationImages (generation, { doFetch = true } = {})
       else {
         missingFilepaths.push(itemFilepath);
 
-        const itemDirectory = itemFilepath.slice(0, itemFilepath.lastIndexOf('/'));
+        const itemDirectory = path.dirname(itemFilepath);
 
         if (!(await fileExists(itemDirectory))) {
           await mkdirp(itemDirectory);
