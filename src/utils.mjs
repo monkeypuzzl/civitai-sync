@@ -1,6 +1,7 @@
 /*eslint no-unused-vars: ["error", { "caughtErrors": "all", "caughtErrorsIgnorePattern": "^ignore" }]*/
 import fs from 'node:fs/promises';
 import { mkdirp } from 'mkdirp';
+import { dirname } from 'node:path';
 
 export function toDateString (input) {
   if (typeof input === 'string') {
@@ -106,12 +107,12 @@ export async function fileExists (filepath) {
 }
 
 export async function readFile (filepath) {
-  return await fs.readFile(filepath);
+  return await fs.readFile(filepath, 'utf-8');
 }
 
 export async function writeFile (filepath, contents) {
-  if (filepath.includes('/')) {
-    const dir = filepath.slice(0, filepath.lastIndexOf('/'));
+  if (filepath.includes('/') || filepath.includes('\\')) {
+    const dir = dirname(filepath);
 
     if (!(await fileExists(dir))) {
       await mkdirp(dir);

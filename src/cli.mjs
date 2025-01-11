@@ -1,5 +1,7 @@
 import process from 'node:process';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
 import chalk from 'chalk';
 import { getCurrentConfig, DEFAULT_CONFIG } from './config.mjs';
 import { mainMenu } from './mainMenu.mjs';
@@ -22,6 +24,7 @@ const customTheme = {
   helpMode: 'always'
 };
 
+const APP_DIRECTORY = dirname(dirname(fileURLToPath(import.meta.url)));
 const COMMANDS = getCommandLineArgs();
 const DEFAULT_CONFIG_PATH = 'config/default.json';
 const CONFIG_PATH = COMMANDS.configPath || DEFAULT_CONFIG_PATH;
@@ -29,7 +32,7 @@ const OS = os.platform();
 const appName = `${chalk.white.bgBlack.bold('ᴄɪᴠɪᴛ')}${chalk.hex('#4ca1f0').bgBlack.bold('ᴀɪ')}${chalk.white.bgBlack.bold('-sync')}`;
 const appHeader = `\n ${appName}${COMMANDS.configPathOrig ? `: ${COMMANDS.configPathOrig}` : ''}`;
 
-let CONFIG, APP_DIRECTORY, CURRENT_VERSION;
+let CONFIG, CURRENT_VERSION;
 
 export {
   APP_DIRECTORY,
@@ -52,12 +55,11 @@ export function clearTerminal ({ suffix = '\n' } = {}) {
   console.log(`${appHeader}${suffix}`);
 }
 
-export async function launchCLI (appDirectory) {
-  APP_DIRECTORY = appDirectory;
+export async function launchCLI () {
   CURRENT_VERSION = await getCurrentVersion();
   await useConfig(CONFIG_PATH);
   await migrate();
-  
+
   const abortController = new AbortController();
 
   checkForSoftwareUpdate()

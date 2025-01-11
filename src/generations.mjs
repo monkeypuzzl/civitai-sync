@@ -43,6 +43,10 @@ export function generationFilepath ({ id = 0, createdAt = '' }) {
   return filepath;
 }
 
+export function mediaFilename ({ generationId = '', mediaId = '', seed = 0 }) {
+  return `${generationId}_${String(seed)}_${mediaId}.jpeg`;
+}
+
 export function mediaFilepath ({ date = '', generationId = '', mediaId = '', seed = 0, directory = MEDIA_DIRECTORIES['all'] }) {
   const hasExtension = mediaId.includes('.');
   const suffix = hasExtension ? '' : '.jpeg';
@@ -75,25 +79,54 @@ export async function getGenerationDates (path = CONFIG.generationsDataPath) {
   return dates;
 }
 
-export async function getGenerationIdsByDate (date = '', includeLegacy = false) {
+export async function getGenerationIdsByDate (date = '', { includeLegacy = false, includeFailed = true, tags = [] } = {}) {
   const LEGACY_GENERATION_ID_LENGTH = 8 + '.json'.length;
   const filenames = await listDirectory(`${CONFIG.generationsDataPath}/${date}`);
-  const ids = filenames
+  const generationIds = filenames
     .filter(f => f.endsWith('.json'))
     .filter(f => includeLegacy ? true : f.length !== LEGACY_GENERATION_ID_LENGTH)
     .map(f => f.slice(0, f.lastIndexOf('.json')));
 
-  return ids;
-} 
+  if (includeFailed && !tags.length) {
+    return generationIds;
+  }
 
-export async function getFirstGenerationId (includeLegacy = false) {
+  const filteredIds = [];
+  
+  for (let generationId of generationIds) {
+    const generation = await getGeneration(date, generationId);
+    const mediaInfo = getGeneratedMediaInfo(generation);
+
+    if (!mediaInfo.length) {
+      continue;
+    }
+
+    if (tags.length) {
+      const matchesTags = tags.some(tag =>
+        mediaInfo.some(media => media.tags.includes(tag))
+      );
+
+      if (matchesTags) {
+        filteredIds.push(generationId);
+      }
+    }
+
+    else {
+      filteredIds.push(generationId);
+    }
+  }
+
+  return filteredIds;
+}
+
+export async function getFirstGenerationId ({ includeLegacy = false } = {}) {
   const dates = await getGenerationDates();
 
   if (!dates.length) {
     return undefined;
   }
 
-  const ids = await getGenerationIdsByDate(dates[0], includeLegacy);
+  const ids = await getGenerationIdsByDate(dates[0], { includeLegacy });
   
   if (ids.length) {
     return ids[0];
@@ -102,7 +135,7 @@ export async function getFirstGenerationId (includeLegacy = false) {
   // Find oldest generation
   // E.g. in data folder of mixed legacy API and new API generations.
   for (let date of dates) {
-    const ids = await getGenerationIdsByDate(date, false);
+    const ids = await getGenerationIdsByDate(date, { includeLegacy: false });
 
     if (ids.length) {
       return ids[0];
@@ -135,12 +168,70 @@ export async function getGeneration (date = '', id, { stringType = false } = {})
   }
 }
 
-export async function forEachGeneration (fn, includeLegacy = false) {
+export function getGeneratedMediaInfo (generation, { hidden = false } = {}) {
+  const { createdAt, steps } = generation;
+  const date = toDateString(createdAt);
+  const media = [];
+
+  if (!steps) {
+    return media;
+  }
+  
+  steps.forEach(({ images, metadata }) => {
+    images.forEach(({ id, status, seed, url }) => {
+      const mediaInfo = {
+        date,
+        generationId: generation.id,
+        mediaId: id,
+        seed,
+        status,
+        url,
+        tags: []
+      };
+
+      if (status === 'failed' || status === 'expired') {
+        return;
+      }
+
+      if (metadata && 'images' in metadata && id in metadata.images) {
+        const mediaTags = metadata.images[id];
+
+        // Image deleted from onsite generator
+        if (!!mediaTags.hidden !== hidden) {
+          return;
+        }
+        
+        const tags = Object.keys(mediaTags)
+        .reduce((tags, tag) => {
+          const value = mediaTags[tag];
+
+          if (value === true) {
+            tags[tag] = true;
+          }
+
+          else if (typeof value === 'string') {
+            tags[`${tag}:${value}`] = true;
+          }
+
+          return tags;
+        }, {});
+
+        mediaInfo.tags = Object.keys(tags).sort();
+      }
+      
+      media.push(mediaInfo);
+    });
+  });
+  
+  return media;
+}
+
+export async function forEachGeneration (fn, { includeLegacy = false }) {
   try {
     const dates = await getGenerationDates();
 
     for (let date of dates) {
-      const ids = await getGenerationIdsByDate(date, includeLegacy);
+      const ids = await getGenerationIdsByDate(date, { includeLegacy });
 
       for (let id of ids) {
         const generation = await getGeneration(date, id);
@@ -404,7 +495,7 @@ export async function setupWorkflowTags () {
 export async function copyAllGeneratedMediaTypes () {
   await forEachGeneration(async (generation) => {
     await saveGenerationImages(generation, { doFetch: false });
-  });
+  }, { includeLegacy: true });
 }
 
 export async function deleteAllDeletedMedia () {
@@ -440,60 +531,9 @@ export async function deleteAllDeletedMedia () {
         }
       }
     });
-  });
+  }, { includeLegacy: true });
 
   console.log(`${count} images were deleted.`);
-}
-
-export function getGeneratedMediaInfo (generation, { hidden = false } = {}) {
-  const { createdAt, steps } = generation;
-  const date = toDateString(createdAt);
-  const media = [];
-  
-  steps.forEach(({ images, metadata }) => {
-    images.forEach(({ id, status, seed, url }) => {
-      const mediaInfo = {
-        date,
-        generationId: generation.id,
-        mediaId: id,
-        seed,
-        status,
-        url,
-        tags: []
-      };
-
-      if (metadata && 'images' in metadata && id in metadata.images) {
-        // Image deleted from onsite generator
-        const isHidden = metadata.images[id].hidden === true;
-        
-        if (isHidden !== hidden) {
-          return;
-        }
-
-        const mediaTags = metadata.images[id];
-        const tags = Object.keys(mediaTags)
-        .reduce((tags, tag) => {
-          const value = mediaTags[tag];
-
-          if (value === true) {
-            tags[tag] = true;
-          }
-
-          else if (typeof value === 'string') {
-            tags[`${tag}:${value}`] = true;
-          }
-
-          return tags;
-        }, {});
-
-        mediaInfo.tags = Object.keys(tags).sort();
-      }
-      
-      media.push(mediaInfo);
-    });
-  });
-  
-  return media;
 }
 
 export async function renameGenerationImages (generation) {
@@ -538,7 +578,7 @@ export async function renameAllGenerationImages () {
   await forEachGeneration(async (generation) => {
     const renamedCount = await renameGenerationImages(generation);
     totalRenamedCount += renamedCount;
-  });
+  }, { includeLegacy: true });
 
   // Remove empty directories
   const dates = await getGenerationDates();

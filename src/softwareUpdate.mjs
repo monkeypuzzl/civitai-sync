@@ -3,7 +3,7 @@ import fs from 'node:fs';
 // import confirm from '@inquirer/confirm';
 import extractZip from 'extract-zip';
 import { mkdirp } from 'mkdirp';
-import { getModel, fetchFile } from './civitaiApi.mjs';
+import { fetchModel, fetchFile } from './civitaiApi.mjs';
 import { fileExists, readFile, writeFile, listFiles, listDirectories } from './utils.mjs';
 import { APP_DIRECTORY, CURRENT_VERSION } from './cli.mjs';
 import { spawnChild } from './childProcess.mjs';
@@ -31,8 +31,8 @@ export const SOFTWARE = {
 };
 const SOFTWARE_UPDATE_CHECK_EVERY = 12; // hours
 
-export async function getModelLatestVersion (modelId) {
-  const model = await getModel(modelId);
+export async function fetchModelLatestVersion (modelId) {
+  const model = await fetchModel(modelId);
 
   if (model.error) {
     return null;
@@ -55,7 +55,7 @@ export async function getModelLatestVersion (modelId) {
 }
 
 export async function getCivitaiSyncLatestInfo () {
-  const latestVersion = await getModelLatestVersion(APP_MODEL_ID);
+  const latestVersion = await fetchModelLatestVersion(APP_MODEL_ID);
 
   if (!latestVersion) {
     return null;
@@ -393,11 +393,7 @@ export async function updateSoftware ({ secretKey } = {}) {
     //   }
     // }
     
-    success = await downloadSoftwareUpdate(latest.downloadUrl, latest.version);
-
-    if (!success) {
-      success = await downloadSoftwareUpdate(latest.downloadUrl, latest.version, { secretKey });
-    }
+    success = await downloadSoftwareUpdate(latest.downloadUrl, latest.version, { secretKey });
     
     if (!success) {
       if (latest.availability === 'EarlyAccess') {

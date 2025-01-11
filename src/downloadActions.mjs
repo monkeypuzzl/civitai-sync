@@ -85,7 +85,7 @@ export async function fetchGenerations (args = {}, log = console.log) {
     const daysAgo = Math.round((Date.now() - new Date(report.fromDate).getTime()) / (1000 * 60 * 60 * 24));
     const fromDateDisplay = `${niceDate(report.fromDate)}${daysAgo ? ` (${daysAgo} day${daysAgo === 1 ? '' : 's'} ago)` : ''}`;
 
-    return `Downloading ${report.currentTag || 'all'}:\n${report.generationsDownloaded} generations downloaded (${report.generationsNew} saved), ${report.imagesSaved} images downloaded\nCurrent: ${fromDateDisplay}\n${esc ? '\nPress Esc to stop\n' : ''}`;
+    return `Downloading ${report.currentTag || (latest ? 'latest' : 'all')}:\n${report.generationsDownloaded} generations downloaded (${report.generationsNew} saved), ${report.imagesSaved} images downloaded\nCurrent: ${fromDateDisplay}\n${esc ? '\nPress Esc to stop\n' : ''}`;
   }
 
   function niceDate (dateString = '1970-01-01T00:00:00.000000Z') {
@@ -114,8 +114,10 @@ export async function fetchGenerations (args = {}, log = console.log) {
         }
 
         if (data.error) {
+          console.error('***', JSON.stringify(data, null, 2));
+
           if (data.error.json.data.code === 'UNAUTHORIZED') {
-            const answer = await confirm({ message: chalk.red('\nFetch failed. Your API key needs updating. Update now?'), default: true });
+            const answer = await confirm({ message: chalk.red('\nNot authorized. Your API key needs updating. Update now?'), default: true });
 
             if (answer) {
               await requestKey();
@@ -125,12 +127,30 @@ export async function fetchGenerations (args = {}, log = console.log) {
           }
 
           try {
-            log(chalk.red(data.error.json.message));
+            /*
+              error: {
+                json: {
+                  message,
+                  code: 11000 + httpStatus, // Arbitrary
+                  data: {
+                    code,
+                    httpStatus,
+                    path
+                  }
+                },
+                url
+              }
+            }*/
+            const { url, json: { message, code } } = data.error;
+
+            log(chalk.red(message));
+            log(chalk.red(`code ${code}, ${url}`));
+            log(chalk.red(JSON.stringify(data.error.json.data)));
           }
 
           catch (error) {
-            console.error(error.message, JSON.stringify(data, null, 2));
-            log('Download error');
+            log(chalk.red(`Download error: ${error.message}`));
+            log(chalk.red(JSON.stringify(data, null, 2)));
           }
 
           return false;
@@ -201,6 +221,8 @@ export async function fetchGenerations (args = {}, log = console.log) {
       return !aborted && await fetchGenerations({...args, cursor: nextCursor || cursor }, log);
     }
 
+    shouldContinue = false;
+
     const code = error.code || (error.cause && error.cause.code);
 
     if (code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'UND_ERR_SOCKET' || code ==='ECONNRESET') {
@@ -221,6 +243,26 @@ export async function fetchGenerations (args = {}, log = console.log) {
   }
 
   return !aborted && shouldContinue;
+}
+
+export function getDataPath () {
+  let dir = CONFIG.generationsDataPath;
+  
+  if (!CONFIG.generationsDataPath.startsWith('/')) {
+    dir = path.join(APP_DIRECTORY, CONFIG.generationsDataPath);
+  }
+
+  return dir;
+}
+
+export function getMediaPath () {
+  let dir = CONFIG.generationsMediaPath;
+  
+  if (!CONFIG.generationsMediaPath.startsWith('/')) {
+    dir = path.join(APP_DIRECTORY, CONFIG.generationsMediaPath);
+  }
+
+  return dir;
 }
 
 export async function openDataDirectory () {
@@ -298,7 +340,7 @@ export async function countGenerations ({ withImages = true, withMissingImages =
         }
       }
     }
-  }, includeLegacy);
+  }, { includeLegacy });
 
   const elapsed = Date.now() - startAt;
 
@@ -315,4 +357,3 @@ export async function countGenerations ({ withImages = true, withMissingImages =
 
   return report;
 }
-

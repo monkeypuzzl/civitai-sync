@@ -1,5 +1,7 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { fileExists, readFile, writeFile } from './utils.mjs';
+import { APP_DIRECTORY } from './cli.mjs';
 
 export const DEFAULT_CONFIG = {
   generationsDataPath: `generations/data`,
@@ -25,10 +27,20 @@ export async function getCurrentConfig (configPath) {
     return configPromise;
   }
 
-  configPromise = getConfig(configPath)
+  if (!configPath) {
+    throw new Error('getCurrentConfig: No config path');
+  }
+
+  let fullConfigPath = configPath;
+  
+  if (!configPath.startsWith('/') && !configPath.includes(':')) {
+    fullConfigPath = path.join(APP_DIRECTORY, configPath);
+  }
+
+  configPromise = getConfig(fullConfigPath)
   .then(config => {
     loaded = true;
-    currentConfigPath = configPath;
+    currentConfigPath = fullConfigPath;
     merge(currentConfig, config);
     return currentConfig;
   });

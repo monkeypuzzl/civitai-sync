@@ -35,6 +35,7 @@ export async function downloadGenerations (mode = 'latest') {
     overwriteIfModified: true,
     withImages: !CONFIG.excludeImages,
     tags,
+    latest: mode === 'latest',
     oldest: mode === 'oldest',
     resume: mode === 'missing-tags' || mode === 'missing-all'
   };
@@ -46,6 +47,7 @@ export async function downloadGenerations (mode = 'latest') {
 
     ui.updateBottomBar(`${label}...`);
 
+    // TD: capture cursor and mode, for later resume
     await fetchGenerations(options, report => {
       ui.updateBottomBar(report);
     });

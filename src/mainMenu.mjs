@@ -34,7 +34,7 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
     choices.unshift({
       name: 'Set API key',
       value: 'set-key',
-      description: 'Set your API key. Read "Show info" for how to get it.'
+      description: 'Set your API key. Read "About" for how to find it.'
     });
   }
 
@@ -101,7 +101,9 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
       return showInfo();
 
       case 'software-update':
-      secretKey = await getSecretKey(); 
+      // Use secretKey if it has been set; otherwise update without key
+      secretKey = keySaved ? await getSecretKey() : undefined;
+
       if (await updateSoftware({ secretKey }) === true) {
         return;
       }
@@ -118,4 +120,3 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
 
   return mainMenu();
 }
-
