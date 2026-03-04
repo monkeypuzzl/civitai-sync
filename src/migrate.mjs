@@ -1,10 +1,52 @@
 /*eslint no-unused-vars: ["error", { "caughtErrors": "all", "caughtErrorsIgnorePattern": "^ignore" }]*/
 import fs from 'fs';
-import path from 'node:path';
-import { setConfigParam, DEFAULT_CONFIG } from './config.mjs';
+import { mkdirp } from 'mkdirp';
+import { setConfigParam, removeConfigParam, DEFAULT_CONFIG } from './config.mjs';
 import { setupWorkflowTags, getGenerationDates, getGenerationIdsByDate, getGeneration, getGeneratedMediaInfo, mediaFilepath, MEDIA_DIRECTORIES } from './generations.mjs';
 import { CONFIG, CURRENT_VERSION, OS } from './cli.mjs';
-import { fileExists } from './utils.mjs';
+import { fileExists, listDirectory, isDate } from './utils.mjs';
+
+export async function migrateDirectoryLayout () {
+  // Skip if already migrated
+  if (CONFIG.dataPath || !CONFIG.generationsDataPath) {
+    return;
+  }
+
+  const oldDataPath = CONFIG.generationsDataPath;
+  const oldMediaPath = CONFIG.generationsMediaPath || oldDataPath;
+
+  console.log('Migrating directory layout, please wait...');
+
+  // Migrate data directory: move date dirs into generations/ subfolder
+  const newDataGenerationsDir = `${oldDataPath}/generations`;
+  await mkdirp(newDataGenerationsDir);
+
+  const dataEntries = await listDirectory(oldDataPath);
+  for (const entry of dataEntries) {
+    if (isDate(entry)) {
+      await fs.promises.rename(`${oldDataPath}/${entry}`, `${newDataGenerationsDir}/${entry}`);
+    }
+  }
+
+  // Migrate media directory: move type dirs and legacy date dirs into generations/ subfolder
+  const newMediaGenerationsDir = `${oldMediaPath}/generations`;
+  await mkdirp(newMediaGenerationsDir);
+
+  const KNOWN_MEDIA_DIRS = Object.values(MEDIA_DIRECTORIES);
+  const mediaEntries = await listDirectory(oldMediaPath);
+  for (const entry of mediaEntries) {
+    if (KNOWN_MEDIA_DIRS.includes(entry) || isDate(entry)) {
+      await fs.promises.rename(`${oldMediaPath}/${entry}`, `${newMediaGenerationsDir}/${entry}`);
+    }
+  }
+
+  // Update config to new schema
+  await setConfigParam('dataPath', oldDataPath);
+  await setConfigParam('mediaPath', oldMediaPath);
+  await setConfigParam('username', DEFAULT_CONFIG.username);
+  await removeConfigParam('generationsDataPath');
+  await removeConfigParam('generationsMediaPath');
+}
 
 export async function migrateGenerationTypes () {
   await setConfigParam('generationMediaTypes', DEFAULT_CONFIG.generationMediaTypes);
@@ -87,6 +129,8 @@ export async function removeEmptyMediaDirectories () {
 }
 
 export async function migrate () {
+  await migrateDirectoryLayout();
+
   if (CONFIG.version === CURRENT_VERSION) {
     return;
   }

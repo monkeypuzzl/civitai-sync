@@ -14,7 +14,6 @@ export async function spawnChild (command = '', args = [], options = {}, progres
 
     child.stderr.on('data', data => {
       stderr += data;
-      reject({ stdout, stderr });
     });
 
     child.on('close', (code) => {

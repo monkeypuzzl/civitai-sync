@@ -10,7 +10,8 @@ import { readFile, listDirectory, removeDirectoryIfEmpty, isDate } from './utils
 import { CONFIG } from './cli.mjs';
 import { fetchCivitaiImage } from './civitaiApi.mjs';
 
-// const BROKEN_IMAGE_MAX_SIZE = 1024 * 100;
+export function generationsDataDir () { return `${CONFIG.dataPath}/generations`; }
+export function generationsMediaDir () { return `${CONFIG.mediaPath}/generations`; }
 
 export const WORKFLOW_TAGS = [ 'favorite', 'feedback:liked', 'feedback:disliked' ];
 export const WORKFLOW_TAG_DIRECTORIES = { 'favorite': 'favorite', 'feedback:liked': 'liked', 'feedback:disliked': 'disliked' };
@@ -38,27 +39,23 @@ export function getDownloadTypes (dataOrMedia = 'data') {
 
 export function generationFilepath ({ id = 0, createdAt = '' }) {
   const date = toDateString(createdAt);
-  const filepath = `${CONFIG.generationsDataPath}/${date}/${id}.json`;
+  const filepath = `${generationsDataDir()}/${date}/${id}.json`;
 
   return filepath;
-}
-
-export function mediaFilename ({ generationId = '', mediaId = '', seed = 0 }) {
-  return `${generationId}_${String(seed)}_${mediaId}.jpeg`;
 }
 
 export function mediaFilepath ({ date = '', generationId = '', mediaId = '', seed = 0, directory = MEDIA_DIRECTORIES['all'] }) {
   const hasExtension = mediaId.includes('.');
   const suffix = hasExtension ? '' : '.jpeg';
   const filename = `${generationId}_${String(seed)}_${mediaId}${suffix}`;
-  const mediaDirectory = `${CONFIG.generationsMediaPath}/${directory.length ? `${directory}/` : '' }${date}`;
+  const mediaDirectory = `${generationsMediaDir()}/${directory.length ? `${directory}/` : '' }${date}`;
   const filepath = path.resolve(mediaDirectory, filename);
 
   return filepath;
 }
 
 export function legacyMediaFilepaths ({ date = '', generationId = '', mediaId = '', seed = 0 }) {
-  const legacyMediaDirectory = `${CONFIG.generationsMediaPath}/${date}`;
+  const legacyMediaDirectory = `${generationsMediaDir()}/${date}`;
   const hasExtension = mediaId.includes('.');
   const suffix = hasExtension ? '' : '.jpeg';
   const filepaths = [
@@ -72,7 +69,7 @@ export function legacyMediaFilepaths ({ date = '', generationId = '', mediaId = 
   return filepaths;
 }
 
-export async function getGenerationDates (path = CONFIG.generationsDataPath) {
+export async function getGenerationDates (path = generationsDataDir()) {
   const names = await listDirectory(path);
   const dates = names.filter(isDate);
 
@@ -81,7 +78,7 @@ export async function getGenerationDates (path = CONFIG.generationsDataPath) {
 
 export async function getGenerationIdsByDate (date = '', { includeLegacy = false, includeFailed = true, tags = [] } = {}) {
   const LEGACY_GENERATION_ID_LENGTH = 8 + '.json'.length;
-  const filenames = await listDirectory(`${CONFIG.generationsDataPath}/${date}`);
+  const filenames = await listDirectory(`${generationsDataDir()}/${date}`);
   const generationIds = filenames
     .filter(f => f.endsWith('.json'))
     .filter(f => includeLegacy ? true : f.length !== LEGACY_GENERATION_ID_LENGTH)
@@ -146,7 +143,7 @@ export async function getFirstGenerationId ({ includeLegacy = false } = {}) {
 }
 
 export async function getGeneration (date = '', id, { stringType = false } = {}) {
-  const filename = `${CONFIG.generationsDataPath}/${date}/${id}.json`;
+  const filename = `${generationsDataDir()}/${date}/${id}.json`;
 
   try {
     const contents = await readFile(filename);
@@ -193,7 +190,7 @@ export function getGeneratedMediaInfo (generation, { hidden = false } = {}) {
         return;
       }
 
-      if (metadata && 'images' in metadata && id in metadata.images) {
+      if (metadata && 'images' in metadata && metadata.images && id in metadata.images) {
         const mediaTags = metadata.images[id];
 
         // Image deleted from onsite generator
@@ -259,7 +256,7 @@ export async function forEachGeneration (fn, { includeLegacy = false }) {
 // e.g. downloading while on-site queue is pending. It should
 // refresh the generation data and download missing media.
 // Workaround, use 'Download missing'
-export async function saveGeneration (generation) {
+export async function saveGenerationData (generation) {
   const { id, createdAt } = generation;
   const filepath = generationFilepath({ id, createdAt });
   
@@ -281,18 +278,23 @@ export async function saveGeneration (generation) {
 export async function saveGenerations (apiGenerationsResponse, {
     overwrite = false,
     overwriteIfModified = false,
-    withImages = true
-  } = {},
-  progressFn = () => {}
+    withImages = true,
+    log,
+    signal
+  } = {}
 ) {
-  const { result, error } = apiGenerationsResponse;
-  const report = { generationsDownloaded: 0, generationsSaved: 0, imagesSaved: 0, error: null, savedGenerations: [] };
+  const { result } = apiGenerationsResponse;
 
-  if (error) {
-    console.log('Error in generation data', error.json);
-    report.error = error;
-    return report;
-  }
+  const report = {
+    generationsNew: 0,
+    generationsSaved: 0,
+    imagesSaved: 0,
+    videosSaved: 0,
+    error: null,
+    lastSavedGenerationId: undefined,
+    currentGenerations: [],
+    currentMedia: undefined
+  };
 
   const { data } = result;
 
@@ -307,9 +309,20 @@ export async function saveGenerations (apiGenerationsResponse, {
     return report;
   }
 
-  report.generationsDownloaded += items.length;
+  report.currentGenerations = items.map(({ id, createdAt }) => ({
+    date: toDateString(createdAt),
+    id,
+    status: 'data-downloaded'
+  }));
 
   for (let generation of items) {
+    const currentReportItem = report.currentGenerations.find(item => item.id === generation.id);
+
+    if (signal && signal.aborted) {
+      currentReportItem.status = 'aborted';
+      return report;
+    }
+
     const { id, createdAt } = generation;
     const date = toDateString(createdAt);
     const filepath = generationFilepath({ id, createdAt });
@@ -347,34 +360,77 @@ export async function saveGenerations (apiGenerationsResponse, {
     }
 
     if (shouldOverwrite) {
+      currentReportItem.status = 'data-updating';
       await fs.promises.unlink(filepath);
     }
 
+    else if (exists) {
+      currentReportItem.status = 'data-exists';
+    }
+
     if (!exists || shouldOverwrite) {
-      const filepath = await saveGeneration(generation);
+      const filepath = await saveGenerationData(generation);
 
       if (!filepath) {
-        report.error = 'Could not save generation';
+        currentReportItem.status = 'data-error';
+        report.error = { message: 'Could not save generation' };
         return report;
       }
 
-      report.savedGenerations.push({ date, id });
+      currentReportItem.status = 'data-saved';
+      report.lastSavedGenerationId = { date, id };
       report.generationsSaved ++;
-      progressFn({ generationsSaved: 1 });
 
       if (!exists) {
         report.generationsNew ++;
-        progressFn({ generationsNew: 1 });
       }
     }
 
     if (withImages && (!exists || overwrite || shouldOverwrite)) {
-      const { mediaSaved } = await saveGenerationImages(generation);
-      report.imagesSaved += mediaSaved;
-      progressFn({ imagesSaved: mediaSaved });
+      const mediaReport = await saveGenerationMedia(generation, { signal });
+      const { error, aborted, complete } = mediaReport;
+
+      report.imagesSaved += mediaReport.imagesSaved;
+      report.videosSaved += mediaReport.videosSaved;
+      report.aborted = aborted;
+      report.complete = complete;
+      report.error = null;
+      report.currentMedia = mediaReport;
+      
+      if (error) {
+        if (error instanceof Error) {
+          report.error = { message: error.message };
+        }
+
+        else {
+          report.error = error;
+        }
+
+        currentReportItem.status = 'media-error';
+      }
+
+      else {
+        currentReportItem.status = 'media-saved';
+      }
+
+    }
+
+    // Unchanged since download
+    if (currentReportItem.status === 'data-downloaded') {
+      if (report.currentMedia && (report.currentMedia.imagesSaved > 0 || report.currentMedia.videosSaved > 0)) {
+        currentReportItem.status = 'media-exists';
+      }
+
+      else {
+        currentReportItem.status = 'done';
+      }
+    }
+
+    if (log) {
+      log(report);
     }
   }
-  
+
   return report;
 }
 
@@ -387,8 +443,8 @@ export function getGenerationImages (generation) {
   return generation.steps.map(step => step.images).flat(); 
 }
 
-export async function fetchMedia (url, filepath) {
-  const responseBody = await fetchCivitaiImage(url);
+export async function fetchMedia (url, filepath, { signal }) {
+  const responseBody = await fetchCivitaiImage(url, { signal });
 
   // Probably deleted from on-site generator
   if (!responseBody) {
@@ -407,9 +463,9 @@ export async function fetchMedia (url, filepath) {
   }
 }
 
-export async function saveGenerationImages (generation, { doFetch = true } = {}) {
+export async function saveGenerationMedia (generation, { doFetch = true, signal } = {}) {
   const media = getGeneratedMediaInfo(generation);
-  const report = { mediaSaved: 0 };
+  const report = { imagesSaved: 0, videosSaved: 0, error: undefined, aborted: false, complete: false };
 
   for (let mediaInfo of media) {
     const foundFilepaths = [];
@@ -449,7 +505,14 @@ export async function saveGenerationImages (generation, { doFetch = true } = {})
       }
 
       const itemFilepath = missingFilepaths[0];
-      const result = await fetchMedia(mediaInfo.url, itemFilepath);
+      const result = await fetchMedia(mediaInfo.url, itemFilepath, { signal });
+
+      // Could be partial download
+      if (signal && signal.aborted && await fileExists(itemFilepath)) {
+        await fs.promises.unlink(itemFilepath);
+        report.aborted = true;
+        return report;
+      }
 
       // Probably deleted from on-site generator
       if (result === false) {
@@ -457,10 +520,15 @@ export async function saveGenerationImages (generation, { doFetch = true } = {})
       }
 
       else if (result.constructor === Error) {
-        throw result;
+        report.error = { message: result.message, mediaInfo };
+        return report;
       }
 
-      report.mediaSaved ++;
+      if (mediaInfo.mediaId.includes('.')) {
+        report.videosSaved++;
+      } else {
+        report.imagesSaved++;
+      }
       missingFilepaths.splice(0, 1);
       foundFilepaths.push(itemFilepath);
 
@@ -476,12 +544,13 @@ export async function saveGenerationImages (generation, { doFetch = true } = {})
     }
   }
   
+  report.complete = true;
   return report;
 }
 
 export async function setupWorkflowTags () {
   // Move date-ordered folders in /media to /media/all
-  const mediaDirectoryAll = `${CONFIG.generationsMediaPath}/${MEDIA_DIRECTORIES['all']}`;
+  const mediaDirectoryAll = `${generationsMediaDir()}/${MEDIA_DIRECTORIES['all']}`;
 
   if (!(await fileExists(mediaDirectoryAll))) {
     await mkdirp(mediaDirectoryAll);
@@ -494,7 +563,7 @@ export async function setupWorkflowTags () {
 
 export async function copyAllGeneratedMediaTypes () {
   await forEachGeneration(async (generation) => {
-    await saveGenerationImages(generation, { doFetch: false });
+    await saveGenerationMedia(generation, { doFetch: false });
   }, { includeLegacy: true });
 }
 
@@ -509,18 +578,18 @@ export async function deleteAllDeletedMedia () {
       return;
     }
 
-    steps.forEach(async ({ metadata }) => {
+    for (const { metadata } of steps) {
       if (metadata && 'images' in metadata) {
         const hiddenMedia = getGeneratedMediaInfo(generation, { hidden: true });
 
         if (!hiddenMedia.length) {
-          return;
+          continue;
         }
 
-        for (let mediaInfo of hiddenMedia) {
-          const directories = ['all', mediaInfo.tags.map(tag => MEDIA_DIRECTORIES[tag])];
+        for (const mediaInfo of hiddenMedia) {
+          const directories = ['all', ...mediaInfo.tags.map(tag => MEDIA_DIRECTORIES[tag])];
 
-          for (let directory of directories) {
+          for (const directory of directories) {
             const filepath = mediaFilepath({ ...mediaInfo, directory });
 
             if (await fileExists(filepath)) {
@@ -530,7 +599,7 @@ export async function deleteAllDeletedMedia () {
           }
         }
       }
-    });
+    }
   }, { includeLegacy: true });
 
   console.log(`${count} images were deleted.`);
@@ -538,7 +607,7 @@ export async function deleteAllDeletedMedia () {
 
 export async function renameGenerationImages (generation) {
   const date = toDateString(generation.createdAt);
-  const mediaDirectory = `${CONFIG.generationsMediaPath}/${MEDIA_DIRECTORIES['all']}/${date}`;
+  const mediaDirectory = `${generationsMediaDir()}/${MEDIA_DIRECTORIES['all']}/${date}`;
 
   if (!(await fileExists(mediaDirectory))) {
     await mkdirp(mediaDirectory);
@@ -584,7 +653,7 @@ export async function renameAllGenerationImages () {
   const dates = await getGenerationDates();
 
   for (let date of dates) {
-    const legacyMediaDirectory = `${CONFIG.generationsMediaPath}/${date}`;
+    const legacyMediaDirectory = `${generationsMediaDir()}/${date}`;
     await removeDirectoryIfEmpty(legacyMediaDirectory);
   }
 

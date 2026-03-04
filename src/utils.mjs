@@ -76,7 +76,7 @@ export async function removeDirectoryIfEmpty (dir, { removeDotFiles = true } = {
   if (removeDotFiles) {
     for (let filename of dotFiles) {
       const filepath = `${dir}/${filename}`;
-      await fs.promises.unlink(filepath);
+      await fs.unlink(filepath);
     }
   }
 
@@ -110,8 +110,10 @@ export async function readFile (filepath) {
   return await fs.readFile(filepath, 'utf-8');
 }
 
-export async function writeFile (filepath, contents) {
-  if (filepath.includes('/') || filepath.includes('\\')) {
+export async function writeFile (filepath, contents, options = {}) {
+  const { mkdir = true } = options;
+
+  if (mkdir && (filepath.includes('/') || filepath.includes('\\'))) {
     const dir = dirname(filepath);
 
     if (!(await fileExists(dir))) {

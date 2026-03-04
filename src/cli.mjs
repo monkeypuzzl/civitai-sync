@@ -4,9 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 import chalk from 'chalk';
 import { getCurrentConfig, DEFAULT_CONFIG } from './config.mjs';
-import { mainMenu } from './mainMenu.mjs';
 import { checkForSoftwareUpdate, getCurrentVersion } from './softwareUpdate.mjs';
 import { migrate } from './migrate.mjs';
+
+const KNOWN_COMMANDS = ['browse'];
 
 /////
 
@@ -60,6 +61,12 @@ export async function launchCLI () {
   await useConfig(CONFIG_PATH);
   await migrate();
 
+  if (COMMANDS.command === 'browse') {
+    const { launchBrowser } = await import('./browse.mjs');
+    return launchBrowser();
+  }
+
+  const { mainMenu } = await import('./mainMenu.mjs');
   const abortController = new AbortController();
 
   checkForSoftwareUpdate()
@@ -74,13 +81,16 @@ export async function launchCLI () {
 function getCommandLineArgs () {
   const commandlineArgs = process.argv.slice(2);
   const args = {};
+  let positional = [...commandlineArgs];
 
-  if (commandlineArgs.length) {
-    let configPath = commandlineArgs[0];
+  if (positional.length && KNOWN_COMMANDS.includes(positional[0])) {
+    args.command = positional.shift();
+  }
 
-    if (configPath) {
-      args.configPathOrig = configPath;
-    }
+  if (positional.length) {
+    let configPath = positional[0];
+
+    args.configPathOrig = configPath;
 
     if (!configPath.endsWith('.json')) {
       configPath += '.json';

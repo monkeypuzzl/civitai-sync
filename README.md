@@ -1,23 +1,33 @@
 # civitai-sync
 
-civitai-sync is a tool to download your Civitai creations.
+[civitai-sync](https://civitai.com/models/526058) is a tool to download and explore your Civitai creations.
 
-It downloads images from the onsite generator, and saves the generation data so that prompts can be searched as text. Everything is saved in date-ordered folders. Images are named to be in chronological order.
+---
 
-`Favorited` (or `liked` or `disliked`) generations can be saved into media folders for quick access, and data can be filtered to only download those types of generations.
+* Download generations from the Civitai generator
+* Download posts from your public profile
+* Browse your creations offline, with the mini-website Explorer
+* Data and media is saved in date-ordered folders.
+* Auto-updates for new versions
+
+---
 
 Model page:
 https://civitai.com/models/526058
 
-Discussion page for ideas, issues, newest comments:
+Discussion page for ideas, issues:
 https://civitai.com/articles/5676
 
 
-The program is a Command Line Interface (CLI).  
-It runs in your computer terminal, or command prompt.
+The program comes in 2 parts:
+
+- *Command Line Interface* (CLI). It runs in your computer terminal or command prompt
+- *Explorer*, a mini-website to browse your creations.
+
+_Civitai_ saves your generations for 30 days, so use the tool regularly.
 
 
-## Install it
+## Installation
 
 Install [Node.js](https://nodejs.org)  
 If you already have Node, it needs version 18 or above.
@@ -55,6 +65,24 @@ https://civitai.com/user/account
 ```
 A configuration file for user settings will be saved in the program folder at "/config/default.json".
 
+Start Downloading
+If your API key is saved, you can choose "Download generations" and "Download posts".
+
+See “Options” to change what is download and where it is saved.
+Download Location: inside the program folder in "data" and "media"; you can change to another location.
+Choose: to make folders for your ❤️ favorited and 👍 liked gens, or to download only data.
+
+Latest: download your most recent creations.
+Or download just “Favorite / Liked” gens.
+
+Open the Explorer
+☞ Click "Start Explorer"
+
+Data
+Data is saved directly from Civitai's API, as text files (in “JSON” format). Prompts and metadata are already embedded in the media metadata (e.g. "EXIF" format).
+
+You can explore the generation parameters and details for images and videos, in the civitai-sync Explorer.
+
 
 ## Multiple accounts
 
@@ -66,14 +94,7 @@ To download from more than one account, specify a unique name:
 
 You can give a full path to anywhere on the file system, and the config file will be loaded from or created there.
 
-Then change the download directory to be different for the new account.
-
-
-## Download directory
-
-You can set the directory to be anywhere on the file system, e.g. an external drive:
-
-"Download generations" > "Options" > "Change download directory"
+Change the download directory to be different for each account, unless you want the data and media for the accounts to be merged.
 
 
 ## Manual software update

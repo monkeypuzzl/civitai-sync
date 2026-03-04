@@ -1,8 +1,8 @@
 node_modules
 /*.log
 /generations
-/data
-/media
+data/
+media/
 /config
 /software-updates
 *.zip

@@ -4,9 +4,10 @@ import { fileExists, readFile, writeFile } from './utils.mjs';
 import { APP_DIRECTORY } from './cli.mjs';
 
 export const DEFAULT_CONFIG = {
-  generationsDataPath: `generations/data`,
-  generationsMediaPath: `generations/media`,
-  generationMediaTypes: [ 'all', 'favorite' ].sort(),
+  dataPath: `data`,
+  mediaPath: `media`,
+  username: '',
+  generationMediaTypes: ['all'].sort(),
   generationDataTypes: ['all'],
   keyEncrypt: false,
   excludeImages: false,
@@ -124,4 +125,9 @@ export async function setConfig (newParams) {
 
 export async function setConfigParam (param, value) {
   return await setConfig({[param]: value});
+}
+
+export async function removeConfigParam (param) {
+  delete currentConfig[param];
+  await writeFile(currentConfigPath, JSON.stringify(currentConfig, null, 2));
 }

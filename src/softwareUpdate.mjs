@@ -1,4 +1,5 @@
 /*eslint no-unused-vars: ["error", { "caughtErrors": "all", "caughtErrorsIgnorePattern": "^ignore" }]*/
+/*eslint no-empty: ["error", { "allowEmptyCatch": true }]*/
 import fs from 'node:fs';
 // import confirm from '@inquirer/confirm';
 import extractZip from 'extract-zip';
@@ -196,18 +197,25 @@ export async function checkForSoftwareUpdate ({ force = false } = {}) {
 export async function downloadSoftwareUpdate (url, version, { secretKey } = {}) {
   const SOFTWARE_UPDATE_DIRECTORY = `${APP_DIRECTORY}/software-updates`;
   const zipFilepath = `${SOFTWARE_UPDATE_DIRECTORY}/civitai-sync-v${version}.zip`;
+  const zipTmpFilepath = `${zipFilepath}.tmp`;
 
   if (await fileExists(zipFilepath)) {
     return true;
   }
-  
+
+  try { await fs.promises.unlink(zipTmpFilepath); }
+  catch (ignoreErr) {}
+
   try {
     console.log('Downloading software');
-    await fetchFile(url, zipFilepath, { secretKey });
+    await fetchFile(url, zipTmpFilepath, { secretKey });
+    await fs.promises.rename(zipTmpFilepath, zipFilepath);
   }
 
   catch (error) {
     console.error('Download software error', error);
+    try { await fs.promises.unlink(zipTmpFilepath); }
+    catch (ignoreErr) {}
     return false;
   }
 
@@ -218,20 +226,27 @@ export async function unzipSoftwareUpdate (version) {
   const SOFTWARE_UPDATE_DIRECTORY = `${APP_DIRECTORY}/software-updates`;
   const zipFilepath = `${SOFTWARE_UPDATE_DIRECTORY}/civitai-sync-v${version}.zip`;
   const unzipDirectory = `${SOFTWARE_UPDATE_DIRECTORY}/${version}`;
+  const unzipTmpDirectory = `${unzipDirectory}.tmp`;
 
   if (await fileExists(unzipDirectory)) {
     return true;
   }
-  
-  await mkdirp(unzipDirectory);
+
+  try { await fs.promises.rm(unzipTmpDirectory, { recursive: true }); }
+  catch (ignoreErr) {}
+
+  await mkdirp(unzipTmpDirectory);
 
   try {
     console.log('Extracting software');
-    await extractZip(zipFilepath, { dir: unzipDirectory });
+    await extractZip(zipFilepath, { dir: unzipTmpDirectory });
+    await fs.promises.rename(unzipTmpDirectory, unzipDirectory);
   }
 
   catch (error) {
-    console.error('download software error', error);
+    console.error('Extract software error', error);
+    try { await fs.promises.rm(unzipTmpDirectory, { recursive: true }); }
+    catch (ignoreErr) {}
     return false;
   }
 
@@ -332,7 +347,7 @@ export async function installSoftwareUpdate (version) {
     }
 
     undo.push(async () => {
-      for (let dir of backupDirectory) {
+      for (let dir of PROGRAM_DIRECTORIES) {
         // console.log('rename', `${backupDirectory}/${dir}`, `${APP_DIRECTORY}/${dir}`);
         await fs.promises.rename(`${backupDirectory}/${dir}`, `${APP_DIRECTORY}/${dir}`);
       }
@@ -372,13 +387,39 @@ export async function installSoftwareUpdate (version) {
   return false;
 }
 
+async function cleanupSoftwareUpdateArtifacts (version) {
+  const SOFTWARE_UPDATE_DIRECTORY = `${APP_DIRECTORY}/software-updates`;
+
+  try {
+    await fs.promises.unlink(`${SOFTWARE_UPDATE_DIRECTORY}/civitai-sync-v${version}.zip`);
+  }
+  catch (ignoreErr) {}
+
+  try {
+    await fs.promises.rm(`${SOFTWARE_UPDATE_DIRECTORY}/${version}`, { recursive: true });
+  }
+  catch (ignoreErr) {}
+
+  const backupDirs = (await listDirectories(SOFTWARE_UPDATE_DIRECTORY))
+  .filter(name => name.startsWith('backup-'))
+  .sort();
+
+  for (let dir of backupDirs.slice(0, -1)) {
+    try {
+      await fs.promises.rm(`${SOFTWARE_UPDATE_DIRECTORY}/${dir}`, { recursive: true });
+    }
+    catch (ignoreErr) {}
+  }
+}
+
 export async function updateSoftware ({ secretKey } = {}) {
   console.log(`Updating software. Please wait...`);
 
   let success;
+  let latest;
 
   try {
-    const { latest } = await checkForSoftwareUpdate({ force: true });
+    ({ latest } = await checkForSoftwareUpdate({ force: true }));
     
     if (!latest.version) {
       return false;
@@ -424,6 +465,16 @@ export async function updateSoftware ({ secretKey } = {}) {
   }
 
   if (success) {
+    const installedPackage = await getPackage(`${APP_DIRECTORY}/package.json`);
+
+    if (!installedPackage || installedPackage.version !== latest.version) {
+      console.error(`Software update verification failed: expected v${latest.version}, got v${installedPackage?.version}`);
+      success = false;
+    }
+  }
+
+  if (success) {
+    await cleanupSoftwareUpdateArtifacts(latest.version);
     // await spawnChild('npm', ['run', 'cli', CONFIG_PATH], { cwd: APP_DIRECTORY }, console.log);
     console.log(`Software updated. Please restart.`);
   }

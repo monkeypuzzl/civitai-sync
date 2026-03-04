@@ -1,6 +1,7 @@
 import inquirer from 'inquirer';
+import chalk from 'chalk';
 import select, { Separator } from '@inquirer/select';
-import { fetchGenerations } from './downloadActions.mjs';
+import { fetchGenerations, formatCompletion, listenForEscKeyPress } from './downloadActions.mjs';
 import { mainMenu } from './mainMenu.mjs';
 import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { getSecretKey } from './keyActions.mjs';
@@ -30,6 +31,14 @@ export async function downloadGenerations (mode = 'latest') {
     tags.push(...CONFIG.generationMediaTypes.filter(type => type !== 'all'));
   }
 
+  function log (text) {
+    if (text) ui.updateBottomBar(text);
+  }
+
+  const escKeyController = listenForEscKeyPress({
+    onAbort: () => ui.updateBottomBar(chalk.dim('  Stopping... finishing current download'))
+  });
+
   const options = {
     secretKey,
     overwriteIfModified: true,
@@ -37,7 +46,9 @@ export async function downloadGenerations (mode = 'latest') {
     tags,
     latest: mode === 'latest',
     oldest: mode === 'oldest',
-    resume: mode === 'missing-tags' || mode === 'missing-all'
+    resume: mode === 'missing-tags' || mode === 'missing-all',
+    log,
+    signal: escKeyController.signal
   };
 
   const label = labels[mode];
@@ -45,16 +56,22 @@ export async function downloadGenerations (mode = 'latest') {
   try {
     clearTerminal();
 
-    ui.updateBottomBar(`${label}...`);
+    ui.updateBottomBar(`${chalk.hex('#a5d8ff')(label)}...\n${chalk.dim('Press Esc to stop')}\n`);
 
-    // TD: capture cursor and mode, for later resume
-    await fetchGenerations(options, report => {
-      ui.updateBottomBar(report);
-    });
+    const result = await fetchGenerations(options);
+
+    log(formatCompletion(result));
+
+    return result;
   }
 
   catch (error) {
     console.error(error);
+  }
+
+  finally {
+    ui.close();
+    escKeyController.stop();
   }
 }
 
@@ -65,7 +82,7 @@ export async function downloadGenerationsMenu (doClearTerminal = true) {
     return mainMenu();
   }
 
-  const dataDirExists = await fileExists(CONFIG.generationsDataPath);
+  const dataDirExists = await fileExists(`${CONFIG.dataPath}/generations`);
   const dates = await getGenerationDates();
   const hasGenerations = !!dates.length;
   const oldestDate = dates[0];
@@ -129,7 +146,7 @@ export async function downloadGenerationsMenu (doClearTerminal = true) {
   }
 
   else {
-    console.log('\n');
+    console.log();
   }
 
   const answer = await select({

@@ -1,22 +1,17 @@
 import chalk from 'chalk';
-import inquirer from 'inquirer';
-import confirm from '@inquirer/confirm';
 import select, { Separator } from '@inquirer/select';
 import checkbox from '@inquirer/checkbox';
 import { fileExists, removeDirectoryIfEmpty } from './utils.mjs';
 import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { downloadGenerationsMenu } from './downloadGenerationsMenu.mjs';
 import { setConfigParam } from './config.mjs';
-import { countGenerations, openDataDirectory, openMediaDirectory } from './downloadActions.mjs';
 import { copyAllGeneratedMediaTypes, MEDIA_DIRECTORIES, deleteAllDeletedMedia } from './generations.mjs';
 
-let COUNT_REPORT;
 let previousMenuItem;
 
 export async function setDownloadOptions ({ clear = true, defaultValue = '' } = {}) {
   const choices = [];
-  const dataDirExists = await fileExists(CONFIG.generationsDataPath);
-  const mediaDirExists = await fileExists(CONFIG.generationsMediaPath);
+  const mediaDirExists = await fileExists(`${CONFIG.mediaPath}/generations`);
   const currentMediaDirectories = (CONFIG.generationMediaTypes || []).map(type => MEDIA_DIRECTORIES[type]);
   const currentDataTypes = (CONFIG.generationDataTypes || []).map(type => MEDIA_DIRECTORIES[type]);
 
@@ -60,68 +55,12 @@ export async function setDownloadOptions ({ clear = true, defaultValue = '' } = 
     );
   }
 
-  if (dataDirExists) {
-    if (CONFIG.excludeImages) { 
-      choices.push(
-        {
-          name: 'Open download directory',
-          value: 'open-data-directory',
-          description: `Open: "${CONFIG.generationsDataPath}" in file explorer`,
-        }
-      );
-    }
-
-    else {
-      choices.push(
-        {
-          name: 'Open download directory',
-          value: 'open-directory',
-          description: `Open directory in file explorer`,
-        }
-      );
-    }
-  }
-
-  if (CONFIG.excludeImages) {  
-    choices.push(
-      {
-        name: 'Change download directory',
-        value: 'set-data-directory',
-        description: `"${CONFIG.generationsDataPath}"`,
-      }
-    );
-  }
-
-  else {
-    choices.push(
-      {
-        name: 'Change download directory',
-        value: 'change-directory',
-        description: `${
-          CONFIG.generationsDataPath === CONFIG.generationsMediaPath ?
-          `Data & media: ${chalk.italic(CONFIG.generationsDataPath)}\n${chalk.hex('#FFA500')('Media is set to download into the same directory as data')}` :
-          `Data: ${chalk.italic(CONFIG.generationsDataPath)}\nMedia: ${chalk.italic(CONFIG.generationsMediaPath)}`
-          }`
-      }
-    );
-  }
-
-  if (dataDirExists) {
-    choices.push(
-      {
-        name: `Count generations${COUNT_REPORT ? ` (${COUNT_REPORT.generations})` : ''}`,
-        value: 'count-generations',
-        description: 'Show number of downloaded generations'
-      }
-    );
-  }
-
   if (mediaDirExists && !CONFIG.excludeImages) {
     choices.push(
       {
         name: 'Remove deleted media',
         value: 'remove-deleted-media',
-        description: `Remove downloaded media that has been deleted from the onsite generator.\n\nIf you delete media onsite that has already been downloaded:\nFirst, ${chalk.bold('download all generations')} to update your data, then run this.\nCurrently, deletion isn't detected when ${chalk.italic('every image')} in a generation has been deleted.`
+        description: `Remove generation media that has been deleted from the onsite generator.\n\nIf you delete media onsite that has already been downloaded:\nFirst, ${chalk.bold('download all generations')} to update your data, then run this.`
       }
     );
   }
@@ -141,11 +80,11 @@ export async function setDownloadOptions ({ clear = true, defaultValue = '' } = 
   }
 
   else {
-    console.log('\n');
+    console.log();
   }
 
   const answer = await select({
-    message: 'Download options:',
+    message: 'Generation options:',
     choices,
     theme: customTheme,
     pageSize: choices.length,
@@ -155,22 +94,9 @@ export async function setDownloadOptions ({ clear = true, defaultValue = '' } = 
 
   previousMenuItem = answer;
 
-  let report, reportText, newValue;
+  let newValue;
 
   switch (answer) {
-    case 'change-directory':
-    return changeDirectoryMenu();
-    
-    case 'open-directory':
-    return openDirectoryMenu();
-
-    case 'set-data-directory':
-    return setDataDownloadLocation();
-
-    case 'open-data-directory':
-    openDataDirectory();
-    break;
-
     case 'set-save-media':
     await setConfigParam('excludeImages', !CONFIG.excludeImages);
     return setDownloadOptions();
@@ -182,7 +108,6 @@ export async function setDownloadOptions ({ clear = true, defaultValue = '' } = 
     return setGenerationDataTypes();
 
     case 'set-data-filter':
-    // There is media, but not all media
     if (CONFIG.generationDataTypes.includes('all')) {
       newValue = CONFIG.generationMediaTypes;
     }
@@ -194,27 +119,6 @@ export async function setDownloadOptions ({ clear = true, defaultValue = '' } = 
     await setConfigParam('generationDataTypes', newValue);
     return setDownloadOptions();
 
-    case 'count-generations':
-    console.log('Counting...');
-    report = await countGenerations({ withImages: !CONFIG.excludeImages });
-    COUNT_REPORT = report;
-    
-    if (report.generations) {
-      reportText = `\nThere are ${report.generations} generations downloaded between ${report.fromDate} and ${report.toDate}.`;
-    
-      if (!CONFIG.excludeImages) {
-        reportText += `\n${report.imagesSaved} images are saved.`;
-      }
-
-      console.log(reportText);
-    }
-
-    else {
-      console.log(`\nThere are no generations downloaded in the data directory.`);
-    }
-    
-    return setDownloadOptions({ clear: false });
-
     case 'remove-deleted-media':
     await deleteAllDeletedMedia();
     return setDownloadOptions({ clear: false });
@@ -224,182 +128,6 @@ export async function setDownloadOptions ({ clear = true, defaultValue = '' } = 
   }
 
   return setDownloadOptions();
-}
-
-let previousMenuItemEditDirectory;
-
-async function changeDirectoryMenu (doClearTerminal = true) {
-  const choices = [
-    {
-      name: 'Data directory',
-      value: 'set-data-directory',
-      description: `"${CONFIG.generationsDataPath}"${CONFIG.generationsMediaPath === CONFIG.generationsDataPath ? chalk.hex('#FFA500')('\nMedia is currently set to download into the same directory as data') : ''}`,
-    },
-
-    {
-      name: 'Media directory',
-      value: 'set-media-directory',
-      description: `"${CONFIG.generationsMediaPath}"${CONFIG.generationsMediaPath === CONFIG.generationsDataPath ? chalk.hex('#FFA500')('\nMedia is currently set to download into the same directory as data') : ''}`,
-    },
-
-    new Separator(),
-
-    {
-      name: 'Back',
-      value: 'back',
-      description: 'Back to download options'
-    }
-  ];
-
-  if (doClearTerminal) {
-    clearTerminal();
-  }
-
-  else {
-    console.log('\n');
-  }
-
-  const answer = await select({
-    message: 'Change directory:',
-    choices,
-    theme: customTheme,
-    pageSize: choices.length,
-    loop: false,
-    default: previousMenuItemEditDirectory !== 'back' ? previousMenuItemEditDirectory : undefined
-  });
-
-  previousMenuItemEditDirectory = answer;
-
-  switch (answer) {
-    case 'set-data-directory':
-    return setDataDownloadLocation();
-
-    case 'set-media-directory':
-    return setMediaDownloadLocation();
-
-    case 'back':
-    return setDownloadOptions();
-  }
-
-  return changeDirectoryMenu();
-}
-
-let previousMenuItemDirectory;
-
-async function openDirectoryMenu (doClearTerminal = true) {
-  const mediaDirExists = !CONFIG.excludeImages && CONFIG.generationsDataPath !== CONFIG.generationsMediaPath && await fileExists(CONFIG.generationsMediaPath);
-
-  const choices = [
-    {
-      name: 'Data directory',
-      value: 'open-data-directory',
-      description: `Open "${CONFIG.generationsDataPath}" in file explorer`,
-    }
-  ];
-
-  if (mediaDirExists) {
-    choices.push(
-      {
-        name: 'Media directory',
-        value: 'open-media-directory',
-        description: `Open "${CONFIG.generationsMediaPath}" in file explorer`,
-      }
-    );
-  }
-
-  choices.push(
-    new Separator(),
-
-    {
-      name: 'Back',
-      value: 'back',
-      description: 'Back to download options'
-    }
-  );
-
-  if (doClearTerminal) {
-    clearTerminal();
-  }
-
-  else {
-    console.log('\n');
-  }
-
-  const answer = await select({
-    message: 'Open directory:',
-    choices,
-    theme: customTheme,
-    pageSize: choices.length,
-    loop: false,
-    default: previousMenuItemDirectory !== 'back' ? previousMenuItemDirectory : undefined
-  });
-
-  previousMenuItemDirectory = answer;
-
-  switch (answer) {
-    case 'open-data-directory':
-    openDataDirectory();
-    break;
-
-    case 'open-media-directory':
-    openMediaDirectory();
-    break;
-
-    case 'back':
-    return setDownloadOptions();
-  }
-
-  return openDirectoryMenu();
-}
-
-async function setDataDownloadLocation () {
-  const generationsDataPath = await inquirer.prompt([
-    {
-      type: 'input',
-      message: `New DATA directory, currently "${CONFIG.generationsDataPath}" (press Enter to cancel):`,
-      name: 'download-directory'
-    }
-  ]);
-
-  const newPath = generationsDataPath['download-directory'];
-
-  if (newPath) {
-    await setConfigParam('generationsDataPath', newPath);
-    
-    console.log(chalk.green(`Data directory changed to ${newPath}\n${newPath === CONFIG.generationsMediaPath ? chalk.hex('#FFA500')('(Media will download into the same directory as data)\n') : ''}`));
-
-    const answer = await confirm({ message: `Also change the MEDIA directory, currently: ${CONFIG.generationsMediaPath}?`, default: false });
-
-    if (answer) {
-      return setMediaDownloadLocation();
-    }
-  }
-
-  if (CONFIG.excludeImages) {
-    return setDownloadOptions();
-  }
-
-  return changeDirectoryMenu();
-}
-
-async function setMediaDownloadLocation () {
-  const generationsDataPath = await inquirer.prompt([
-    {
-      type: 'input',
-      message: `New MEDIA directory, currently ${CONFIG.generationsMediaPath} (press Enter to cancel):`,
-      name: 'download-directory'
-    }
-  ]);
-
-  const newPath = generationsDataPath['download-directory'];
-
-  if (newPath) {
-    await setConfigParam('generationsMediaPath', newPath);
-    console.log(chalk.green(`Media directory changed to ${newPath}\n${newPath === CONFIG.generationsDataPath ? chalk.hex('#FFA500')('(Media will download into the same directory as data)\n') : ''}`));
-
-  }
-
-  return changeDirectoryMenu();
 }
 
 async function setGenerationMediaTypes () {
@@ -473,7 +201,7 @@ async function setGenerationMediaTypes () {
     if (removedTypes) {
       for (let type of removedTypes) {
         const directoryName = MEDIA_DIRECTORIES[type];
-        const dir = `${CONFIG.generationsMediaPath}/${directoryName}`;
+        const dir = `${CONFIG.mediaPath}/generations/${directoryName}`;
         await removeDirectoryIfEmpty(dir);
       }
     }
