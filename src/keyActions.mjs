@@ -4,7 +4,7 @@ import input from '@inquirer/input';
 import password from '@inquirer/password';
 import { CONFIG, CONFIG_PATH } from './cli.mjs';
 import { encryptAES, decryptAES } from './crypto.mjs';
-import { setConfig } from './config.mjs';
+import { setConfig, setConfigParam } from './config.mjs';
 import { getGenerations } from './civitaiApi.mjs';
 
 let SECRET_KEY;
@@ -106,7 +106,7 @@ export async function unEncryptKey (encryptedKey) {
 }
 
 export async function testKey (secretKey) {
-  const data = await getGenerations(undefined, undefined, { secretKey });
+  const data = await getGenerations({ secretKey });
 
   if (!data) {
     return { error: true };
@@ -154,6 +154,7 @@ export async function requestKey () {
   }
   
   SECRET_KEY = newKey;
+  await setConfigParam('username', '');
 
   const encryptedKey = await encryptKey(newKey);
 

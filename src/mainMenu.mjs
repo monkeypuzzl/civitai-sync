@@ -1,18 +1,28 @@
 /*eslint no-unused-vars: ["error", { "caughtErrors": "all", "caughtErrorsIgnorePattern": "^ignore" }]*/
 import chalk from 'chalk';
 import select, { Separator } from '@inquirer/select';
+import { ExitPromptError } from '@inquirer/core';
 import { downloadGenerationsMenu } from './downloadGenerationsMenu.mjs';
+import { downloadPostsMenu } from './downloadPostsMenu.mjs';
 import { keyOptions } from './keyOptionsMenu.mjs';
 import { showInfo } from './showInfo.mjs';
 import { CONFIG, CURRENT_VERSION, customTheme, clearTerminal } from './cli.mjs';
 import { requestKey, getSecretKey } from './keyActions.mjs';
 import { SOFTWARE, updateSoftware } from './softwareUpdate.mjs';
+import { getBrowseState, startBrowseServer, stopBrowseServer } from './browse.mjs';
 
 let previousMenuItem;
+
+export async function shutdownBrowseServer () {
+  if (getBrowseState()) {
+    await stopBrowseServer();
+  }
+}
 
 export async function mainMenu ({ clear = true, defaultValue = '', abortSignal = undefined } = {}) {
   const keySaved = !!CONFIG.secretKey;
   const choices = [];
+  const browsing = !!getBrowseState();
 
   if (keySaved) {
     choices.push(
@@ -23,10 +33,30 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
       },
 
       {
+        name: 'Download posts',
+        value: 'download-posts',
+        description: 'Download your published posts and their images/videos'
+      },
+
+      {
         name: 'Settings',
         value: 'settings',
         description: 'Update API key, add/remove password'
-      }
+      },
+
+      new Separator(),
+
+      browsing
+        ? {
+            name: `${chalk.red('Stop')} Explorer server`,
+            value: 'browse-stop',
+            description: `Running at ${getBrowseState().url}`
+          }
+        : {
+            name: 'Start Explorer',
+            value: 'browse',
+            description: 'Open your local library of creations in the browser'
+          }
     );
   }
 
@@ -71,7 +101,11 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
   }
 
   else {
-    console.log('\n');
+    console.log();
+  }
+
+  if (browsing) {
+    console.log(`  ${chalk.green('\u25CF')} ${chalk.dim('Explorer:')} ${chalk.hex('#a5d8ff').underline(getBrowseState().url)}\n`);
   }
 
   try {
@@ -79,6 +113,7 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
       message: 'Please select:',
       choices,
       theme: customTheme,
+      pageSize: choices.length,
       default: defaultValue || previousMenuItem
     }, { signal: abortSignal });
 
@@ -97,11 +132,13 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
       case 'download-generations':
       return downloadGenerationsMenu();
 
+      case 'download-posts':
+      return downloadPostsMenu();
+
       case 'info':
       return showInfo();
 
       case 'software-update':
-      // Use secretKey if it has been set; otherwise update without key
       secretKey = keySaved ? await getSecretKey() : undefined;
 
       if (await updateSoftware({ secretKey }) === true) {
@@ -109,13 +146,31 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
       }
       break;
 
+      case 'browse': {
+      console.log(chalk.dim('\n  Starting Explorer server...'));
+      await startBrowseServer();
+      console.log(`  ${chalk.green('Explorer server started at')} ${chalk.hex('#a5d8ff').underline(getBrowseState().url)}`);
+      break;
+      }
+
+      case 'browse-stop': {
+      await stopBrowseServer();
+      console.log(chalk.dim('\n  Explorer server stopped.'));
+      break;
+      }
+
       case 'exit':
+      await shutdownBrowseServer();
       return;
     }
   }
 
-  catch (ignoreErr) {
-    // Abort signal
+  catch (err) {
+    if (err instanceof ExitPromptError) {
+      await shutdownBrowseServer();
+      return;
+    }
+    // Otherwise: abort signal from software update checker — re-enter menu
   }
 
   return mainMenu();

@@ -16,21 +16,8 @@ https://civitai.com/articles/5676
 ${chalk.bold('Create API key')}:
 https://civitai.com/user/account
 
-${chalk.bold('Download generations')}
-Data and media is saved inside the program folder in "generations".
-
-Change the download directory, choose to download all or favorite generations,
-or only data, in "${chalk.bold('Download generations')}" > "${chalk.bold('Options')}".
-
-${chalk.bold('Multiple accounts')}
-The program is normally run as:
-  ${chalk.bold.italic('npm run cli')}
-
-To download an alternative account, give a unique name for it:
-  ${chalk.bold.italic('npm run cli bob')}
-
-Or give a file system path to where a config file can be created.
-By default, config files are saved in the "config" folder.
+${chalk.bold('Download generations, posts, and media')} by following the instructions in the "Download" menu. You can also browse your local library of creations in the browser by selecting "Browse Creations" from the main menu.
+Choose a download directory. By default, Data and media is saved in the program folder in "data" and "media" and config files are saved in the "config".
 `);
 
   const choices = [
