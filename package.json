@@ -1,6 +1,6 @@
 {
   "name": "civitai-sync",
-  "version": "5.0.0",
+  "version": "5.0.1",
   "license": "MIT",
   "scripts": {
     "setup": "npm ci --omit-dev && npm link",
@@ -19,7 +19,8 @@
     "@eslint/js": "^9.2.0",
     "esbuild": "^0.27.3",
     "eslint": "^9.2.0",
-    "globals": "^15.2.0"
+    "globals": "^15.2.0",
+    "preact": "^10.28.4"
   },
   "dependencies": {
     "@inquirer/checkbox": "^4.0.1",
@@ -31,8 +32,7 @@
     "chalk": "^5.3.0",
     "extract-zip": "^2.0.1",
     "inquirer": "^9.2.16",
-    "mkdirp": "^3.0.1",
-    "preact": "^10.28.4"
+    "mkdirp": "^3.0.1"
   },
   "engines": {
     "node": ">=18"

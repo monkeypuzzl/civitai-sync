@@ -8,10 +8,19 @@ import { keyOptions } from './keyOptionsMenu.mjs';
 import { showInfo } from './showInfo.mjs';
 import { CONFIG, CURRENT_VERSION, customTheme, clearTerminal } from './cli.mjs';
 import { requestKey, getSecretKey } from './keyActions.mjs';
-import { SOFTWARE, updateSoftware } from './softwareUpdate.mjs';
+import { SOFTWARE, updateSoftware, checkForSoftwareUpdate } from './softwareUpdate.mjs';
 import { getBrowseState, startBrowseServer, stopBrowseServer } from './browse.mjs';
 
 let previousMenuItem;
+
+function formatTimeAgo (timestamp) {
+  const seconds = Math.floor((Date.now() - timestamp) / 1000);
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ago`;
+}
 
 export async function shutdownBrowseServer () {
   if (getBrowseState()) {
@@ -79,9 +88,17 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
   if (SOFTWARE.hasUpdate) {
     choices.push(
       {
-        name: `${chalk.hex('#a5d8ff')(`Install software update, v${SOFTWARE.latest.version}`)}`,
+        name: `${chalk.hex('#a5d8ff')(`Install software update — v${SOFTWARE.latest.version}`)}`,
         value: 'software-update',
         description: SOFTWARE.latest.summary
+      }
+    );
+  } else {
+    choices.push(
+      {
+        name: 'Check for updates',
+        value: 'check-update',
+        description: SOFTWARE.checkedAt ? chalk.dim(`Last checked ${formatTimeAgo(SOFTWARE.checkedAt)}`) : chalk.dim(`version ${CURRENT_VERSION}`)
       }
     );
   }
@@ -137,6 +154,16 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
 
       case 'info':
       return showInfo();
+
+      case 'check-update':
+      console.log(chalk.dim('\n  Checking for updates...'));
+      await checkForSoftwareUpdate({ force: true });
+      if (SOFTWARE.hasUpdate) {
+        console.log(chalk.hex('#a5d8ff')(`\n  Update available: v${SOFTWARE.latest.version}`));
+      } else {
+        console.log(chalk.dim(`\n  You're up to date (v${CURRENT_VERSION})`));
+      }
+      break;
 
       case 'software-update':
       secretKey = keySaved ? await getSecretKey() : undefined;

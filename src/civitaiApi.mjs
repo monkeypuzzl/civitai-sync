@@ -2,7 +2,7 @@
 
 import fs from 'node:fs';
 import { Readable } from 'node:stream';
-import { finished } from 'node:stream/promises';
+import { pipeline } from 'node:stream/promises';
 import { wait } from './utils.mjs';
 import headers from './headers.mjs';
 
@@ -366,7 +366,7 @@ export async function fetchFile (url, filepath, { secretKey }) {
 
     const fileStream = fs.createWriteStream(filepath, { flags: 'wx' });
 
-    await finished(Readable.fromWeb(response.body).pipe(fileStream));
+    await pipeline(Readable.fromWeb(response.body), fileStream);
     return true;
   }
 
