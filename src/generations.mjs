@@ -2,7 +2,7 @@
 
 import fs from 'node:fs';
 import { Readable } from 'node:stream';
-import { finished } from 'node:stream/promises';
+import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { mkdirp } from 'mkdirp';
 import { writeFile, fileExists, toDateString } from './utils.mjs';
@@ -454,7 +454,7 @@ export async function fetchMedia (url, filepath, { signal }) {
   try {
     const fileStream = fs.createWriteStream(filepath, { flags: 'wx' });
 
-    await finished(Readable.fromWeb(responseBody).pipe(fileStream));
+    await pipeline(Readable.fromWeb(responseBody), fileStream);
     return true;
   }
 

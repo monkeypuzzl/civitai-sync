@@ -20,10 +20,13 @@ const PROGRAM_FILES = [
   { suffix: '.mjs' },
   { suffix: '.js' }
 ];
+const PROGRAM_FILES_EXCLUDE = [
+  'eslint.config.mjs'
+];
 const PROGRAM_DIRECTORIES = [
   'src'
 ];
-const HTML_INITIAL_TEXT_CONTENT = /<p>([^<]*)<\/p>/;
+const HTML_FIRST_PARAGRAPH = /<p>(.*?)<\/p>/;
 export const SOFTWARE = {
   current: {},
   latest: {},
@@ -49,8 +52,10 @@ export async function fetchModelLatestVersion (modelId) {
   }
 
   const { id, name, availability, downloadUrl, description } = latestVersion;
-  const summaryMatch = description.match(HTML_INITIAL_TEXT_CONTENT);
-  const summary = summaryMatch ? summaryMatch[1] : '';
+  const summaryMatch = description.match(HTML_FIRST_PARAGRAPH);
+  const summary = summaryMatch
+    ? summaryMatch[1].replace(/<br\s*\/?>/g, ' ').replace(/<[^>]+>/g, '').trim()
+    : '';
 
   return { id, name, availability, downloadUrl, summary };
 }
@@ -267,7 +272,7 @@ export async function installSoftwareUpdate (version) {
   }
 
   const rootFiles = (await listFiles(APP_DIRECTORY))
-  .filter(file => PROGRAM_FILES.some(({ prefix, suffix }) => {
+  .filter(file => !PROGRAM_FILES_EXCLUDE.includes(file) && PROGRAM_FILES.some(({ prefix, suffix }) => {
     if (
       (prefix && !file.startsWith(prefix)) ||
       (suffix && !file.endsWith(suffix))

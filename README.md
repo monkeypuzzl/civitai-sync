@@ -99,10 +99,10 @@ Change the download directory to be different for each account, unless you want 
 
 ## Manual software update
 
-Software updates are now automatically handled by the program.
+Software updates are automatically handled by the program. You can trigger a manual check from the main menu ("Check for updates").
 
 To manually update from an older version:
 
 - Download the latest program file [from the model page](https://civitai.com/models/526058) and unzip it
-- Copy the unzipped files into your existing civitai-sync program folder, overwriting older files.
-- As in the "Install" step above, `cd` change directory to the program folder and run `npm install`, or on Windows double-click on `install_win`.
+- Copy the unzipped files into your existing civitai-sync program folder, overwriting older files
+- In the terminal, `cd` to the program folder and run `npm run setup`, or on Windows double-click on `install_win`
