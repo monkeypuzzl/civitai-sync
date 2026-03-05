@@ -30,6 +30,18 @@ Image CDN requests do **not** require authentication.
 
 ---
 
+## API Type Reliability
+
+**The Civitai API's documented types are aspirational, not contractual.** Fields documented as `string` may arrive as `null` or be absent entirely. This is a systemic pattern, not a one-off for any particular field. Observed examples:
+
+- `images[].name` in `post.getInfinite` — documented as `string`, observed as `null` for images stored without a separate filename (the CDN serves them using their UUID as the path stem instead).
+
+**Defensive coding rule**: Any code that calls string methods (`.split()`, `.includes()`, `.startsWith()`, etc.) on a value received from the API must guard against `null` and `undefined`. A bare `value.split('?')` will crash with `TypeError: Cannot read properties of null (reading 'split')` if the API returns `null`. Prefer an early guard (`if (!value) { /* fallback */ }`) or optional chaining where appropriate.
+
+This applies to all endpoints, not just posts. When adding new code that processes API responses, assume any non-primitive field may be null regardless of what the type table says.
+
+---
+
 ## Required Headers
 
 The `Referer` header is **mandatory** for all requests (data and images). Without it, requests may be silently rejected or return unexpected results.
@@ -320,6 +332,17 @@ Fetches a paginated list of the authenticated user's published images. Used inte
 
 > **Note**: Unlike the tRPC `post.getInfinite` response, the REST API returns **fully-constructed CDN URLs** in the `url` field. This is how the Cloudflare Images account hash (`xG1nkqKTMzGDvpLrqFT7WA`) is discovered — it is the third path segment in this URL. See [Post Image CDN](#post-image-cdn) below.
 
+#### REST vs tRPC image field shapes
+
+The same image appears differently depending on which endpoint returns it:
+
+| Field | REST API (`/api/v1/images`) | tRPC (`post.getInfinite`) |
+|---|---|---|
+| `url` | Fully-constructed CDN URL (e.g. `https://image.civitai.com/…/<uuid>/original=true/<filename>.jpeg`) | Cloudflare Images UUID only (e.g. `12daaff8-d19c-4688-a718-332b6aa47a9c`) |
+| `name` | **Not present** — the filename is embedded in the `url` path | Separate field: the filename stem (e.g. `TH8CX36WMGF3DQ3604QEXX26Z0.jpg`), or `null` if no filename was assigned |
+
+When `name` is `null` in tRPC, the REST API's URL confirms the CDN uses the UUID itself as the filename (e.g. `…/fdefc078-…/original=true/fdefc078-….jpeg`). This is the basis for the fallback in `buildPostImageUrl`.
+
 ---
 
 ### Posts — `post.getInfinite`
@@ -425,6 +448,27 @@ The full accepted input schema is defined in `civitai-src/src/server/schema/post
                 "minor": false,
                 "poi": false,
                 "tagIds": [529, 1896, 3642]
+              },
+              {
+                "id": 27024502,
+                "userId": 4356713,
+                "name": null,
+                "url": "fdefc078-9335-446f-a3fe-daf0bd5d477c",
+                "nsfwLevel": 1,
+                "width": 896,
+                "height": 1152,
+                "hash": "U59ZJ^t7}9w^OqsoaeR*|@WCWGsVaxoLxafl",
+                "type": "image",
+                "metadata": { "...": "..." },
+                "createdAt": "2024-08-31T09:26:06.606Z",
+                "postId": 6045023,
+                "hasMeta": true,
+                "hasPositivePrompt": true,
+                "onSite": true,
+                "remixOfId": null,
+                "minor": false,
+                "poi": false,
+                "tagIds": [1234, 5678]
               }
             ],
             "cosmetic": null
@@ -449,7 +493,7 @@ The full accepted input schema is defined in `civitai-src/src/server/schema/post
 | `result.data.json.items[].images[]` | `object[]` | Inline array of the post's images and videos. |
 | `result.data.json.items[].images[].id` | `number` | Image ID. Used in the local media filename (`{paddedIndex}_{id}.{ext}`). |
 | `result.data.json.items[].images[].url` | `string` | **Cloudflare Images UUID** — NOT a URL despite the field name. Insert into CDN URL construction (see below). |
-| `result.data.json.items[].images[].name` | `string` | Filename used as the CDN path stem. For videos, includes `?token=...` that must be stripped. |
+| `result.data.json.items[].images[].name` | `string \| null` | Filename used as the CDN path stem. For videos, includes `?token=...` that must be stripped. **Can be `null`** — see [field semantics](#field-semantics-imageurl-vs-imagename) for handling. |
 | `result.data.json.items[].images[].type` | `"image" \| "video"` | Determines CDN URL extension and local file extension. |
 | `result.data.json.items[].images[].width` | `number` | Pixel width. |
 | `result.data.json.items[].images[].height` | `number` | Pixel height. |
@@ -603,7 +647,7 @@ Given an image object from `post.getInfinite`, the download URL is:
 Where:
 - `{cdnBase}` = `https://image.civitai.com/{accountHash}` (resolved above)
 - `{image.url}` = the Cloudflare UUID from the API response
-- `{stem}` = `image.name`, with the `?token=...` query string stripped and the file extension removed
+- `{stem}` = `image.name`, with the `?token=...` query string stripped and the file extension removed. **If `image.name` is `null`**, the UUID (`image.url`) is used as the stem instead — the CDN resolves by UUID regardless of the stem value.
 - The extension is **always** `.jpeg` for images and `.mp4` for videos, regardless of the original extension in `image.name`
 
 **Implementation**: `buildPostImageUrl(cdnBase, image)` in `src/posts.mjs`.
@@ -615,9 +659,13 @@ These fields are frequently confused because their names are misleading:
 | Field | Actual meaning |
 |---|---|
 | `url` | A **Cloudflare Images UUID** (e.g. `12daaff8-d19c-4688-a718-332b6aa47a9c`) — not a URL. |
-| `name` | The filename component for the CDN path, e.g. `TH8CX36WMGF3DQ3604QEXX26Z0.jpg`. For videos: `QM4G1A4XV3955E3AKZHR9YZ1G0.mp4?token=<jwt>`. |
+| `name` | The filename component for the CDN path, e.g. `TH8CX36WMGF3DQ3604QEXX26Z0.jpg`. For videos: `QM4G1A4XV3955E3AKZHR9YZ1G0.mp4?token=<jwt>`. **Can be `null`** — see below. |
 
 For videos, the `name` field includes a legacy auth token as a query string. This token is **not required** in the CDN URL — strip everything from `?` onwards before constructing the URL. The token was part of an earlier storage system; the Cloudflare Images CDN serves the content without it.
+
+> **Nullable `name`**: The API returns `null` for `image.name` when an image was stored without a separate filename. In these cases, the CDN serves the image using its UUID as the path stem. Confirmed by querying `GET /api/v1/images?imageId=27024502` — the REST API returned a fully-constructed URL of `…/fdefc078-9335-446f-a3fe-daf0bd5d477c/original=true/fdefc078-9335-446f-a3fe-daf0bd5d477c.jpeg`, where the UUID is used as both the path component and the filename. In the tRPC `post.getInfinite` response for the same image, `url` is `"fdefc078-9335-446f-a3fe-daf0bd5d477c"` and `name` is `null`.
+>
+> The implementation (`buildPostImageUrl` in `src/posts.mjs`) falls back to `image.url` (the UUID) as the CDN path stem when `name` is null. See [API Type Reliability](#api-type-reliability) for the general principle.
 
 #### Local file naming
 

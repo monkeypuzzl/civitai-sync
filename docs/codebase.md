@@ -83,7 +83,7 @@ All source lives in `src/`. Modules fall into four layers; dependencies flow str
 | `config.mjs` | Config persistence. Singleton loader (`getCurrentConfig`), JSON read/write, auto-migration of old root-level configs to `config/` folder. |
 | `crypto.mjs` | AES-256-CBC encrypt/decrypt. Key buffer zero-padded to 32 bytes. Output format: `{iv_hex}:{ciphertext_hex}`. |
 | `headers.mjs` | Centralised HTTP headers. Three sets: `sharedHeaders`, `imageHeaders`, `jsonHeaders`. The `Referer` header is **required** by the Civitai API. |
-| `utils.mjs` | File system helpers (`fileExists`, `readFile`, `writeFile` with auto-`mkdirp`), date helpers (`toDateString`, `dateIsOlderThanDays`, `isDate`), `wait()`, directory listing/cleanup. |
+| `utils.mjs` | File system helpers: `fileExists`, `readFile`, `writeFile` (atomic write via tmp+rename, auto-`mkdirp`); retry-wrapped fs ops (`rename`, `unlink`, `rm`, `cp`, `copyFile`, `rmdir`) with exponential backoff for transient errors (`EPERM`/`EACCES`/`EBUSY`/`EAGAIN`); date helpers (`toDateString`, `dateIsOlderThanDays`, `isDate`); `wait()`; directory listing/cleanup. |
 | `childProcess.mjs` | `spawnChild()` wrapper with stdout/stderr capture and progress callback. |
 | `softwareUpdate.mjs` | Self-update system. Checks Civitai model page (ID `526058`) every 12 hours, downloads ZIP, extracts, backs up current files, installs, handles dependency changes via `npm ci`, rolls back on failure. |
 | `migrate.mjs` | Version-gated data migrations. Runs on startup if `CONFIG.version !== CURRENT_VERSION`. Migrations are idempotent. |
@@ -229,9 +229,10 @@ Enforced client-side in `civitaiApi.mjs`:
 
 ### File Write Patterns
 
-- `writeFile()` in `utils.mjs` auto-creates parent directories via `mkdirp` (default `mkdir: true`).
+- `writeFile()` in `utils.mjs` auto-creates parent directories via `mkdirp` (default `mkdir: true`). Writes atomically via a `.tmp` file and `rename`.
 - Image downloads use `fs.createWriteStream` with flag `wx` (exclusive create — fails if file exists). This prevents overwrites and race conditions.
 - `writeFile()` auto-serialises non-string content as pretty JSON.
+- File operations (`rename`, `unlink`, `rm`, `cp`, `copyFile`, `rmdir`) exported from `utils.mjs` are retry-wrapped to handle transient OS errors (Windows file locking, antivirus interference).
 
 ---
 

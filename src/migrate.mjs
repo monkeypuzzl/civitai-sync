@@ -1,10 +1,9 @@
 /*eslint no-unused-vars: ["error", { "caughtErrors": "all", "caughtErrorsIgnorePattern": "^ignore" }]*/
-import fs from 'fs';
 import { mkdirp } from 'mkdirp';
 import { setConfigParam, removeConfigParam, DEFAULT_CONFIG } from './config.mjs';
 import { setupWorkflowTags, getGenerationDates, getGenerationIdsByDate, getGeneration, getGeneratedMediaInfo, mediaFilepath, MEDIA_DIRECTORIES } from './generations.mjs';
 import { CONFIG, CURRENT_VERSION, OS } from './cli.mjs';
-import { fileExists, listDirectory, isDate } from './utils.mjs';
+import { fileExists, listDirectory, isDate, rename, rmdir } from './utils.mjs';
 
 export async function migrateDirectoryLayout () {
   // Skip if already migrated
@@ -17,6 +16,8 @@ export async function migrateDirectoryLayout () {
 
   console.log('Migrating directory layout, please wait...');
 
+  const failures = [];
+
   // Migrate data directory: move date dirs into generations/ subfolder
   const newDataGenerationsDir = `${oldDataPath}/generations`;
   await mkdirp(newDataGenerationsDir);
@@ -24,7 +25,11 @@ export async function migrateDirectoryLayout () {
   const dataEntries = await listDirectory(oldDataPath);
   for (const entry of dataEntries) {
     if (isDate(entry)) {
-      await fs.promises.rename(`${oldDataPath}/${entry}`, `${newDataGenerationsDir}/${entry}`);
+      try {
+        await rename(`${oldDataPath}/${entry}`, `${newDataGenerationsDir}/${entry}`);
+      } catch (error) {
+        failures.push({ entry, error });
+      }
     }
   }
 
@@ -36,8 +41,19 @@ export async function migrateDirectoryLayout () {
   const mediaEntries = await listDirectory(oldMediaPath);
   for (const entry of mediaEntries) {
     if (KNOWN_MEDIA_DIRS.includes(entry) || isDate(entry)) {
-      await fs.promises.rename(`${oldMediaPath}/${entry}`, `${newMediaGenerationsDir}/${entry}`);
+      try {
+        await rename(`${oldMediaPath}/${entry}`, `${newMediaGenerationsDir}/${entry}`);
+      } catch (error) {
+        failures.push({ entry, error });
+      }
     }
+  }
+
+  if (failures.length) {
+    for (const { entry, error } of failures) {
+      console.error(`  Could not move ${entry}: ${error.message}`);
+    }
+    throw new Error(`Migration incomplete: ${failures.length} directories could not be moved. Please close any programs accessing these directories and restart.`);
   }
 
   // Update config to new schema
@@ -82,7 +98,7 @@ export async function migrateVideoFilenames () {
             ]);
 
             if (jpegFilepathExists && !correctFilepathExists) {
-              await fs.promises.rename(`${filepath}.jpeg`, filepath);
+              await rename(`${filepath}.jpeg`, filepath);
             }
           }
         }
@@ -114,7 +130,7 @@ export async function removeEmptyMediaDirectories () {
 
             if (await fileExists(invalidDirectory)) {
               try {
-                await fs.promises.rmdir(invalidDirectory);
+                await rmdir(invalidDirectory);
               }
 
               catch (ignoreErr) {

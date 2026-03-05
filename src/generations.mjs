@@ -5,7 +5,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { mkdirp } from 'mkdirp';
-import { writeFile, fileExists, toDateString } from './utils.mjs';
+import { writeFile, fileExists, toDateString, rename, unlink, copyFile } from './utils.mjs';
 import { readFile, listDirectory, removeDirectoryIfEmpty, isDate } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
 import { fetchCivitaiImage } from './civitaiApi.mjs';
@@ -351,7 +351,7 @@ export async function saveGenerations (apiGenerationsResponse, {
               if (!currentMediaInfo || !currentMediaInfo.tags.includes(tag)) {
                 // Remove tagged image
                 const itemFilepath = mediaFilepath({ ...previousMediaInfo, directory: MEDIA_DIRECTORIES[tag] });
-                await fs.promises.unlink(itemFilepath);
+                await unlink(itemFilepath);
               }
             }
           }
@@ -361,7 +361,7 @@ export async function saveGenerations (apiGenerationsResponse, {
 
     if (shouldOverwrite) {
       currentReportItem.status = 'data-updating';
-      await fs.promises.unlink(filepath);
+      await unlink(filepath);
     }
 
     else if (exists) {
@@ -509,7 +509,7 @@ export async function saveGenerationMedia (generation, { doFetch = true, signal 
 
       // Could be partial download
       if (signal && signal.aborted && await fileExists(itemFilepath)) {
-        await fs.promises.unlink(itemFilepath);
+        await unlink(itemFilepath);
         report.aborted = true;
         return report;
       }
@@ -540,7 +540,7 @@ export async function saveGenerationMedia (generation, { doFetch = true, signal 
     const sourceFilepath = foundFilepaths[0];
 
     for (let itemFilepath of missingFilepaths) {
-      await fs.promises.copyFile(sourceFilepath, itemFilepath);
+      await copyFile(sourceFilepath, itemFilepath);
     }
   }
   
@@ -593,7 +593,7 @@ export async function deleteAllDeletedMedia () {
             const filepath = mediaFilepath({ ...mediaInfo, directory });
 
             if (await fileExists(filepath)) {
-              await fs.promises.unlink(filepath);
+              await unlink(filepath);
               count ++;
             }
           }
@@ -630,7 +630,7 @@ export async function renameGenerationImages (generation) {
 
       for (let legacyFilepath of legacyFilepaths) {
         if (await fileExists(legacyFilepath)) {
-          await fs.promises.rename(legacyFilepath, filepath);
+          await rename(legacyFilepath, filepath);
           renamedCount ++;
           continue;
         }

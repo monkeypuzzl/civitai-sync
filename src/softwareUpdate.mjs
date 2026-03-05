@@ -1,11 +1,10 @@
 /*eslint no-unused-vars: ["error", { "caughtErrors": "all", "caughtErrorsIgnorePattern": "^ignore" }]*/
 /*eslint no-empty: ["error", { "allowEmptyCatch": true }]*/
-import fs from 'node:fs';
 // import confirm from '@inquirer/confirm';
 import extractZip from 'extract-zip';
 import { mkdirp } from 'mkdirp';
 import { fetchModel, fetchFile } from './civitaiApi.mjs';
-import { fileExists, readFile, writeFile, listFiles, listDirectories } from './utils.mjs';
+import { fileExists, readFile, writeFile, listFiles, listDirectories, rename, unlink, rm, cp } from './utils.mjs';
 import { APP_DIRECTORY, CURRENT_VERSION } from './cli.mjs';
 import { spawnChild } from './childProcess.mjs';
 
@@ -208,18 +207,18 @@ export async function downloadSoftwareUpdate (url, version, { secretKey } = {}) 
     return true;
   }
 
-  try { await fs.promises.unlink(zipTmpFilepath); }
+  try { await unlink(zipTmpFilepath); }
   catch (ignoreErr) {}
 
   try {
     console.log('Downloading software');
     await fetchFile(url, zipTmpFilepath, { secretKey });
-    await fs.promises.rename(zipTmpFilepath, zipFilepath);
+    await rename(zipTmpFilepath, zipFilepath);
   }
 
   catch (error) {
     console.error('Download software error', error);
-    try { await fs.promises.unlink(zipTmpFilepath); }
+    try { await unlink(zipTmpFilepath); }
     catch (ignoreErr) {}
     return false;
   }
@@ -237,7 +236,7 @@ export async function unzipSoftwareUpdate (version) {
     return true;
   }
 
-  try { await fs.promises.rm(unzipTmpDirectory, { recursive: true }); }
+  try { await rm(unzipTmpDirectory, { recursive: true }); }
   catch (ignoreErr) {}
 
   await mkdirp(unzipTmpDirectory);
@@ -245,12 +244,12 @@ export async function unzipSoftwareUpdate (version) {
   try {
     console.log('Extracting software');
     await extractZip(zipFilepath, { dir: unzipTmpDirectory });
-    await fs.promises.rename(unzipTmpDirectory, unzipDirectory);
+    await rename(unzipTmpDirectory, unzipDirectory);
   }
 
   catch (error) {
     console.error('Extract software error', error);
-    try { await fs.promises.rm(unzipTmpDirectory, { recursive: true }); }
+    try { await rm(unzipTmpDirectory, { recursive: true }); }
     catch (ignoreErr) {}
     return false;
   }
@@ -293,21 +292,21 @@ export async function installSoftwareUpdate (version) {
     console.log('Installing dependencies...');
 
     try {
-      await fs.promises.cp(`${APP_DIRECTORY}/node_modules`, `${unzipDirectory}/node_modules`, { recursive: true });
+      await cp(`${APP_DIRECTORY}/node_modules`, `${unzipDirectory}/node_modules`, { recursive: true });
       await spawnChild('npm', ['ci', '--omit-dev'], { cwd: unzipDirectory }, txt => npmLog += txt);
 
       // Move node_modules
       undo.push(async () => {
-        fs.promises.rename(`${backupDirectory}/node_modules`, `${APP_DIRECTORY}/node_modules`);
+        await rename(`${backupDirectory}/node_modules`, `${APP_DIRECTORY}/node_modules`);
       });
 
-      await fs.promises.rename(`${APP_DIRECTORY}/node_modules`, `${backupDirectory}/node_modules`);
+      await rename(`${APP_DIRECTORY}/node_modules`, `${backupDirectory}/node_modules`);
 
       undo.push(async () => {
-        fs.promises.rename(`${APP_DIRECTORY}/node_modules`, `${unzipDirectory}/node_modules`);
+        await rename(`${APP_DIRECTORY}/node_modules`, `${unzipDirectory}/node_modules`);
       });
 
-      await fs.promises.rename(`${unzipDirectory}/node_modules`, `${APP_DIRECTORY}/node_modules`);
+      await rename(`${unzipDirectory}/node_modules`, `${APP_DIRECTORY}/node_modules`);
       await spawnChild('npm', ['link'], { cwd: APP_DIRECTORY }, txt => npmLog += txt);
       await writeFile(`${backupDirectory}/npm-log.txt`, npmLog);
     }
@@ -329,52 +328,44 @@ export async function installSoftwareUpdate (version) {
 
     undo.push(async () => {
       for (let file of await listFiles(backupDirectory)) {
-        // console.log('rename', `${backupDirectory}/${file}`, `${APP_DIRECTORY}/${file}`);
-        await fs.promises.rename(`${backupDirectory}/${file}`, `${APP_DIRECTORY}/${file}`);
+        await rename(`${backupDirectory}/${file}`, `${APP_DIRECTORY}/${file}`);
       }
     });
 
     for (let file of rootFiles) {
-      // console.log('rename', `${APP_DIRECTORY}/${file}`, `${backupDirectory}/${file}`);
-      await fs.promises.rename(`${APP_DIRECTORY}/${file}`, `${backupDirectory}/${file}`);
+      await rename(`${APP_DIRECTORY}/${file}`, `${backupDirectory}/${file}`);
     }
 
     undo.push(async () => {
       for (let file of await listFiles(unzipDirectory)) {
-        // console.log('unlink', `${APP_DIRECTORY}/${file}`);
-        await fs.promises.unlink(`${APP_DIRECTORY}/${file}`);
+        await unlink(`${APP_DIRECTORY}/${file}`);
       }
     });
 
     for (let file of await listFiles(unzipDirectory)) {
-      // console.log('cp', `${unzipDirectory}/${file}`, `${APP_DIRECTORY}/${file}`);
-      await fs.promises.cp(`${unzipDirectory}/${file}`, `${APP_DIRECTORY}/${file}`);
+      await cp(`${unzipDirectory}/${file}`, `${APP_DIRECTORY}/${file}`);
     }
 
     undo.push(async () => {
       for (let dir of PROGRAM_DIRECTORIES) {
-        // console.log('rename', `${backupDirectory}/${dir}`, `${APP_DIRECTORY}/${dir}`);
-        await fs.promises.rename(`${backupDirectory}/${dir}`, `${APP_DIRECTORY}/${dir}`);
+        await rename(`${backupDirectory}/${dir}`, `${APP_DIRECTORY}/${dir}`);
       }
     });
 
     for (let dir of PROGRAM_DIRECTORIES) {
       if (await fileExists(`${APP_DIRECTORY}/${dir}`)) {
-        // console.log('rename', `${APP_DIRECTORY}/${dir}`, `${backupDirectory}/${dir}`);
-        await fs.promises.rename(`${APP_DIRECTORY}/${dir}`, `${backupDirectory}/${dir}`);
+        await rename(`${APP_DIRECTORY}/${dir}`, `${backupDirectory}/${dir}`);
       }
     }
 
     undo.push(async () => {
       for (let dir of await listDirectories(unzipDirectory)) {
-        // console.log('rm', `${APP_DIRECTORY}/${dir}`);
-        await fs.promises.rm(`${APP_DIRECTORY}/${dir}`, { recursive: true });
+        await rm(`${APP_DIRECTORY}/${dir}`, { recursive: true });
       }
     });
 
     for (let dir of await listDirectories(unzipDirectory)) {
-      // console.log('cp', `${unzipDirectory}/${dir}`, `${APP_DIRECTORY}/${dir}`);
-      await fs.promises.cp(`${unzipDirectory}/${dir}`, `${APP_DIRECTORY}/${dir}`, { recursive: true });
+      await cp(`${unzipDirectory}/${dir}`, `${APP_DIRECTORY}/${dir}`, { recursive: true });
     }
 
     console.log('Installation complete');
@@ -396,12 +387,12 @@ async function cleanupSoftwareUpdateArtifacts (version) {
   const SOFTWARE_UPDATE_DIRECTORY = `${APP_DIRECTORY}/software-updates`;
 
   try {
-    await fs.promises.unlink(`${SOFTWARE_UPDATE_DIRECTORY}/civitai-sync-v${version}.zip`);
+    await unlink(`${SOFTWARE_UPDATE_DIRECTORY}/civitai-sync-v${version}.zip`);
   }
   catch (ignoreErr) {}
 
   try {
-    await fs.promises.rm(`${SOFTWARE_UPDATE_DIRECTORY}/${version}`, { recursive: true });
+    await rm(`${SOFTWARE_UPDATE_DIRECTORY}/${version}`, { recursive: true });
   }
   catch (ignoreErr) {}
 
@@ -411,7 +402,7 @@ async function cleanupSoftwareUpdateArtifacts (version) {
 
   for (let dir of backupDirs.slice(0, -1)) {
     try {
-      await fs.promises.rm(`${SOFTWARE_UPDATE_DIRECTORY}/${dir}`, { recursive: true });
+      await rm(`${SOFTWARE_UPDATE_DIRECTORY}/${dir}`, { recursive: true });
     }
     catch (ignoreErr) {}
   }

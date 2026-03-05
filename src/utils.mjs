@@ -3,6 +3,45 @@ import fs from 'node:fs/promises';
 import { mkdirp } from 'mkdirp';
 import { dirname } from 'node:path';
 
+const TRANSIENT_FS_ERRORS = new Set(['EPERM', 'EACCES', 'EBUSY', 'EAGAIN']);
+
+async function withRetry (fn, { retries = 4, baseDelay = 150 } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt >= retries || !TRANSIENT_FS_ERRORS.has(error.code)) {
+        throw error;
+      }
+      await wait(baseDelay * Math.pow(2, attempt));
+    }
+  }
+}
+
+export async function rename (src, dest) {
+  return withRetry(() => fs.rename(src, dest));
+}
+
+export async function unlink (filepath) {
+  return withRetry(() => fs.unlink(filepath));
+}
+
+export async function rm (filepath, options) {
+  return withRetry(() => fs.rm(filepath, options));
+}
+
+export async function cp (src, dest, options) {
+  return withRetry(() => fs.cp(src, dest, options));
+}
+
+export async function copyFile (src, dest) {
+  return withRetry(() => fs.copyFile(src, dest));
+}
+
+export async function rmdir (dirpath) {
+  return withRetry(() => fs.rmdir(dirpath));
+}
+
 export function toDateString (input) {
   if (typeof input === 'string') {
     return input.slice(0, input.indexOf('T'));
@@ -75,14 +114,13 @@ export async function removeDirectoryIfEmpty (dir, { removeDotFiles = true } = {
   // e.g. operating system thumbnail/metadata
   if (removeDotFiles) {
     for (let filename of dotFiles) {
-      const filepath = `${dir}/${filename}`;
-      await fs.unlink(filepath);
+      await unlink(`${dir}/${filename}`);
     }
   }
 
   if ((files.length - dotFiles.length) === 0) {
     try {
-      await fs.rmdir(dir);
+      await rmdir(dir);
       return true;
     }
 
@@ -121,11 +159,8 @@ export async function writeFile (filepath, contents, options = {}) {
     }
   }
 
-  let data = contents;
-
-  if (typeof contents !== 'string') {
-    data = JSON.stringify(contents, null, 2);
-  }
-
-  await fs.writeFile(filepath, data);
+  const data = typeof contents === 'string' ? contents : JSON.stringify(contents, null, 2);
+  const tmpPath = `${filepath}.tmp`;
+  await fs.writeFile(tmpPath, data);
+  await rename(tmpPath, filepath);
 }

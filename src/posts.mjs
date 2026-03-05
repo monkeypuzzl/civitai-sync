@@ -2,10 +2,10 @@
 
 import fs from 'node:fs';
 import { Readable } from 'node:stream';
-import { finished } from 'node:stream/promises';
+import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { mkdirp } from 'mkdirp';
-import { writeFile, readFile, fileExists, toDateString, listDirectory, isDate, wait } from './utils.mjs';
+import { writeFile, readFile, fileExists, toDateString, listDirectory, isDate, wait, unlink } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
 import { fetchCivitaiImage, getCivitaiImageBase, getPost, getPostImageMeta } from './civitaiApi.mjs';
 
@@ -20,10 +20,14 @@ export function postFilepath ({ id, publishedAt }) {
 }
 
 function buildPostImageUrl (cdnBase, image) {
-  // Strip any ?token=... query string from name, then normalise extension to .jpeg / .mp4
+  const ext = image.type === 'video' ? '.mp4' : '.jpeg';
+
+  if (!image.name) {
+    return `${cdnBase}/${image.url}/original=true/${image.url}${ext}`;
+  }
+
   const baseName = image.name.split('?')[0];
   const stem = baseName.includes('.') ? baseName.split('.').slice(0, -1).join('.') : baseName;
-  const ext = image.type === 'video' ? '.mp4' : '.jpeg';
   return `${cdnBase}/${image.url}/original=true/${stem}${ext}`;
 }
 
@@ -188,11 +192,19 @@ export async function savePostMedia (post, { signal, secretKey } = {}) {
       await mkdirp(itemDirectory);
     }
 
-    const responseBody = await fetchCivitaiImage(buildPostImageUrl(cdnBase, image), { signal });
+    let imageUrl;
+    try {
+      imageUrl = buildPostImageUrl(cdnBase, image);
+    } catch (ignoreErr) {
+      console.log(`Warning: skipping image ${imageId} in post ${postId} — ${ignoreErr.message}`);
+      continue;
+    }
+
+    const responseBody = await fetchCivitaiImage(imageUrl, { signal });
 
     if (signal && signal.aborted) {
       if (await fileExists(filepath)) {
-        await fs.promises.unlink(filepath);
+        await unlink(filepath);
       }
       report.aborted = true;
       return report;
@@ -204,7 +216,7 @@ export async function savePostMedia (post, { signal, secretKey } = {}) {
 
     try {
       const fileStream = fs.createWriteStream(filepath, { flags: 'wx' });
-      await finished(Readable.fromWeb(responseBody).pipe(fileStream));
+      await pipeline(Readable.fromWeb(responseBody), fileStream);
     }
 
     catch (error) {
