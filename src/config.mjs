@@ -1,6 +1,5 @@
-import fs from 'node:fs';
 import path from 'node:path';
-import { fileExists, readFile, writeFile } from './utils.mjs';
+import { fileExists, readFile, writeFile, rename, unlink } from './utils.mjs';
 import { APP_DIRECTORY } from './cli.mjs';
 
 export const DEFAULT_CONFIG = {
@@ -79,7 +78,7 @@ export async function createConfig (configPath) {
 
 export async function removeConfig (configPath) {
   try {
-    return await fs.promises.unlink(configPath);
+    return await unlink(configPath);
   }
 
   catch (error) {
@@ -99,7 +98,7 @@ export async function getConfig (configPath) {
 
     if (await fileExists(configPath)) {
       // Move to config folder
-      await fs.promises.rename(configPath, expandedConfigPath);
+      await rename(configPath, expandedConfigPath);
       return await loadConfig(expandedConfigPath);
     }
   }
