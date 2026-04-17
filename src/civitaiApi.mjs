@@ -6,12 +6,12 @@ import { pipeline } from 'node:stream/promises';
 import { wait } from './utils.mjs';
 import headers from './headers.mjs';
 
-const API_QUERY_GENERATED_IMAGES = 'https://civitai.com/api/trpc/orchestrator.queryGeneratedImages';
-const API_POSTS = 'https://civitai.com/api/trpc/post.getInfinite';
-const API_POST_GET = 'https://civitai.com/api/trpc/post.get';
-const API_ME = 'https://civitai.com/api/v1/me';
-const API_IMAGES = 'https://civitai.com/api/v1/images';
-const API_MODELS = 'https://civitai.com/api/v1/models';
+const API_QUERY_GENERATED_IMAGES = 'https://civitai.red/api/trpc/orchestrator.queryGeneratedImages';
+const API_POSTS = 'https://civitai.red/api/trpc/post.getInfinite';
+const API_POST_GET = 'https://civitai.red/api/trpc/post.get';
+const API_ME = 'https://civitai.red/api/v1/me';
+const API_IMAGES = 'https://civitai.red/api/v1/images';
+const API_MODELS = 'https://civitai.red/api/v1/models';
 const DATA_RATE_LIMIT = 100;
 const IMAGE_RATE_LIMIT = 100;
 const MAX_ATTEMPTS = 10;
@@ -189,7 +189,7 @@ export async function getCivitaiImageBase ({ secretKey }) {
   const firstUrl = data?.items?.[0]?.url;
 
   if (firstUrl && firstUrl.startsWith('http')) {
-    // URL shape: https://image.civitai.com/{accountHash}/{uuid}/...
+    // URL shape: https://image.civitai.red/{accountHash}/{uuid}/...
     const parts = firstUrl.split('/');
     _imageCdnBase = `${parts[0]}//${parts[2]}/${parts[3]}`;
   } else {
@@ -289,7 +289,7 @@ export async function getAllPostRequests (options, iterator) {
 let previousFetch;
 
 // Headers: Requirement is
-// "Referer": "https://civitai.com" or path of domain
+// "Referer": "https://civitai.red" or path of domain
 export async function fetchCivitaiImage (url, { signal } = {}) {
   let now = Date.now();
 
