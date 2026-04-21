@@ -84,6 +84,20 @@ export function formatMediaCounts (imagesSaved, videosSaved) {
   return `${parts.join(', ')} saved`;
 }
 
+export function formatActivity (activity, { itemNoun = 'item' } = {}) {
+  if (!activity) return '';
+  const { phase, index, total } = activity;
+  const of = (index && total) ? ` ${index} of ${total}` : '';
+
+  switch (phase) {
+    case 'checking': return `checking ${itemNoun}${of}`;
+    case 'saving': return `saving ${itemNoun}${of}`;
+    case 'enriching': return `enriching ${itemNoun}${of}`;
+    case 'media': return `image${of}`;
+    default: return '';
+  }
+}
+
 
 export function listenForEscKeyPress ({ onAbort } = {}) {
   if (listeningForKeyPress) {
@@ -148,6 +162,7 @@ export async function fetchGenerations (options = {}) {
     generationsNew: 0,
     imagesSaved: 0,
     videosSaved: 0,
+    activity: null,
     currentTag: tags.length ? (DOWNLOAD_TYPES_MOD[tags[0]] || tags[0]) : '',
     cursor,
     nextCursor: undefined,
@@ -206,19 +221,24 @@ export async function fetchGenerations (options = {}) {
   function reportText ({ esc = true } = {}) {
     const elapsed = formatElapsed(Date.now() - new Date(report.time).getTime());
     const mode = report.currentTag || (latest ? 'latest' : oldest ? 'oldest' : 'all');
+    const activityText = formatActivity(report.activity);
+
+    const title = chalk.hex('#a5d8ff')(`Downloading ${mode}`);
+    const line1 = activityText
+      ? `${title} ${chalk.dim('·')} ${chalk.dim(activityText)}`
+      : title;
 
     const newText = report.generationsNew > 0 ? chalk.green(plural(report.generationsNew, 'new')) : '';
     const mediaText = formatMediaCounts(report.imagesSaved, report.videosSaved);
-    const contentParts = [newText, mediaText].filter(Boolean);
-    const content = contentParts.length
-      ? contentParts.join(` ${chalk.dim('·')} `)
-      : report.generationsDownloaded > 0 ? chalk.dim('checking…') : '';
-    const line1 = `${chalk.hex('#a5d8ff')(`Downloading ${mode}`)}${content ? ` ${chalk.dim('·')} ${content}` : ''}`;
-
     const batchDateStr = report.batchDate ? formatMonthYear(report.batchDate) : '';
     const arrow = report.paginating && !isAborted() ? ' →' : '';
-    const dateParts = [batchDateStr ? `${batchDateStr}${arrow}` : '', `elapsed ${elapsed}`].filter(Boolean);
-    const line2 = chalk.dim(`  ${dateParts.join(' · ')}`);
+    const resultParts = [
+      batchDateStr ? `${batchDateStr}${arrow}` : '',
+      newText,
+      mediaText,
+      `elapsed ${elapsed}`
+    ].filter(Boolean);
+    const line2 = chalk.dim(`  ${resultParts.join(' · ')}`);
 
     let line3;
 
@@ -310,6 +330,7 @@ export async function fetchGenerations (options = {}) {
       report.generationsSaved = reportBefore.generationsSaved + currentReport.generationsSaved;
       report.imagesSaved = reportBefore.imagesSaved + currentReport.imagesSaved;
       report.videosSaved = reportBefore.videosSaved + currentReport.videosSaved;
+      report.activity = currentReport.activity;
       report.lastSavedGenerationId = currentReport.lastSavedGenerationId;
       report.currentGenerations = currentReport.currentGenerations;
       report.currentMedia = currentReport.currentMedia;

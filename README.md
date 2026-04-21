@@ -78,10 +78,39 @@ Or download just “Favorite / Liked” gens.
 Open the Explorer
 ☞ Click "Start Explorer"
 
+Optionally, you can host the Explorer on your local network, for other devices to access.
+
 Data
 Data is saved directly from Civitai's API, as text files (in “JSON” format). Prompts and metadata are already embedded in the media metadata (e.g. "EXIF" format).
 
 You can explore the generation parameters and details for images and videos, in the civitai-sync Explorer.
+
+
+## Open the Explorer from the terminal
+
+The Explorer can be launched directly, without the CLI:
+
+```
+  civitai-sync browse
+```
+
+or with a named config:
+
+```
+  civitai-sync browse myaccount
+```
+
+**Network access**
+
+By default the Explorer is only reachable from the machine it runs on (it binds to `127.0.0.1`). To access it from other devices on your local network — a phone, tablet, or another computer — add the `--host` flag:
+
+```
+  civitai-sync browse --host
+```
+
+This binds the server to all network interfaces (`0.0.0.0`). The terminal will print both the local address and the LAN address to share with other devices.
+
+> **Security note:** The Explorer has no authentication. Anyone on your local network who can reach the port will have read access to your model library. Only use `--host` on networks you trust. On shared, office, or public networks, omit the flag to keep the server local-only.
 
 
 ## Multiple accounts

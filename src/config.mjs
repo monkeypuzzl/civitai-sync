@@ -1,7 +1,13 @@
 import path from 'node:path';
 import { fileExists, readFile, writeFile, rename, unlink } from './utils.mjs';
 import { APP_DIRECTORY } from './cli.mjs';
+import { CIVITAI_DOMAINS } from './civitaiDomain.mjs';
 
+// Default Civitai domain. Kept as a string literal rather than
+// `CIVITAI_DOMAINS[0]` to avoid a module-evaluation-order deadlock between
+// config.mjs and civitaiDomain.mjs (they form a cycle via cli.mjs). The
+// runtime validation inside `getCurrentConfig` still uses CIVITAI_DOMAINS to
+// reject stale/invalid values on disk.
 export const DEFAULT_CONFIG = {
   dataPath: `data`,
   mediaPath: `media`,
@@ -10,7 +16,8 @@ export const DEFAULT_CONFIG = {
   generationDataTypes: ['all'],
   keyEncrypt: false,
   excludeImages: false,
-  secretKey: ''
+  secretKey: '',
+  domain: 'civitai.com'
 };
 
 const currentConfig = {};
@@ -38,10 +45,17 @@ export async function getCurrentConfig (configPath) {
   }
 
   configPromise = getConfig(fullConfigPath)
-  .then(config => {
+  .then(async config => {
     loaded = true;
     currentConfigPath = fullConfigPath;
     merge(currentConfig, config);
+
+    // Normalize CONFIG.domain: write default to disk if missing or invalid.
+    if (!CIVITAI_DOMAINS.includes(currentConfig.domain)) {
+      currentConfig.domain = CIVITAI_DOMAINS[0];
+      await writeFile(currentConfigPath, JSON.stringify(currentConfig, null, 2));
+    }
+
     return currentConfig;
   });
 

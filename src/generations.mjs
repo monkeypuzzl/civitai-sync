@@ -175,7 +175,7 @@ export function getGeneratedMediaInfo (generation, { hidden = false } = {}) {
   }
   
   steps.forEach(({ images, metadata }) => {
-    images.forEach(({ id, status, seed, url }) => {
+    images.forEach(({ id, status, seed, url, type }) => {
       const mediaInfo = {
         date,
         generationId: generation.id,
@@ -183,6 +183,7 @@ export function getGeneratedMediaInfo (generation, { hidden = false } = {}) {
         seed,
         status,
         url,
+        type,
         tags: []
       };
 
@@ -290,6 +291,7 @@ export async function saveGenerations (apiGenerationsResponse, {
     generationsSaved: 0,
     imagesSaved: 0,
     videosSaved: 0,
+    activity: null,
     error: null,
     lastSavedGenerationId: undefined,
     currentGenerations: [],
@@ -309,19 +311,30 @@ export async function saveGenerations (apiGenerationsResponse, {
     return report;
   }
 
+  const totalItems = items.length;
+
+  function setActivity (activity) {
+    report.activity = activity;
+    if (log) log(report);
+  }
+
   report.currentGenerations = items.map(({ id, createdAt }) => ({
     date: toDateString(createdAt),
     id,
     status: 'data-downloaded'
   }));
 
-  for (let generation of items) {
+  for (let itemIndex = 0; itemIndex < totalItems; itemIndex++) {
+    const generation = items[itemIndex];
+    const genNum = itemIndex + 1;
     const currentReportItem = report.currentGenerations.find(item => item.id === generation.id);
 
     if (signal && signal.aborted) {
       currentReportItem.status = 'aborted';
       return report;
     }
+
+    setActivity({ phase: 'checking', index: genNum, total: totalItems });
 
     const { id, createdAt } = generation;
     const date = toDateString(createdAt);
@@ -369,6 +382,8 @@ export async function saveGenerations (apiGenerationsResponse, {
     }
 
     if (!exists || shouldOverwrite) {
+      setActivity({ phase: 'saving', index: genNum, total: totalItems });
+
       const filepath = await saveGenerationData(generation);
 
       if (!filepath) {
@@ -387,7 +402,7 @@ export async function saveGenerations (apiGenerationsResponse, {
     }
 
     if (withImages && (!exists || overwrite || shouldOverwrite)) {
-      const mediaReport = await saveGenerationMedia(generation, { signal });
+      const mediaReport = await saveGenerationMedia(generation, { signal, onProgress: (a) => setActivity(a) });
       const { error, aborted, complete } = mediaReport;
 
       report.imagesSaved += mediaReport.imagesSaved;
@@ -426,9 +441,8 @@ export async function saveGenerations (apiGenerationsResponse, {
       }
     }
 
-    if (log) {
-      log(report);
-    }
+    report.activity = null;
+    if (log) log(report);
   }
 
   return report;
@@ -463,11 +477,13 @@ export async function fetchMedia (url, filepath, { signal }) {
   }
 }
 
-export async function saveGenerationMedia (generation, { doFetch = true, signal } = {}) {
+export async function saveGenerationMedia (generation, { doFetch = true, signal, onProgress } = {}) {
   const media = getGeneratedMediaInfo(generation);
   const report = { imagesSaved: 0, videosSaved: 0, error: undefined, aborted: false, complete: false };
+  const totalMedia = media.length;
 
-  for (let mediaInfo of media) {
+  for (let mediaIndex = 0; mediaIndex < totalMedia; mediaIndex++) {
+    const mediaInfo = media[mediaIndex];
     const foundFilepaths = [];
     const missingFilepaths = [];
     const generationTypes = ['all', ...mediaInfo.tags]
@@ -504,6 +520,8 @@ export async function saveGenerationMedia (generation, { doFetch = true, signal 
         continue;
       }
 
+      if (onProgress) onProgress({ phase: 'media', index: mediaIndex + 1, total: totalMedia });
+
       const itemFilepath = missingFilepaths[0];
       const result = await fetchMedia(mediaInfo.url, itemFilepath, { signal });
 
@@ -524,7 +542,7 @@ export async function saveGenerationMedia (generation, { doFetch = true, signal 
         return report;
       }
 
-      if (mediaInfo.mediaId.includes('.')) {
+      if (mediaInfo.type === 'video') {
         report.videosSaved++;
       } else {
         report.imagesSaved++;

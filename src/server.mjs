@@ -12,16 +12,16 @@ import { fetchGenerations } from './downloadActions.mjs';
 import { fetchPosts } from './downloadPostsActions.mjs';
 import { exec } from 'node:child_process';
 import os from 'node:os';
-import { getMe } from './civitaiApi.mjs';
 import { decryptAES } from './crypto.mjs';
+import { fillIfMissing, refreshOnce } from './userData.mjs';
+import { getAvailableSecretKey, setMemoizedSecretKey } from './keyActions.mjs';
+import { CIVITAI_DOMAINS, getCivitaiDomain } from './civitaiDomain.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UI_DIR = path.resolve(__dirname, 'ui');
 const DEFAULT_PORT = 3456;
 
 // --- Download Manager ---
-
-let unlockedSecretKey = null;
 
 const downloadState = {
   active: false,
@@ -64,27 +64,22 @@ function friendlyErrorMessage (errors) {
   return msg || 'Unknown error';
 }
 
-function getSecretKeyNonInteractive () {
-  if (!CONFIG.secretKey) return null;
-  if (CONFIG.keyEncrypt) return unlockedSecretKey || null;
-  return CONFIG.secretKey;
-}
-
 async function resolveUsername (secretKey) {
   if (CONFIG.username) return CONFIG.username;
-  const data = await getMe({ secretKey });
-  if (data && data.error) return { error: data.error.json?.message || 'Civitai service unavailable' };
-  if (data && data.username) {
-    await setConfig({ username: data.username });
-    return data.username;
+
+  try {
+    await fillIfMissing({ secretKey });
+  } catch (err) {
+    return { error: err?.message || 'Civitai service unavailable' };
   }
-  return null;
+
+  return CONFIG.username || null;
 }
 
 async function startDownloadGenerations (mode) {
   if (downloadState.active) return { error: 'A download is already in progress' };
 
-  const secretKey = getSecretKeyNonInteractive();
+  const secretKey = getAvailableSecretKey();
   if (!secretKey) return { error: 'API key not available. If encrypted, unlock via CLI first.' };
 
   const tags = [];
@@ -121,6 +116,7 @@ async function startDownloadGenerations (mode) {
         imagesSaved: report.imagesSaved || 0,
         videosSaved: report.videosSaved || 0,
         batchDate: report.batchDate || '',
+        activity: report.activity || null,
         elapsed: Date.now() - downloadState.startedAt,
         errors: (report.errors || []).length
       });
@@ -154,7 +150,7 @@ async function startDownloadGenerations (mode) {
 async function startDownloadPosts (mode) {
   if (downloadState.active) return { error: 'A download is already in progress' };
 
-  const secretKey = getSecretKeyNonInteractive();
+  const secretKey = getAvailableSecretKey();
   if (!secretKey) return { error: 'API key not available. If encrypted, unlock via CLI first.' };
 
   const username = await resolveUsername(secretKey);
@@ -187,6 +183,7 @@ async function startDownloadPosts (mode) {
         imagesSaved: report.imagesSaved || 0,
         videosSaved: report.videosSaved || 0,
         batchDate: report.batchDate || '',
+        activity: report.activity || null,
         elapsed: Date.now() - downloadState.startedAt,
         errors: (report.errors || []).length
       });
@@ -252,7 +249,7 @@ async function backfillDownloadTimestamps () {
   }
 }
 
-export async function startServer ({ port = DEFAULT_PORT } = {}) {
+export async function startServer ({ port = DEFAULT_PORT, host = '127.0.0.1' } = {}) {
   await buildIndex();
   await backfillDownloadTimestamps();
 
@@ -261,14 +258,14 @@ export async function startServer ({ port = DEFAULT_PORT } = {}) {
 
     server.on('error', (err) => {
       if (err.code === 'EADDRINUSE' && port < DEFAULT_PORT + 10) {
-        resolve(startServer({ port: port + 1 }));
+        resolve(startServer({ port: port + 1, host }));
       } else {
         reject(err);
       }
     });
 
-    server.listen(port, '127.0.0.1', () => {
-      resolve({ server, port });
+    server.listen(port, host, () => {
+      resolve({ server, port, host });
     });
   });
 }
@@ -337,7 +334,7 @@ async function handleApi (req, res, pathname, url) {
     return sendJson(res, {
       hasKey: !!CONFIG.secretKey,
       keyEncrypted: !!CONFIG.keyEncrypt,
-      keyUnlocked: CONFIG.keyEncrypt ? !!unlockedSecretKey : true,
+      keyUnlocked: CONFIG.keyEncrypt ? !!getAvailableSecretKey() : true,
       username: CONFIG.username || '',
       dataPath: CONFIG.dataPath,
       mediaPath: CONFIG.mediaPath,
@@ -346,12 +343,30 @@ async function handleApi (req, res, pathname, url) {
       excludeImages: CONFIG.excludeImages,
       version: CURRENT_VERSION || '',
       lastDownloadGenerations: CONFIG.lastDownloadGenerations || null,
-      lastDownloadPosts: CONFIG.lastDownloadPosts || null
+      lastDownloadPosts: CONFIG.lastDownloadPosts || null,
+      domain: getCivitaiDomain(),
+      allowAltDomain: CONFIG.allowAltDomain === true,
+      availableDomains: CIVITAI_DOMAINS
     });
   }
 
   if (pathname === '/api/config' && req.method === 'PUT') {
     return await handleConfigUpdate(req, res);
+  }
+
+  if (pathname === '/api/user/refresh' && req.method === 'POST') {
+    const secretKey = getAvailableSecretKey();
+    if (!secretKey) {
+      return sendJson(res, { ok: false, error: 'API key not available' }, 400);
+    }
+    // refreshOnce dedups concurrent callers and enforces once-per-process.
+    await refreshOnce({ secretKey }).catch(() => {});
+    return sendJson(res, {
+      ok: true,
+      username: CONFIG.username || '',
+      allowAltDomain: CONFIG.allowAltDomain === true,
+      domain: getCivitaiDomain()
+    });
   }
 
   if (pathname === '/api/unlock' && req.method === 'POST') {
@@ -368,7 +383,9 @@ async function handleApi (req, res, pathname, url) {
       if (!decrypted) {
         return sendJson(res, { ok: false, error: 'Wrong password' }, 401);
       }
-      unlockedSecretKey = decrypted;
+      // Store in the shared in-memory memo so CLI and Explorer share the
+      // unlocked state for the remainder of the process.
+      setMemoizedSecretKey(decrypted);
       return sendJson(res, { ok: true });
     } catch {
       return sendJson(res, { ok: false, error: 'Wrong password' }, 401);
@@ -638,7 +655,7 @@ function serveFile (res, filepath) {
 
 // --- Config Update ---
 
-const CONFIG_WHITELIST = ['generationMediaTypes', 'generationDataTypes', 'excludeImages', 'dataPath', 'mediaPath'];
+const CONFIG_WHITELIST = ['generationMediaTypes', 'generationDataTypes', 'excludeImages', 'dataPath', 'mediaPath', 'domain'];
 
 async function handleConfigUpdate (req, res) {
   const body = await readBody(req);
@@ -646,6 +663,12 @@ async function handleConfigUpdate (req, res) {
 
   for (const key of CONFIG_WHITELIST) {
     if (key in body) updates[key] = body[key];
+  }
+
+  // Validate domain against the allow-list. Reject rather than silently
+  // correct so clients notice misconfiguration.
+  if ('domain' in updates && !CIVITAI_DOMAINS.includes(updates.domain)) {
+    return sendError(res, 400, `Invalid domain. Allowed: ${CIVITAI_DOMAINS.join(', ')}`);
   }
 
   if (!Object.keys(updates).length) {

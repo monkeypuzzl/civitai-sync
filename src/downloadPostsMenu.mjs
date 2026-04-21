@@ -5,8 +5,7 @@ import { fetchPosts, formatPostCompletion, listenForEscKeyPress } from './downlo
 import { mainMenu } from './mainMenu.mjs';
 import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { getSecretKey } from './keyActions.mjs';
-import { getMe } from './civitaiApi.mjs';
-import { setConfigParam } from './config.mjs';
+import { fillIfMissing } from './userData.mjs';
 import { getPostDates } from './posts.mjs';
 
 let previousMenuItem;
@@ -16,14 +15,9 @@ async function resolveUsername (secretKey) {
     return CONFIG.username;
   }
 
-  const data = await getMe({ secretKey });
+  await fillIfMissing({ secretKey });
 
-  if (data && data.username) {
-    await setConfigParam('username', data.username);
-    return data.username;
-  }
-
-  return null;
+  return CONFIG.username || null;
 }
 
 export async function downloadPosts (mode = 'latest') {

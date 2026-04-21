@@ -4,14 +4,31 @@ import fs from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { wait } from './utils.mjs';
-import headers from './headers.mjs';
+import getHeaders from './headers.mjs';
+import { apiBase } from './civitaiDomain.mjs';
 
-const API_QUERY_GENERATED_IMAGES = 'https://civitai.com/api/trpc/orchestrator.queryGeneratedImages';
-const API_POSTS = 'https://civitai.com/api/trpc/post.getInfinite';
-const API_POST_GET = 'https://civitai.com/api/trpc/post.get';
-const API_ME = 'https://civitai.com/api/v1/me';
-const API_IMAGES = 'https://civitai.com/api/v1/images';
-const API_MODELS = 'https://civitai.com/api/v1/models';
+// Endpoints are computed lazily from the current Civitai domain. Every call
+// site reads the base at invocation time so a user-triggered domain change
+// takes effect immediately for subsequent requests.
+function endpoints () {
+  const base = apiBase();
+  return {
+    API_QUERY_GENERATED_IMAGES: `${base}/trpc/orchestrator.queryGeneratedImages`,
+    API_POSTS: `${base}/trpc/post.getInfinite`,
+    API_POST_GET: `${base}/trpc/post.get`,
+    API_ME: `${base}/v1/me`,
+    API_IMAGES: `${base}/v1/images`,
+    API_MODELS: `${base}/v1/models`
+  };
+}
+
+// `auth.getUser` is intentionally pinned to civitai.com. The tRPC handler is
+// host-agnostic: it returns the same SessionUser regardless of which Civitai
+// host serves the request, so using a single stable host makes this call
+// independent of the currently-selected CONFIG.domain.
+const AUTH_GET_USER_URL = 'https://civitai.com/api/trpc/auth.getUser';
+const AUTH_GET_USER_DOMAIN = 'civitai.com';
+
 const DATA_RATE_LIMIT = 100;
 const IMAGE_RATE_LIMIT = 100;
 const MAX_ATTEMPTS = 10;
@@ -23,7 +40,7 @@ let _imageCdnBase = null;
 function getGenerationsUrl (cursor, tags = []) {
   const inputParams = { json: { authed: true, tags: ["gen", ...tags], cursor } };
   const inputQuery = encodeURIComponent(JSON.stringify(inputParams));
-  const url = `${API_QUERY_GENERATED_IMAGES}?input=${inputQuery}`;
+  const url = `${endpoints().API_QUERY_GENERATED_IMAGES}?input=${inputQuery}`;
 
   return url;
 }
@@ -56,6 +73,7 @@ function errorResponse ({ httpStatus = 0, path = '', message = '', url = '' }) {
 
 export async function getGenerations ({cursor, tags, secretKey, signal }) {
   const url = getGenerationsUrl(cursor, tags);
+  const headers = getHeaders();
 
   try {
     const response = await fetch(url, {
@@ -133,6 +151,9 @@ export async function getAllRequests (options, iterator) {
 
 
 export async function getMe ({ secretKey }) {
+  const { API_ME } = endpoints();
+  const headers = getHeaders();
+
   try {
     const response = await fetch(API_ME, {
       headers: { ...headers.sharedHeaders, ...headers.jsonHeaders, Authorization: `Bearer ${secretKey}` }
@@ -145,8 +166,45 @@ export async function getMe ({ secretKey }) {
   }
 }
 
+// Fetches the authenticated user via tRPC `auth.getUser` on civitai.com.
+// The handler returns `ctx.user` — the same SessionUser shape the site uses
+// internally, including `showNsfw`, `browsingLevel`, `tier`, etc.
+//
+// Returns the user object on success, or `null` on any error, non-200, or
+// when the response does not contain a user (logged out / invalid key).
+export async function getCivitaiUser ({ secretKey }) {
+  if (!secretKey) return null;
+
+  // tRPC accepts an empty `input` for void procedures, or an explicit
+  // `{"json":null}`. Omitting `input` is the simplest form and is what the
+  // site uses for this procedure.
+  const headers = getHeaders({ forceDomain: AUTH_GET_USER_DOMAIN });
+
+  try {
+    const response = await fetch(AUTH_GET_USER_URL, {
+      headers: { ...headers.sharedHeaders, ...headers.jsonHeaders, Authorization: `Bearer ${secretKey}` }
+    });
+
+    if (!response.ok) return null;
+
+    const body = await response.json();
+
+    if (body && body.error) return null;
+
+    const user = body?.result?.data?.json;
+    if (!user) return null;
+
+    return user;
+  }
+
+  catch (ignoreErr) {
+    return null;
+  }
+}
+
 async function getImages ({ secretKey, limit = 1 }) {
-  const url = `${API_IMAGES}?limit=${limit}`;
+  const url = `${endpoints().API_IMAGES}?limit=${limit}`;
+  const headers = getHeaders();
 
   try {
     const response = await fetch(url, {
@@ -161,7 +219,8 @@ async function getImages ({ secretKey, limit = 1 }) {
 }
 
 export async function getPostImageMeta ({ postId, secretKey, signal }) {
-  const url = `${API_IMAGES}?postId=${postId}&limit=200`;
+  const url = `${endpoints().API_IMAGES}?postId=${postId}&limit=200`;
+  const headers = getHeaders();
 
   try {
     const response = await fetch(url, {
@@ -202,11 +261,12 @@ export async function getCivitaiImageBase ({ secretKey }) {
 function getPostsUrl (username, cursor) {
   const inputParams = { json: { username, limit: 100, sort: 'Newest', period: 'AllTime', cursor } };
   const inputQuery = encodeURIComponent(JSON.stringify(inputParams));
-  return `${API_POSTS}?input=${inputQuery}`;
+  return `${endpoints().API_POSTS}?input=${inputQuery}`;
 }
 
 export async function getPosts ({ username, cursor, secretKey, signal }) {
   const url = getPostsUrl(username, cursor);
+  const headers = getHeaders();
 
   try {
     const response = await fetch(url, {
@@ -223,7 +283,8 @@ export async function getPosts ({ username, cursor, secretKey, signal }) {
 
 export async function getPost ({ id, secretKey, signal }) {
   const inputQuery = encodeURIComponent(JSON.stringify({ json: { id } }));
-  const url = `${API_POST_GET}?input=${inputQuery}`;
+  const url = `${endpoints().API_POST_GET}?input=${inputQuery}`;
+  const headers = getHeaders();
 
   try {
     const response = await fetch(url, {
@@ -289,7 +350,7 @@ export async function getAllPostRequests (options, iterator) {
 let previousFetch;
 
 // Headers: Requirement is
-// "Referer": "https://civitai.com" or path of domain
+// "Referer": "https://<civitai-host>" or path of domain
 export async function fetchCivitaiImage (url, { signal } = {}) {
   let now = Date.now();
 
@@ -303,6 +364,7 @@ export async function fetchCivitaiImage (url, { signal } = {}) {
   try {
     const timeoutSignal = AbortSignal.timeout(60000);
     const fetchSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    const headers = getHeaders();
 
     const response = await fetch(url, {
       headers: { ...headers.sharedHeaders, ...headers.imageHeaders },
@@ -322,7 +384,7 @@ export async function fetchCivitaiImage (url, { signal } = {}) {
 }
 
 export async function fetchModel (modelId) {
-  const url = `${API_MODELS}/${modelId}`;
+  const url = `${endpoints().API_MODELS}/${modelId}`;
 
   try {
     const response = await fetch(url);

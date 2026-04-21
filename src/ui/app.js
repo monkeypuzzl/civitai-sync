@@ -522,6 +522,9 @@ function getTimelineMonth(monthKey) {
 function unlockKey(password) {
   return postJson("/api/unlock", { password });
 }
+function refreshUser() {
+  return postJson("/api/user/refresh", {});
+}
 function openFolder(mediaPath) {
   return postJson("/api/open-folder", { path: mediaPath });
 }
@@ -761,7 +764,7 @@ function Lightbox({ item, onClose, onPrev, onNext, search }) {
   const cur = item.media[mediaIdx];
   const isVideo = cur?.type === "video";
   const dateStr = item.createdAt || item.publishedAt;
-  const resources = (detail?.steps?.[0]?.resources || []).map((r3) => ({
+  const resources = (detail?.metadata?.resources || detail?.steps?.[0]?.resources || []).map((r3) => ({
     name: r3.model?.name || r3.name || "Unknown",
     type: r3.modelType || r3.model?.type || "",
     strength: r3.strength
@@ -776,20 +779,29 @@ function Lightbox({ item, onClose, onPrev, onNext, search }) {
   }, children: [
     /* @__PURE__ */ u3("button", { class: "lightbox-close", onClick: onClose, "aria-label": "Close", children: "\u2715" }),
     /* @__PURE__ */ u3("div", { class: "lightbox-container", children: [
-      /* @__PURE__ */ u3("div", { class: "lightbox-image-area", children: [
-        onPrev && item.media.length <= 1 && /* @__PURE__ */ u3("button", { class: "lightbox-nav-arrow prev", onClick: onPrev, children: "\u2039" }),
-        isVideo ? /* @__PURE__ */ u3("video", { src: cur.thumbnailPath, controls: true, autoPlay: true, loop: true }) : /* @__PURE__ */ u3("img", { src: cur.thumbnailPath, alt: "" }),
-        onNext && item.media.length <= 1 && /* @__PURE__ */ u3("button", { class: "lightbox-nav-arrow next", onClick: onNext, children: "\u203A" }),
-        item.media.length > 1 && /* @__PURE__ */ u3("div", { class: "lightbox-image-nav", children: [
-          /* @__PURE__ */ u3("button", { disabled: mediaIdx === 0, onClick: () => setMediaIdx((i3) => i3 - 1), children: "\u2039" }),
-          /* @__PURE__ */ u3("span", { children: [
-            mediaIdx + 1,
-            " / ",
-            item.media.length
-          ] }),
-          /* @__PURE__ */ u3("button", { disabled: mediaIdx === item.media.length - 1, onClick: () => setMediaIdx((i3) => i3 + 1), children: "\u203A" })
-        ] })
-      ] }),
+      /* @__PURE__ */ u3(
+        "div",
+        {
+          class: "lightbox-image-area",
+          onClick: (e3) => {
+            if (e3.target === e3.currentTarget) onClose();
+          },
+          children: [
+            onPrev && item.media.length <= 1 && /* @__PURE__ */ u3("button", { class: "lightbox-nav-arrow prev", onClick: onPrev, children: "\u2039" }),
+            isVideo ? /* @__PURE__ */ u3("video", { src: cur.thumbnailPath, controls: true, autoPlay: true, loop: true }) : /* @__PURE__ */ u3("img", { src: cur.thumbnailPath, alt: "" }),
+            onNext && item.media.length <= 1 && /* @__PURE__ */ u3("button", { class: "lightbox-nav-arrow next", onClick: onNext, children: "\u203A" }),
+            item.media.length > 1 && /* @__PURE__ */ u3("div", { class: "lightbox-image-nav", children: [
+              /* @__PURE__ */ u3("button", { disabled: mediaIdx === 0, onClick: () => setMediaIdx((i3) => i3 - 1), children: "\u2039" }),
+              /* @__PURE__ */ u3("span", { children: [
+                mediaIdx + 1,
+                " / ",
+                item.media.length
+              ] }),
+              /* @__PURE__ */ u3("button", { disabled: mediaIdx === item.media.length - 1, onClick: () => setMediaIdx((i3) => i3 + 1), children: "\u203A" })
+            ] })
+          ]
+        }
+      ),
       /* @__PURE__ */ u3("div", { class: "lightbox-meta", children: [
         /* @__PURE__ */ u3("div", { class: "meta-section", children: [
           /* @__PURE__ */ u3("div", { class: "meta-date", children: formatDate(dateStr) }),
@@ -1714,6 +1726,23 @@ function formatElapsed(ms) {
 function plural(n2, word) {
   return `${n2} ${word}${n2 === 1 ? "" : "s"}`;
 }
+function formatActivity(activity, { itemNoun = "item" } = {}) {
+  if (!activity) return "";
+  const { phase, index, total } = activity;
+  const of = index && total ? ` ${index} of ${total}` : "";
+  switch (phase) {
+    case "checking":
+      return `checking ${itemNoun}${of}`;
+    case "saving":
+      return `saving ${itemNoun}${of}`;
+    case "enriching":
+      return `enriching ${itemNoun}${of}`;
+    case "media":
+      return `image${of}`;
+    default:
+      return "";
+  }
+}
 function formatDaysAgo(isoDate) {
   if (!isoDate) return null;
   const days = Math.floor((Date.now() - new Date(isoDate).getTime()) / (1e3 * 60 * 60 * 24));
@@ -1756,6 +1785,9 @@ function SettingsView() {
         setDownloadType(status.type);
       }
     }).catch(() => {
+    });
+    refreshUser().then(() => getConfig().then(setConfig).catch(() => {
+    })).catch(() => {
     });
   }, []);
   y2(() => {
@@ -1860,6 +1892,16 @@ function SettingsView() {
     const result = await updateConfig({ excludeImages: newValue });
     if (result.ok) {
       setConfig((prev) => ({ ...prev, excludeImages: newValue }));
+    }
+  }
+  async function handleDomainChange(newDomain) {
+    if (!config || !config.allowAltDomain) return;
+    if (!(config.availableDomains || []).includes(newDomain)) return;
+    if (newDomain === config.domain) return;
+    const result = await updateConfig({ domain: newDomain });
+    if (result.ok) {
+      getConfig().then(setConfig).catch(() => {
+      });
     }
   }
   if (!config) {
@@ -1972,6 +2014,19 @@ function SettingsView() {
         "Data only (skip image downloads)"
       ] }) })
     ] }),
+    config.allowAltDomain && (config.availableDomains || []).length > 1 && /* @__PURE__ */ u3("section", { class: "settings-section", children: [
+      /* @__PURE__ */ u3("h2", { class: "settings-heading", children: "Civitai domain" }),
+      /* @__PURE__ */ u3("div", { class: "settings-field", children: /* @__PURE__ */ u3("div", { class: "mode-selector", children: (config.availableDomains || []).map((domain) => /* @__PURE__ */ u3(
+        "button",
+        {
+          class: `mode-btn${config.domain === domain ? " active" : ""}`,
+          onClick: () => handleDomainChange(domain),
+          title: `Use ${domain} for API calls and links`,
+          children: domain
+        },
+        domain
+      )) }) })
+    ] }),
     /* @__PURE__ */ u3("section", { class: "settings-section", children: [
       /* @__PURE__ */ u3("h2", { class: "settings-heading", children: "Paths" }),
       /* @__PURE__ */ u3("div", { class: "settings-field", children: [
@@ -2007,6 +2062,8 @@ function ProgressBar({ progress, type, startedAt }) {
   const newLabel = isGen ? "new generation" : "new post";
   const images = progress.imagesSaved || 0;
   const videos = progress.videosSaved || 0;
+  const itemNoun = isGen ? "item" : "post";
+  const activityText = formatActivity(progress.activity, { itemNoun });
   const [now, setNow] = d2(Date.now());
   y2(() => {
     const id = setInterval(() => setNow(Date.now()), 1e3);
@@ -2022,7 +2079,7 @@ function ProgressBar({ progress, type, startedAt }) {
       /* @__PURE__ */ u3("div", { class: "progress-pulse" }),
       /* @__PURE__ */ u3("span", { class: "progress-status", children: [
         "Downloading",
-        "\u2026"
+        activityText ? ` \xB7 ${activityText}` : "\u2026"
       ] })
     ] }),
     /* @__PURE__ */ u3("div", { class: "progress-details", children: [

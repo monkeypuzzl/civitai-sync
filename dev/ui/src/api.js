@@ -84,6 +84,10 @@ export function unlockKey (password) {
   return postJson('/api/unlock', { password });
 }
 
+export function refreshUser () {
+  return postJson('/api/user/refresh', {});
+}
+
 export function openFolder (mediaPath) {
   return postJson('/api/open-folder', { path: mediaPath });
 }

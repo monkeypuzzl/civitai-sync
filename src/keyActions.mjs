@@ -4,8 +4,10 @@ import input from '@inquirer/input';
 import password from '@inquirer/password';
 import { CONFIG, CONFIG_PATH } from './cli.mjs';
 import { encryptAES, decryptAES } from './crypto.mjs';
-import { setConfig, setConfigParam } from './config.mjs';
+import { setConfig } from './config.mjs';
 import { getGenerations } from './civitaiApi.mjs';
+import { CIVITAI_DOMAINS } from './civitaiDomain.mjs';
+import { resetUserDataSession } from './userData.mjs';
 
 let SECRET_KEY;
 
@@ -146,6 +148,25 @@ export async function getSecretKey () {
   return secretKey;
 }
 
+// Non-interactive equivalent of getSecretKey. Returns a usable plaintext key
+// when one is already available (memoized after a prior interactive unlock,
+// or stored unencrypted in config). Returns null otherwise — never prompts
+// for a password. Used by CLI startup, Settings refresh, and the Explorer
+// server so they do not hijack the terminal.
+export function getAvailableSecretKey () {
+  if (SECRET_KEY) return SECRET_KEY;
+  if (!CONFIG.secretKey) return null;
+  if (CONFIG.keyEncrypt) return null;
+  return CONFIG.secretKey;
+}
+
+// Store a plaintext key in the in-memory SECRET_KEY memo. Used by the Explorer
+// server's /api/unlock endpoint so CLI and Explorer share the same unlocked
+// state across the process lifetime.
+export function setMemoizedSecretKey (key) {
+  SECRET_KEY = key || null;
+}
+
 export async function requestKey () {
   const newKey = await input({ message: 'Enter API key (or press Enter to cancel):' });
 
@@ -154,7 +175,16 @@ export async function requestKey () {
   }
   
   SECRET_KEY = newKey;
-  await setConfigParam('username', '');
+  // A new API key may belong to a different user, or the same user with
+  // different content permissions. Clear identity-derived fields so the next
+  // refresh repopulates them cleanly. Reset domain to the default as well,
+  // to avoid being stuck on civitai.red without eligibility confirmation.
+  await setConfig({
+    username: '',
+    allowAltDomain: undefined,
+    domain: CIVITAI_DOMAINS[0]
+  });
+  resetUserDataSession();
 
   const encryptedKey = await encryptKey(newKey);
 
@@ -175,6 +205,10 @@ export async function removeKey () {
 
   await setConfig({
     keyEncrypt: false,
-    secretKey: null
+    secretKey: null,
+    username: '',
+    allowAltDomain: undefined,
+    domain: CIVITAI_DOMAINS[0]
   });
+  resetUserDataSession();
 }

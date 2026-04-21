@@ -41,7 +41,7 @@ export function Lightbox ({ item, onClose, onPrev, onNext, search }) {
   const isVideo = cur?.type === 'video';
   const dateStr = item.createdAt || item.publishedAt;
 
-  const resources = (detail?.steps?.[0]?.resources || [])
+  const resources = (detail?.metadata?.resources || detail?.steps?.[0]?.resources || [])
     .map(r => ({
       name: r.model?.name || r.name || 'Unknown',
       type: r.modelType || r.model?.type || '',
@@ -59,7 +59,10 @@ export function Lightbox ({ item, onClose, onPrev, onNext, search }) {
       <button class="lightbox-close" onClick={onClose} aria-label="Close">{'\u2715'}</button>
 
       <div class="lightbox-container">
-        <div class="lightbox-image-area">
+        <div
+          class="lightbox-image-area"
+          onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+        >
           {onPrev && item.media.length <= 1 && (
             <button class="lightbox-nav-arrow prev" onClick={onPrev}>{'\u2039'}</button>
           )}

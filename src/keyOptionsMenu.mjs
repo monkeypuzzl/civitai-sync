@@ -4,14 +4,23 @@ import confirm from '@inquirer/confirm';
 import select, { Separator } from '@inquirer/select';
 import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { mainMenu } from './mainMenu.mjs';
-import { getSecretKey, requestKey, testKey, removeKey, encryptKey, unEncryptKey } from './keyActions.mjs';
+import { getSecretKey, requestKey, testKey, removeKey, encryptKey, unEncryptKey, getAvailableSecretKey } from './keyActions.mjs';
 import { openDataDirectory, openMediaDirectory, countDownloads, formatCountReport, formatElapsed } from './downloadActions.mjs';
 import { setConfigParam } from './config.mjs';
 import { fileExists } from './utils.mjs';
+import { CIVITAI_DOMAINS, getCivitaiDomain } from './civitaiDomain.mjs';
+import { refreshOnce } from './userData.mjs';
 
 let previousMenuItem;
 
 export async function keyOptions ({ clear = true, message } = {}) {
+  // Kick off (at most) one background refresh per CLI session so the
+  // allowAltDomain / username fields reflect recent Civitai-side changes.
+  // The menu renders from current CONFIG; when the refresh completes, the
+  // updated state will appear the next time keyOptions is re-invoked after a
+  // user action (which it always is on selection).
+  refreshOnce({ secretKey: getAvailableSecretKey() }).catch(() => {});
+
   const dataDirExists = await fileExists(`${CONFIG.dataPath}/generations`) || await fileExists(`${CONFIG.dataPath}/posts`);
   const choices = [];
 
@@ -50,6 +59,16 @@ export async function keyOptions ({ clear = true, message } = {}) {
   }
 
   choices.push(new Separator());
+
+  if (CONFIG.allowAltDomain === true) {
+    choices.push(
+      {
+        name: `Change Domain: ${getCivitaiDomain()}`,
+        value: 'change-domain',
+        description: `Choose: ${chalk.italic(CIVITAI_DOMAINS.join(', '))}`
+      }
+    );
+  }
 
   choices.push(
     {
@@ -126,6 +145,9 @@ export async function keyOptions ({ clear = true, message } = {}) {
     case 'count-downloads':
     return runCountDownloads();
 
+    case 'change-domain':
+    return changeDomainMenu();
+
     case 'test-key':
     secretKey = await getSecretKey();
 
@@ -177,6 +199,41 @@ export async function keyOptions ({ clear = true, message } = {}) {
     case 'back':
     return mainMenu();
   }
+}
+
+async function changeDomainMenu () {
+  const choices = CIVITAI_DOMAINS.map(domain => ({
+    name: domain,
+    value: domain,
+    description: domain === getCivitaiDomain() ? chalk.dim('(current)') : ''
+  }));
+
+  choices.push(new Separator(), {
+    name: 'Back',
+    value: 'back',
+    description: 'Back to Settings'
+  });
+
+  clearTerminal();
+
+  const answer = await select({
+    message: 'Civitai domain:',
+    choices,
+    theme: customTheme,
+    pageSize: choices.length,
+    loop: false,
+    default: getCivitaiDomain()
+  });
+
+  if (answer === 'back') {
+    return keyOptions();
+  }
+
+  if (CIVITAI_DOMAINS.includes(answer) && answer !== CONFIG.domain) {
+    await setConfigParam('domain', answer);
+  }
+
+  return keyOptions({ message: chalk.green(`Domain set to ${getCivitaiDomain()}`) });
 }
 
 async function runCountDownloads () {

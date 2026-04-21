@@ -5,7 +5,7 @@ import { getAllPostRequests } from './civitaiApi.mjs';
 import { savePosts } from './posts.mjs';
 import { setConfigParam } from './config.mjs';
 import { rebuildIndex } from './serverIndex.mjs';
-import { listenForEscKeyPress, plural, formatElapsed, formatMediaCounts, formatMonthYear, formatMonthYearRange } from './downloadActions.mjs';
+import { listenForEscKeyPress, plural, formatElapsed, formatMediaCounts, formatMonthYear, formatMonthYearRange, formatActivity } from './downloadActions.mjs';
 
 export { listenForEscKeyPress };
 
@@ -36,6 +36,7 @@ export async function fetchPosts (options = {}) {
     toDate: '',
     batchDate: '',
     paginating: false,
+    activity: null,
     errors: [],
     aborted: false,
     complete: false
@@ -47,19 +48,24 @@ export async function fetchPosts (options = {}) {
 
   function reportText ({ esc = true } = {}) {
     const elapsed = formatElapsed(Date.now() - new Date(report.time).getTime());
+    const activityText = formatActivity(report.activity, { itemNoun: 'post' });
+
+    const title = chalk.hex('#a5d8ff')('Downloading posts');
+    const line1 = activityText
+      ? `${title} ${chalk.dim('·')} ${chalk.dim(activityText)}`
+      : title;
 
     const mediaText = formatMediaCounts(report.imagesSaved, report.videosSaved);
     const newPostsText = report.postsNew > 0 ? chalk.green(plural(report.postsNew, 'new post')) : '';
-    const contentParts = [mediaText, newPostsText].filter(Boolean);
-    const content = contentParts.length
-      ? contentParts.join(` ${chalk.dim('·')} `)
-      : report.postsDownloaded > 0 ? chalk.dim('checking…') : '';
-    const line1 = `${chalk.hex('#a5d8ff')('Downloading posts')}${content ? ` ${chalk.dim('·')} ${content}` : ''}`;
-
     const batchDateStr = report.batchDate ? formatMonthYear(report.batchDate) : '';
     const arrow = report.paginating && !isAborted() ? ' →' : '';
-    const dateParts = [batchDateStr ? `${batchDateStr}${arrow}` : '', `elapsed ${elapsed}`].filter(Boolean);
-    const line2 = chalk.dim(`  ${dateParts.join(' · ')}`);
+    const resultParts = [
+      batchDateStr ? `${batchDateStr}${arrow}` : '',
+      mediaText,
+      newPostsText,
+      `elapsed ${elapsed}`
+    ].filter(Boolean);
+    const line2 = chalk.dim(`  ${resultParts.join(' · ')}`);
 
     let line3;
 
@@ -126,22 +132,27 @@ export async function fetchPosts (options = {}) {
 
     const prevImagesSaved = report.imagesSaved;
     const prevVideosSaved = report.videosSaved;
+    const prevPostsNew = report.postsNew;
 
     const result = await savePosts(data, {
       withImages,
       signal,
       secretKey,
-      onProgress: ({ imagesSaved, videosSaved }) => {
-        report.imagesSaved = prevImagesSaved + imagesSaved;
-        report.videosSaved = prevVideosSaved + videosSaved;
+      onProgress: (saveReport) => {
+        report.imagesSaved = prevImagesSaved + saveReport.imagesSaved;
+        report.videosSaved = prevVideosSaved + saveReport.videosSaved;
+        report.postsNew = prevPostsNew + saveReport.postsNew;
+        report.activity = saveReport.activity;
         log(reportText());
+        if (onProgress) onProgress({ ...report });
       }
     });
 
-    report.postsNew += result.postsNew;
+    report.postsNew = prevPostsNew + result.postsNew;
     report.postsSaved += result.postsSaved;
     report.imagesSaved = prevImagesSaved + result.imagesSaved;
     report.videosSaved = prevVideosSaved + result.videosSaved;
+    report.activity = null;
 
     if (result.error) {
       report.errors.push(result.error);
@@ -156,16 +167,19 @@ export async function fetchPosts (options = {}) {
     log(reportText());
     if (onProgress) onProgress({ ...report });
 
-    // In latest mode, stop when a full page has nothing new (posts or media)
+    if (isAborted()) {
+      return false;
+    }
+
+    // In latest mode, stop when a full page has nothing new (posts or media).
+    // In "all" mode, always follow nextCursor — otherwise a restart whose
+    // newest page is already fully saved would exit before reaching any
+    // older unsaved posts.
     if (latest && result.postsNew === 0 && result.imagesSaved === 0 && result.videosSaved === 0) {
       return false;
     }
 
-    if (result.postsNew > 0 || result.imagesSaved > 0 || result.videosSaved > 0) {
-      return report;
-    }
-
-    return false;
+    return report;
   }
 
   const tick = setInterval(() => log(reportText()), 1000);

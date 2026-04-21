@@ -7,6 +7,7 @@ import { fetchModel, fetchFile } from './civitaiApi.mjs';
 import { fileExists, readFile, writeFile, listFiles, listDirectories, rename, unlink, rm, cp } from './utils.mjs';
 import { APP_DIRECTORY, CURRENT_VERSION } from './cli.mjs';
 import { spawnChild } from './childProcess.mjs';
+import { civitaiUrl } from './civitaiDomain.mjs';
 
 
 export const APP_MODEL_ID = 526058;
@@ -434,11 +435,11 @@ export async function updateSoftware ({ secretKey } = {}) {
     
     if (!success) {
       if (latest.availability === 'EarlyAccess') {
-        console.log(`There is a software update available for Early Access.\nUnlock it at https://civitai.com/models/${APP_MODEL_ID}.\nIt will be available for all soon.`);
+        console.log(`There is a software update available for Early Access.\nUnlock it at ${civitaiUrl(`/models/${APP_MODEL_ID}`)}.\nIt will be available for all soon.`);
       }
 
       else {
-        console.log(`There is a software update available, but it could not be downloaded.\nPlease try again. Or download from https://civitai.com/models/${APP_MODEL_ID} and install manually.`);
+        console.log(`There is a software update available, but it could not be downloaded.\nPlease try again. Or download from ${civitaiUrl(`/models/${APP_MODEL_ID}`)} and install manually.`);
       }
       
       return false;
