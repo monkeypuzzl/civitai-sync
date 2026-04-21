@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
-import { getConfig, updateConfig, getDownloadStatus, startDownload, abortDownload, connectProgress, rebuildIndex, unlockKey } from '../api.js';
+import { getConfig, updateConfig, getDownloadStatus, startDownload, abortDownload, connectProgress, rebuildIndex, unlockKey, refreshUser } from '../api.js';
 
 const MEDIA_TYPES = [
   { value: 'all', label: 'All' },
@@ -48,6 +48,19 @@ function plural (n, word) {
   return `${n} ${word}${n === 1 ? '' : 's'}`;
 }
 
+function formatActivity (activity, { itemNoun = 'item' } = {}) {
+  if (!activity) return '';
+  const { phase, index, total } = activity;
+  const of = (index && total) ? ` ${index} of ${total}` : '';
+  switch (phase) {
+    case 'checking': return `checking ${itemNoun}${of}`;
+    case 'saving': return `saving ${itemNoun}${of}`;
+    case 'enriching': return `enriching ${itemNoun}${of}`;
+    case 'media': return `image${of}`;
+    default: return '';
+  }
+}
+
 function formatDaysAgo (isoDate) {
   if (!isoDate) return null;
   const days = Math.floor((Date.now() - new Date(isoDate).getTime()) / (1000 * 60 * 60 * 24));
@@ -92,6 +105,12 @@ export function SettingsView () {
         setDownloadType(status.type);
       }
     }).catch(() => {});
+    // Trigger at most one user-data refresh per server lifetime (dedup
+    // enforced server-side). After it resolves, re-read config to surface any
+    // changes to username / allowAltDomain / domain.
+    refreshUser()
+      .then(() => getConfig().then(setConfig).catch(() => {}))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -203,6 +222,18 @@ export function SettingsView () {
     const result = await updateConfig({ excludeImages: newValue });
     if (result.ok) {
       setConfig(prev => ({ ...prev, excludeImages: newValue }));
+    }
+  }
+
+  async function handleDomainChange (newDomain) {
+    if (!config || !config.allowAltDomain) return;
+    if (!(config.availableDomains || []).includes(newDomain)) return;
+    if (newDomain === config.domain) return;
+    const result = await updateConfig({ domain: newDomain });
+    if (result.ok) {
+      // Re-read the full config so the effective domain (gated by
+      // allowAltDomain in getCivitaiDomain) matches the server's view.
+      getConfig().then(setConfig).catch(() => {});
     }
   }
 
@@ -344,6 +375,27 @@ export function SettingsView () {
         </div>
       </section>
 
+      {/* Civitai domain */}
+      {config.allowAltDomain && (config.availableDomains || []).length > 1 && (
+        <section class="settings-section">
+          <h2 class="settings-heading">Civitai domain</h2>
+          <div class="settings-field">
+            <div class="mode-selector">
+              {(config.availableDomains || []).map(domain => (
+                <button
+                  key={domain}
+                  class={`mode-btn${config.domain === domain ? ' active' : ''}`}
+                  onClick={() => handleDomainChange(domain)}
+                  title={`Use ${domain} for API calls and links`}
+                >
+                  {domain}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* Paths */}
       <section class="settings-section">
         <h2 class="settings-heading">Paths</h2>
@@ -390,6 +442,8 @@ function ProgressBar ({ progress, type, startedAt }) {
   const newLabel = isGen ? 'new generation' : 'new post';
   const images = progress.imagesSaved || 0;
   const videos = progress.videosSaved || 0;
+  const itemNoun = isGen ? 'item' : 'post';
+  const activityText = formatActivity(progress.activity, { itemNoun });
 
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -408,7 +462,7 @@ function ProgressBar ({ progress, type, startedAt }) {
     <div class="progress-bar">
       <div class="progress-indicator">
         <div class="progress-pulse" />
-        <span class="progress-status">Downloading{'\u2026'}</span>
+        <span class="progress-status">Downloading{activityText ? ` \u00B7 ${activityText}` : '\u2026'}</span>
       </div>
       <div class="progress-details">
         {parts.length > 0 && <span class="progress-counts">{parts.join(' \u00B7 ')}</span>}

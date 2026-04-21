@@ -2,19 +2,20 @@ import chalk from 'chalk';
 import select from '@inquirer/select';
 import { customTheme, CURRENT_VERSION, clearTerminal } from './cli.mjs';
 import { mainMenu } from './mainMenu.mjs';
+import { civitaiUrl } from './civitaiDomain.mjs';
 
 export async function showInfo () {
   clearTerminal({ suffix: ` / v${CURRENT_VERSION}` });
 
   console.log(`
 ${chalk.bold('Model page')}:
-https://civitai.com/models/526058
+${civitaiUrl('/models/526058')}
 
 ${chalk.bold('Discussion page')} for ideas, issues, newest comments:  
-https://civitai.com/articles/5676
+${civitaiUrl('/articles/5676')}
 
 ${chalk.bold('Create API key')}:
-https://civitai.com/user/account
+${civitaiUrl('/user/account')}
 
 ${chalk.bold('Download generations, posts, and media')} by following the instructions in the "Download" menu. You can also browse your local library of creations in the browser by selecting "Browse Creations" from the main menu.
 Choose a download directory. By default, Data and media is saved in the program folder in "data" and "media" and config files are saved in the "config".

@@ -7,8 +7,9 @@ import {
 } from './generations.mjs';
 import { postsDataDir } from './posts.mjs';
 import { CONFIG } from './cli.mjs';
+import { civitaiUrl } from './civitaiDomain.mjs';
 
-const INDEX_VERSION = 1;
+const INDEX_VERSION = 3;
 
 let index = { generations: [], posts: [], stats: {} };
 
@@ -190,13 +191,21 @@ export function buildGenerationEntry (gen, date) {
   if (!mediaInfo.length) return null;
 
   const step = gen.steps?.[0];
-  const params = step?.params || {};
-  const resource = step?.resources?.[0];
+  // Civitai's generation payload changed around mid-February 2026: newer
+  // entries carry `params` and `resources` under `gen.metadata`, while
+  // older entries place them on `gen.steps[0]`. Read from the new location
+  // first and fall back to the step so both shapes work. Newer payloads
+  // also nest image size under `params.aspectRatio`; older payloads expose
+  // flat `width` / `height` fields on `params`.
+  const params = gen.metadata?.params || step?.params || {};
+  const resource = gen.metadata?.resources?.[0] || step?.resources?.[0];
+  const width = params.width || params.aspectRatio?.width || 0;
+  const height = params.height || params.aspectRatio?.height || 0;
 
   const allTags = new Set();
   const media = mediaInfo.map(m => {
     m.tags.forEach(t => allTags.add(t));
-    const isVideo = m.mediaId.endsWith('.mp4') || m.mediaId.endsWith('.webm');
+    const isVideo = m.type === 'video' || m.mediaId.endsWith('.mp4') || m.mediaId.endsWith('.webm');
     const hasExt = m.mediaId.includes('.');
     return {
       mediaId: m.mediaId,
@@ -222,8 +231,8 @@ export function buildGenerationEntry (gen, date) {
       sampler: params.sampler || '',
       steps: params.steps || 0,
       cfgScale: params.cfgScale || 0,
-      width: params.width || 0,
-      height: params.height || 0
+      width,
+      height
     }
   };
 }
@@ -255,7 +264,7 @@ export function buildPostEntry (post, date) {
     title: post.title || '',
     detail: post.detail ?? null,
     tags: post.tags || [],
-    url: `https://civitai.com/posts/${post.id}`,
+    url: civitaiUrl(`/posts/${post.id}`),
     stats: post.stats || {},
     imageCount: media.filter(m => m.type === 'image').length,
     videoCount: media.filter(m => m.type === 'video').length,

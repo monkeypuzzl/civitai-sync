@@ -162,7 +162,7 @@ export async function enrichPostImageMeta (post, { secretKey, signal } = {}) {
   }
 }
 
-export async function savePostMedia (post, { signal, secretKey } = {}) {
+export async function savePostMedia (post, { signal, secretKey, onProgress } = {}) {
   const report = { imagesSaved: 0, videosSaved: 0, error: undefined, aborted: false };
   const { id: postId, publishedAt, images } = post;
 
@@ -171,8 +171,9 @@ export async function savePostMedia (post, { signal, secretKey } = {}) {
   }
 
   const cdnBase = await getCivitaiImageBase({ secretKey });
+  const totalImages = images.length;
 
-  for (let i = 0; i < images.length; i++) {
+  for (let i = 0; i < totalImages; i++) {
     if (signal && signal.aborted) {
       report.aborted = true;
       return report;
@@ -185,6 +186,8 @@ export async function savePostMedia (post, { signal, secretKey } = {}) {
     if (await fileExists(filepath)) {
       continue;
     }
+
+    if (onProgress) onProgress({ phase: 'media', index: i + 1, total: totalImages });
 
     const itemDirectory = path.dirname(filepath);
 
@@ -240,9 +243,15 @@ export async function savePosts (apiResponse, { overwrite = false, withImages = 
     postsSaved: 0,
     imagesSaved: 0,
     videosSaved: 0,
+    activity: null,
     error: null,
     currentPosts: []
   };
+
+  function progress (activity) {
+    report.activity = activity;
+    if (onProgress) onProgress(report);
+  }
 
   const { result } = apiResponse;
   const { data } = result;
@@ -258,9 +267,12 @@ export async function savePosts (apiResponse, { overwrite = false, withImages = 
     return report;
   }
 
+  const totalItems = items.length;
   report.currentPosts = items.map(({ id, publishedAt }) => ({ id, publishedAt, status: 'pending' }));
 
-  for (const post of items) {
+  for (let itemIndex = 0; itemIndex < totalItems; itemIndex++) {
+    const post = items[itemIndex];
+    const postNum = itemIndex + 1;
     const currentReportItem = report.currentPosts.find(item => item.id === post.id);
 
     if (signal && signal.aborted) {
@@ -273,6 +285,8 @@ export async function savePosts (apiResponse, { overwrite = false, withImages = 
     const exists = await fileExists(filepath);
 
     if (!exists || overwrite) {
+      progress({ phase: 'saving', index: postNum, total: totalItems });
+
       const savedFilepath = await savePostData(post);
 
       if (!savedFilepath) {
@@ -289,19 +303,22 @@ export async function savePosts (apiResponse, { overwrite = false, withImages = 
       }
 
       if (secretKey && !(signal && signal.aborted)) {
+        progress({ phase: 'enriching', index: postNum, total: totalItems });
+
         const enriched = await enrichPostDetail(post, { secretKey, signal });
 
         if (!enriched) {
           console.log(`Warning: could not enrich detail for post ${id}`);
         }
 
-        // Fetch image generation metadata (prompt, model, seed, etc.)
         if (!(signal && signal.aborted)) {
           const latestJson = JSON.parse(await readFile(filepath));
           await enrichPostImageMeta(latestJson, { secretKey, signal });
         }
       }
     } else {
+      progress({ phase: 'checking', index: postNum, total: totalItems });
+
       currentReportItem.status = 'exists';
 
       if (secretKey && !(signal && signal.aborted)) {
@@ -309,6 +326,8 @@ export async function savePosts (apiResponse, { overwrite = false, withImages = 
           const savedJson = JSON.parse(await readFile(filepath));
 
           if (!('tags' in savedJson)) {
+            progress({ phase: 'enriching', index: postNum, total: totalItems });
+
             const enriched = await enrichPostDetail(savedJson, { secretKey, signal });
 
             if (!enriched) {
@@ -316,7 +335,6 @@ export async function savePosts (apiResponse, { overwrite = false, withImages = 
             }
           }
 
-          // Backfill: enrich existing posts that lack image generation metadata
           if (!(signal && signal.aborted)) {
             await enrichPostImageMeta(savedJson, { secretKey, signal });
           }
@@ -328,9 +346,15 @@ export async function savePosts (apiResponse, { overwrite = false, withImages = 
       }
     }
 
-    // Always attempt media — savePostMedia skips individual files that already exist
     if (withImages && post.images && post.images.length) {
-      const mediaReport = await savePostMedia(post, { signal, secretKey });
+      const mediaReport = await savePostMedia(post, {
+        signal,
+        secretKey,
+        onProgress: (mediaActivity) => {
+          progress(mediaActivity);
+        }
+      });
+
       report.imagesSaved += mediaReport.imagesSaved;
       report.videosSaved += mediaReport.videosSaved;
 
@@ -350,9 +374,7 @@ export async function savePosts (apiResponse, { overwrite = false, withImages = 
       }
     }
 
-    if (onProgress) {
-      onProgress({ imagesSaved: report.imagesSaved, videosSaved: report.videosSaved });
-    }
+    progress(null);
   }
 
   return report;

@@ -1,4 +1,5 @@
 /*eslint no-unused-vars: ["error", { "caughtErrors": "all", "caughtErrorsIgnorePattern": "^ignore" }]*/
+import process from 'node:process';
 import chalk from 'chalk';
 import select, { Separator } from '@inquirer/select';
 import { ExitPromptError } from '@inquirer/core';
@@ -9,7 +10,7 @@ import { showInfo } from './showInfo.mjs';
 import { CONFIG, CURRENT_VERSION, customTheme, clearTerminal } from './cli.mjs';
 import { requestKey, getSecretKey } from './keyActions.mjs';
 import { SOFTWARE, updateSoftware, checkForSoftwareUpdate } from './softwareUpdate.mjs';
-import { getBrowseState, startBrowseServer, stopBrowseServer } from './browse.mjs';
+import { getBrowseState, getBrowseDisplayUrl, startBrowseServer, stopBrowseServer, enableInteractiveShutdown } from './browse.mjs';
 
 let previousMenuItem;
 
@@ -59,7 +60,7 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
         ? {
             name: `${chalk.red('Stop')} Explorer server`,
             value: 'browse-stop',
-            description: `Running at ${getBrowseState().url}`
+            description: `Running at ${getBrowseDisplayUrl()}`
           }
         : {
             name: 'Start Explorer',
@@ -122,7 +123,7 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
   }
 
   if (browsing) {
-    console.log(`  ${chalk.green('\u25CF')} ${chalk.dim('Explorer:')} ${chalk.hex('#a5d8ff').underline(getBrowseState().url)}\n`);
+    console.log(`  ${chalk.green('\u25CF')} ${chalk.dim('Explorer:')} ${chalk.hex('#a5d8ff').underline(getBrowseDisplayUrl())}\n`);
   }
 
   try {
@@ -174,9 +175,26 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
       break;
 
       case 'browse': {
+      const networkAnswer = await select({
+        message: 'Open Explorer on:',
+        choices: [
+          {
+            name: 'This device only',
+            value: '127.0.0.1',
+            description: 'Access from this computer only'
+          },
+          {
+            name: 'Local network',
+            value: '0.0.0.0',
+            description: 'Accessible to other devices on your network. Only use on a trusted network — no password protection.'
+          }
+        ],
+        theme: customTheme
+      });
       console.log(chalk.dim('\n  Starting Explorer server...'));
-      await startBrowseServer();
-      console.log(`  ${chalk.green('Explorer server started at')} ${chalk.hex('#a5d8ff').underline(getBrowseState().url)}`);
+      await startBrowseServer({ host: networkAnswer });
+      enableInteractiveShutdown();
+      console.log(`  ${chalk.green('Explorer server started at')} ${chalk.hex('#a5d8ff').underline(getBrowseDisplayUrl())}`);
       break;
       }
 
@@ -195,7 +213,7 @@ export async function mainMenu ({ clear = true, defaultValue = '', abortSignal =
   catch (err) {
     if (err instanceof ExitPromptError) {
       await shutdownBrowseServer();
-      return;
+      process.exit(0);
     }
     // Otherwise: abort signal from software update checker — re-enter menu
   }

@@ -4,6 +4,23 @@ This documents the external Civitai APIs used by `civitai-sync`, as understood f
 
 ---
 
+## Multi-host domain
+
+Civitai runs multiple public hostnames. civitai-sync supports `civitai.com` (default; public subset in the new arrangement) and `civitai.red` (full catalog). The effective host is selected by the user and stored as `CONFIG.domain`; `src/civitaiDomain.mjs` exports `getCivitaiDomain()` which returns the stored value only when `CONFIG.allowAltDomain === true` (derived from `user.showNsfw`), otherwise falls back to `civitai.com`.
+
+The same host is used for:
+
+- tRPC endpoints (`/api/trpc/...`) — except `auth.getUser`, which is pinned to `civitai.com` (see below).
+- REST v1 endpoints (`/api/v1/...`).
+- The `Referer` request header.
+- Links rendered in the CLI (`showInfo`, post URLs) and Explorer UI.
+
+The `image.civitai.com` CDN is invariant and is not affected by domain selection.
+
+Generations and posts visible on a given host are specific to that host's data slice. A user who creates on `civitai.red` will not see those items when syncing against `civitai.com`, and vice versa.
+
+---
+
 ## Critical: Generation Expiry
 
 **Civitai deletes all generation data 30 days after creation.** After 30 days, the generation JSON and associated media URLs become permanently unavailable via the API. This means:
@@ -46,9 +63,13 @@ This applies to all endpoints, not just posts. When adding new code that process
 
 The `Referer` header is **mandatory** for all requests (data and images). Without it, requests may be silently rejected or return unexpected results.
 
+The header value mirrors the API URL's host. For requests using the selected domain:
+
 ```
-Referer: https://civitai.com/generate
+Referer: https://<getCivitaiDomain()>/generate
 ```
+
+For the host-pinned `auth.getUser` call, the Referer is forced to `https://civitai.com/generate` so it matches the call's URL host.
 
 The full header sets are defined in `src/headers.mjs`:
 
@@ -62,7 +83,7 @@ The full header sets are defined in `src/headers.mjs`:
   "sec-ch-ua-platform": "",
   "sec-gpc": "1",
   "Referrer-Policy": "strict-origin-when-cross-origin",
-  "Referer": "https://civitai.com/generate"
+  "Referer": "https://<getCivitaiDomain()>/generate"
 }
 ```
 
@@ -275,11 +296,56 @@ Downloads generated images/videos.
 
 **Response**: Binary stream (image or video). Status 200 means success; any other status or network error returns `null` (treated as "probably deleted from on-site generator").
 
-### Get User
+### Get User (tRPC auth.getUser)
 
-Fetches the authenticated user's profile, used to resolve and cache their `username`.
+Primary identity endpoint used by civitai-sync. Returns the authenticated user's `SessionUser` — the same object the Civitai site builds from its Prisma `User` row plus subscriptions and per-user settings.
 
-**URL**: `https://civitai.com/api/v1/me`
+**URL**: `https://civitai.com/api/trpc/auth.getUser`
+
+**Host pinning**: this call is **always sent to `civitai.com`**, regardless of the user's currently selected domain. Rationale: the server handler (`src/server/routers/auth.router.ts` in the Civitai source) is `({ ctx }) => ctx.user` and is therefore host-agnostic. Using a single stable host decouples identity detection from the user's catalog choice.
+
+**Method**: GET (tRPC void query; no `input` parameter required)
+
+**Authentication**: Required. The `Referer` header is forced to `https://civitai.com/generate` to match the pinned host.
+
+**Response shape**: standard tRPC envelope, with `result.data.json` holding the `SessionUser` object:
+
+```json
+{
+  "result": {
+    "data": {
+      "json": {
+        "id": 4356713,
+        "username": "monkeypuzzle",
+        "showNsfw": true,
+        "blurNsfw": false,
+        "browsingLevel": 31,
+        "tier": "bronze",
+        "onboarding": 15,
+        "permissions": [],
+        "...": "additional SessionUser fields"
+      }
+    }
+  }
+}
+```
+
+**Fields consumed by civitai-sync**:
+
+| Field | Stored as | Purpose |
+|---|---|---|
+| `username` | `CONFIG.username` | Post download username; identity cache |
+| `showNsfw` | `CONFIG.allowAltDomain` | Gates visibility of the "Change Domain" setting in the CLI and Explorer |
+
+**Error handling**: any network error, non-200 response, `error` body, or missing `result.data.json` causes `getCivitaiUser()` to return `null`. The user-data layer (`src/userData.mjs`) then falls back to `/api/v1/me` for `username` only (the `/me` response does not include `showNsfw`, so `allowAltDomain` is not updated on the fallback path).
+
+**Server-side caching**: Civitai caches the SessionUser for up to ~4 hours (`CacheTTL.hour * 4` in `src/server/auth/session-user.ts`). Recent changes to `showNsfw` or other user settings made in the browser may take a few minutes to propagate to this call. In practice Civitai invalidates the cache on user writes via `refreshSession`, so propagation is fast.
+
+### Get User (REST /api/v1/me — fallback)
+
+Fallback endpoint used only when `auth.getUser` does not return a valid user.
+
+**URL**: `https://<getCivitaiDomain()>/api/v1/me`
 
 **Method**: GET
 
@@ -296,7 +362,9 @@ Fetches the authenticated user's profile, used to resolve and cache their `usern
 }
 ```
 
-The `username` field is written to `CONFIG.username` on first use and cleared whenever the API key is changed (see `src/keyActions.mjs`).
+Only the `username` field is consumed. `showNsfw` is **not** returned by this endpoint, so `CONFIG.allowAltDomain` is never updated via this fallback.
+
+Both identity paths (tRPC and REST) are cleared whenever the API key is changed — along with `CONFIG.domain` (reset to `civitai.com`) — so a new key triggers a fresh identity refresh on the next Settings entry.
 
 ---
 

@@ -61,9 +61,16 @@ export async function launchCLI () {
   await useConfig(CONFIG_PATH);
   await migrate();
 
+  // Lazy-fill identity fields (username, allowAltDomain) if a usable key is
+  // already available. Runs in the background; does not block the main menu.
+  // No-op when no key / locked encrypted key.
+  const { getAvailableSecretKey } = await import('./keyActions.mjs');
+  const { fillIfMissing } = await import('./userData.mjs');
+  fillIfMissing({ secretKey: getAvailableSecretKey() }).catch(() => {});
+
   if (COMMANDS.command === 'browse') {
     const { launchBrowser } = await import('./browse.mjs');
-    return launchBrowser();
+    return launchBrowser({ host: COMMANDS.host ? '0.0.0.0' : '127.0.0.1' });
   }
 
   const { mainMenu } = await import('./mainMenu.mjs');
@@ -81,7 +88,11 @@ export async function launchCLI () {
 function getCommandLineArgs () {
   const commandlineArgs = process.argv.slice(2);
   const args = {};
-  let positional = [...commandlineArgs];
+
+  const flags = commandlineArgs.filter(a => a.startsWith('--'));
+  let positional = commandlineArgs.filter(a => !a.startsWith('--'));
+
+  args.host = flags.includes('--host');
 
   if (positional.length && KNOWN_COMMANDS.includes(positional[0])) {
     args.command = positional.shift();

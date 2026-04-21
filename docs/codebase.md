@@ -31,25 +31,25 @@ All source lives in `src/`. Modules fall into four layers; dependencies flow str
 
 | Module | Role |
 |---|---|
-| `cli.mjs` | Application entry. Parses CLI args, resolves config path, loads config, runs migrations, kicks off update check, launches main menu. Exports shared constants (`APP_DIRECTORY`, `CONFIG`, `CONFIG_PATH`, `CURRENT_VERSION`, `OS`, `customTheme`, `appHeader`). |
+| `cli.mjs` | Application entry. Parses CLI args (including the `--host` flag for the `browse` command), resolves config path, loads config, runs migrations, kicks off update check, launches main menu or `launchBrowser()`. Exports shared constants (`APP_DIRECTORY`, `CONFIG`, `CONFIG_PATH`, `CURRENT_VERSION`, `OS`, `customTheme`, `appHeader`). |
 | `commands.mjs` | Non-interactive CLI commands (`auto-fetch`, `remove-deleted`). Runs at module level via top-level `await` — not exported. Duplicates config-path resolution from `cli.mjs`. |
 
 ### UI (Menus)
 
 | Module | Role |
 |---|---|
-| `mainMenu.mjs` | Top-level menu. Routes to download, settings, about, update. Shows "Install software update" when available, or "Check for updates" with last-checked timestamp. Remembers last selection via `previousMenuItem`. |
+| `mainMenu.mjs` | Top-level menu. Routes to download, settings, about, update. When starting the Explorer, prompts "Open Explorer on:" (This device only / Local network) and passes the chosen `host` to `startBrowseServer()`. Displays the correct network-facing URL in the running-state status line and stop-description via `getBrowseDisplayUrl()`. Shows "Install software update" when available, or "Check for updates" with last-checked timestamp. Remembers last selection via `previousMenuItem`. |
 | `downloadGenerationsMenu.mjs` | Download mode selection (latest / oldest / by-tag / all). Builds tag list and options contextually. |
 | `downloadOptionsMenu.mjs` | Settings for downloads: media types, data types, directory paths, counts, delete-deleted. |
-| `keyOptionsMenu.mjs` | API key management: test, encrypt, decrypt, update, delete. |
+| `keyOptionsMenu.mjs` | API key management: test, encrypt, decrypt, update, delete. Exposes a "Change Domain" entry when `CONFIG.allowAltDomain === true`. |
 | `showInfo.mjs` | About screen with links and help. |
 
 ### Core Logic
 
 | Module | Role |
 |---|---|
-| `downloadActions.mjs` | Download orchestration for generations. Paginates the API, delegates saving to `generations.mjs`, tracks progress in a `report` object, handles retries (up to 10), abort signals, and UNAUTHORIZED recovery. Also contains `countDownloads()` for stats. |
-| `downloadPostsActions.mjs` | Download orchestration for posts. Similar pattern to generations: paginates via `getAllPostRequests()`, delegates saving to `posts.mjs`, supports abort and progress reporting. |
+| `downloadActions.mjs` | Download orchestration for generations. Paginates the API, delegates saving to `generations.mjs`, tracks progress in a `report` object (aggregate counts + a live `activity` field — `{ phase, index, total }` — for the current file/page), handles retries (up to 10), abort signals, and UNAUTHORIZED recovery. Emits incremental updates to an `onProgress` callback so the CLI and Explorer can display live activity; `formatActivity()` renders the CLI string. Also contains `countDownloads()` for stats. |
+| `downloadPostsActions.mjs` | Download orchestration for posts. Similar pattern to generations: paginates via `getAllPostRequests()`, delegates saving to `posts.mjs`, supports abort and incremental `onProgress` reporting (including the same `activity` field for per-image/per-post progress). |
 | `generations.mjs` | Generation data and media management. Filepath conventions, tag-to-directory mapping, save/load generation JSON, download + organise images by tag, detect modifications, remove untagged media, iterate all generations, count/rename/migrate files. |
 | `posts.mjs` | Post data and media management. Filepath conventions, save post JSON, download post media, enrich posts with detail (tags, availability) via `post.get` tRPC endpoint, and enrich image generation metadata via `GET /api/v1/images?postId=`. |
 | `civitaiApi.mjs` | HTTP client. See [`api-contract.md`](./api-contract.md). Includes `getPostImageMeta()` for fetching image generation parameters for posts. |
@@ -59,7 +59,8 @@ All source lives in `src/`. Modules fall into four layers; dependencies flow str
 
 | Module | Role |
 |---|---|
-| `server.mjs` | HTTP server for the browser UI. Serves static files from `src/ui/`, media files from the configured paths, and a REST API. Handles download execution (generations + posts) with SSE progress streaming. Saves download completion timestamps to config for "last downloaded X days ago" display. |
+| `server.mjs` | HTTP server for the browser UI. Serves static files from `src/ui/`, media files from the configured paths, and a REST API. `startServer({ port, host })` defaults `host` to `'127.0.0.1'`; pass `'0.0.0.0'` to bind all interfaces for LAN access — port-increment retries (3456–3466) preserve the chosen host. Handles download execution (generations + posts) and streams progress over SSE at `GET /api/download/progress`: each `onProgress` tick is broadcast via `broadcastSSE()` with aggregate counts plus the live `activity` field (`{ phase, index, total }`) from `downloadActions` / `downloadPostsActions`, so the Explorer can show real-time per-file progress; a final message with `final: true` closes the run. Saves download completion timestamps to config for "last downloaded X days ago" display. Exposes `POST /api/user/refresh` (delegates to `userData.refreshOnce`); `GET /api/config` returns `domain`, `allowAltDomain`, and `availableDomains`, and `PUT /api/config` whitelists `domain` (validated against `CIVITAI_DOMAINS`). |
+| `browse.mjs` | Explorer server lifecycle. `startBrowseServer({ host })` and `stopBrowseServer()` manage the `browseState` singleton (holds `server`, `port`, `host`, `url`). `launchBrowser({ host })` is the blocking entry point for `civitai-sync browse` — starts the server, opens the local browser, and when `host === '0.0.0.0'` also logs the LAN IP URL; waits for SIGINT/SIGTERM. `getBrowseDisplayUrl()` resolves the appropriate display URL (LAN IP when bound to `0.0.0.0`, `127.0.0.1` otherwise) for use in menu display. `enableInteractiveShutdown()` registers keypress/signal handlers for graceful exit during Inquirer prompts. |
 | `serverIndex.mjs` | In-memory index builder. Scans data directories on startup (and after downloads) to build paginated, searchable indexes of generations and posts. Includes `meta` from enriched post images for offline display of generation parameters. |
 
 ### UI (`dev/ui/src/` → built to `src/ui/`)
@@ -70,7 +71,7 @@ All source lives in `src/`. Modules fall into four layers; dependencies flow str
 | `Nav.jsx` | Navigation bar with tabs and username display. |
 | `GenerationsView.jsx` | Gallery view for generations with filtering, sorting, search, infinite scroll. |
 | `PostsView.jsx` | Gallery view for posts with tag filtering, sorting, search, infinite scroll. |
-| `SettingsView.jsx` | Download controls (generations + posts), media options, last-download timestamps with 30-day expiry warnings, offline indicator. SSE progress streaming for active downloads. |
+| `SettingsView.jsx` | Download controls (generations + posts), media options, last-download timestamps with 30-day expiry warnings, offline indicator. Subscribes to `GET /api/download/progress` (SSE) and renders live activity while a download is running — current phase, file index/total, and rolling aggregate counts — updating in place until the server emits `final: true`. |
 | `Lightbox.jsx` | Full-screen media viewer for generations. Shows prompt, negative prompt, model, sampler, CFG scale, seed, tags. Keyboard navigation. |
 | `PostLightbox.jsx` | Full-screen media viewer for posts. Shows title, reactions, description, tags, and generation parameters (prompt, model, etc.) when `meta` is available on images. |
 | `TimelineView.jsx` | Monthly timeline view. Fetches all generations and posts, groups by month (YYYY-MM), renders a chronological grid of thumbnails with "P" badges for posts. Opens Lightbox or PostLightbox on click. |
@@ -80,9 +81,11 @@ All source lives in `src/`. Modules fall into four layers; dependencies flow str
 
 | Module | Role |
 |---|---|
-| `config.mjs` | Config persistence. Singleton loader (`getCurrentConfig`), JSON read/write, auto-migration of old root-level configs to `config/` folder. |
+| `config.mjs` | Config persistence. Singleton loader (`getCurrentConfig`), JSON read/write, auto-migration of old root-level configs to `config/` folder. Normalizes an invalid `CONFIG.domain` to `civitai.com` on load and persists the correction. |
+| `civitaiDomain.mjs` | Domain selection. Exports `CIVITAI_DOMAINS`, `getCivitaiDomain()`, and URL helpers (`civitaiUrl`, `apiBase`). `.red` is gated behind `CONFIG.allowAltDomain`; invalid or missing `CONFIG.domain` values fall back to `civitai.com`. |
+| `userData.mjs` | Identity + eligibility resolution. `fillIfMissing` / `refreshOnce` / `resolveUsername` / `resetUserDataSession`. Fetches `auth.getUser` (pinned to `civitai.com`) with `/api/v1/me` fallback, and persists `username` and `allowAltDomain` (derived from `user.showNsfw`). Dedupes concurrent calls via an `inflight` promise and memoizes once per CLI session. Backs the Explorer `POST /api/user/refresh` route and the CLI posts menu. |
 | `crypto.mjs` | AES-256-CBC encrypt/decrypt. Key buffer zero-padded to 32 bytes. Output format: `{iv_hex}:{ciphertext_hex}`. |
-| `headers.mjs` | Centralised HTTP headers. Three sets: `sharedHeaders`, `imageHeaders`, `jsonHeaders`. The `Referer` header is **required** by the Civitai API. |
+| `headers.mjs` | Centralised HTTP headers. Exports a function `getHeaders({ forceDomain })` returning three sets (`sharedHeaders`, `imageHeaders`, `jsonHeaders`); the `Referer` header is **required** by the Civitai API and is set to `https://<getCivitaiDomain()>/generate`, or `https://<forceDomain>/generate` for host-pinned calls (e.g. `auth.getUser`). |
 | `utils.mjs` | File system helpers: `fileExists`, `readFile`, `writeFile` (atomic write via tmp+rename, auto-`mkdirp`); retry-wrapped fs ops (`rename`, `unlink`, `rm`, `cp`, `copyFile`, `rmdir`) with exponential backoff for transient errors (`EPERM`/`EACCES`/`EBUSY`/`EAGAIN`); date helpers (`toDateString`, `dateIsOlderThanDays`, `isDate`); `wait()`; directory listing/cleanup. |
 | `childProcess.mjs` | `spawnChild()` wrapper with stdout/stderr capture and progress callback. |
 | `softwareUpdate.mjs` | Self-update system. Checks Civitai model page (ID `526058`) every 12 hours, downloads ZIP, extracts, backs up current files, installs, handles dependency changes via `npm ci`, rolls back on failure. |
@@ -93,16 +96,23 @@ All source lives in `src/`. Modules fall into four layers; dependencies flow str
 ```
 index.mjs
 └── cli.mjs
-    ├── config.mjs ← utils.mjs
+    ├── config.mjs ← utils.mjs, civitaiDomain.mjs
+    ├── userData.mjs ← civitaiApi.mjs, keyActions.mjs, config.mjs   (non-blocking fillIfMissing at startup)
     ├── migrate.mjs ← generations.mjs, config.mjs
     ├── softwareUpdate.mjs ← civitaiApi.mjs, childProcess.mjs
+    ├── browse.mjs ← server.mjs ← serverIndex.mjs   (dynamic import; `browse` command path)
     └── mainMenu.mjs
         ├── downloadGenerationsMenu.mjs
         │   ├── downloadActions.mjs ← civitaiApi.mjs, generations.mjs, keyActions.mjs
         │   └── downloadOptionsMenu.mjs ← generations.mjs, config.mjs
-        ├── keyOptionsMenu.mjs ← keyActions.mjs ← crypto.mjs, civitaiApi.mjs
-        ├── showInfo.mjs
-        └── softwareUpdate.mjs
+        ├── keyOptionsMenu.mjs ← keyActions.mjs, userData.mjs, civitaiDomain.mjs
+        │                       keyActions.mjs ← crypto.mjs, civitaiApi.mjs
+        ├── showInfo.mjs ← civitaiDomain.mjs
+        ├── softwareUpdate.mjs
+        └── browse.mjs   (shared with cli.mjs path above)
+
+civitaiApi.mjs ← civitaiDomain.mjs, headers.mjs
+headers.mjs    ← civitaiDomain.mjs
 
 commands.mjs (standalone entry for auto-fetch / remove-deleted)
 ├── keyActions.mjs
@@ -114,6 +124,19 @@ commands.mjs (standalone entry for auto-fetch / remove-deleted)
 
 ## Data Model
 
+### Civitai host selection
+
+Civitai exposes the same account through two public hosts:
+
+- `civitai.com` — default; public subset of the catalog.
+- `civitai.red` — full catalog; available only to accounts whose server-side `showNsfw` is `true`.
+
+The active host is stored as `CONFIG.domain` and read via `getCivitaiDomain()` in `src/civitaiDomain.mjs`, which only honours `CONFIG.domain` when `CONFIG.allowAltDomain === true` (mirrored from `user.showNsfw`) and otherwise falls back to `civitai.com`. The same host drives all tRPC and REST v1 calls, the `Referer` header, and informational links rendered in the CLI (`showInfo`, post URLs, update messages) and Explorer UI. `auth.getUser` is the sole exception — it is pinned to `civitai.com` because its response is host-agnostic. The `image.civitai.com` CDN is invariant.
+
+Generations and posts visible on a given host are specific to that host's data slice: items created on `civitai.red` are not synced when `CONFIG.domain === "civitai.com"`, and vice versa.
+
+See [`api-contract.md` → Multi-host domain](./api-contract.md#multi-host-domain) for wire-level detail.
+
 ### Configuration
 
 JSON files in `config/`. Default path: `config/default.json`. Multiple accounts use separate files (`config/<name>.json`).
@@ -123,6 +146,8 @@ DEFAULT_CONFIG = {
   dataPath:             "data",
   mediaPath:            "media",
   username:             "",
+  domain:               "civitai.com",          // "civitai.com" (default) or "civitai.red" (eligible accounts)
+  allowAltDomain:       false,                  // mirrors user.showNsfw; gates the "Change Domain" setting
   generationMediaTypes: ["all", "favorite"],   // which tag directories to populate
   generationDataTypes:  ["all"],
   keyEncrypt:           false,
@@ -131,7 +156,7 @@ DEFAULT_CONFIG = {
 }
 ```
 
-Additional runtime fields written by the app: `version`, `pendingDownloads`, `lastDownloadGenerations` (ISO timestamp), `lastDownloadPosts` (ISO timestamp).
+Additional runtime fields written by the app: `version`, `pendingDownloads`, `lastDownloadGenerations` (ISO timestamp), `lastDownloadPosts` (ISO timestamp). `username`, `domain`, and `allowAltDomain` are populated/refreshed by `userData.mjs` from `auth.getUser` (with `/api/v1/me` as a username-only fallback). An invalid `CONFIG.domain` is normalized to `civitai.com` on config load and the file is rewritten.
 
 Config path resolution: a bare name like `myaccount` becomes `config/myaccount.json`. Old root-level configs auto-migrate to `config/`.
 
@@ -196,7 +221,15 @@ These are the things most likely to cause regressions if violated.
 
 ### Module-Scoped Secret Key Cache
 
-`SECRET_KEY` in `keyActions.mjs` caches the decrypted API key to avoid repeated password prompts. It's set on first successful `getSecretKey()` call and cleared only by `removeKey()`.
+`SECRET_KEY` in `keyActions.mjs` caches the decrypted API key to avoid repeated password prompts. It's set on first successful `getSecretKey()` call and cleared only by `removeKey()`. In parallel, `userData.mjs` holds a session-scoped `inflight` promise (to dedupe concurrent `auth.getUser` / `/me` calls) and a "refreshed-this-session" flag that makes `refreshOnce()` a no-op after the first call; both are cleared by `resetUserDataSession()`, which is invoked on API-key rotation.
+
+### Host-Pinned auth.getUser
+
+`getCivitaiUser()` in `civitaiApi.mjs` must always hit `civitai.com` with `Referer: https://civitai.com/generate`, regardless of `CONFIG.domain`. This is the single source of truth for `username` and `showNsfw` (→ `allowAltDomain`), and pinning keeps the response stable across host switches. Never parameterise its host. All other tRPC and REST v1 calls in `civitaiApi.mjs` go through `apiBase()` / `getHeaders()`, which resolve to the currently selected domain.
+
+### Domain-Related Config Cleared on Key Rotation
+
+`requestKey()` and `removeKey()` in `keyActions.mjs` clear `username`, reset `allowAltDomain` to `false`, reset `domain` to `CIVITAI_DOMAINS[0]` (`civitai.com`), and call `resetUserDataSession()`. A new key always re-derives identity and eligibility from `auth.getUser` — no stale values carry over between accounts.
 
 ### Abort Signal Threading
 
