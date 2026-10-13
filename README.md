@@ -4,126 +4,139 @@
 
 ---
 
-* Download generations from the Civitai generator
-* Download posts from your public profile
-* Browse your creations offline, with the mini-website Explorer
-* Data and media is saved in date-ordered folders.
+* Download Civitai generations (image, video, audio, 3D)
+* Download posts and comics
+* Explore your library in an offline website
+* Media and data saved to the file system, sorted by date
+* Export media for re-use
 * Auto-updates for new versions
 
 ---
 
-Model page:
+Talk about civitai-sync, on Civitai:
+
+*Model page*:
 https://civitai.com/models/526058
 
-Discussion page for ideas, issues:
+*Discussion page* for issues, ideas and comments:
 https://civitai.com/articles/5676
 
+---
 
-The program comes in 2 parts:
-
-- *Command Line Interface* (CLI). It runs in your computer terminal or command prompt
-- *Explorer*, a mini-website to browse your creations.
-
-_Civitai_ saves your generations for 30 days, so use the tool regularly.
+The software is:
+1. A *Command Line Interface* (CLI). It runs in a terminal or command prompt, with interactive options and settings.
+2. An *Explorer*, a website for browsing, searching and re-using your media.
 
 
 ## Installation
 
 Install [Node.js](https://nodejs.org)  
-If you already have Node, it needs version 18 or above.
+If you already have Node, it requires version 20 or above.
 
-Download the zip archive of the program from the tool page.  
+Download the zip archive of the program from the model page.  
 Or download/clone the repository.
 
-On Windows, you can double-click the `install_win` file to install, or continue...
+1. On Windows, double-click the `install_win` file to install. This will open a command prompt, install the software dependencies and then close. Or, install manually with the steps below.
 
-In the terminal/command prompt (not the Node.js console),  
-`cd` change directory to the program folder:
+2. On Linux, Mac, open your Terminal app (not the Node.js console).
+On Windows, your “[Command Prompt](https://www.lifewire.com/how-to-open-command-prompt-2618089)”.
 
+3. Inside the terminal, _change directory_ (`cd`) to the unzipped "*civitai-sync*" folder. Ensure this matches the name and location on your system. For example:
 ```
-  ## Linux, Mac
-  cd Downloads/civitai-sync
-
-  ## Windows – use backslashes, not forward slashes
-  cd C:\Downloads\civitai-sync
+cd Downloads/civitai-sync
 ```
 
-Install the software dependencies by typing:
-
+On Windows, use backslashes, not forward-slashes, e.g:
 ```
-  npm run setup
+cd C:\Downloads\civitai-sync
 ```
 
-Create a Civitai API key in your account:  
+4. Install the software dependencies by typing:
+```
+npm run setup
+```
+
+
+*Create a Civitai API key* in your account:  
 https://civitai.com/user/account
 
 
-## Run it
+## Open the civitai-sync CLI
 
+On Windows, you can double-click the `Civitai-Sync` file to open the CLI.
+
+To open the CLI from the terminal, type:
 ```
-  npm run cli
-```
-A configuration file for user settings will be saved in the program folder at "/config/default.json".
-
-Start Downloading
-If your API key is saved, you can choose "Download generations" and "Download posts".
-
-See “Options” to change what is download and where it is saved.
-Download Location: inside the program folder in "data" and "media"; you can change to another location.
-Choose: to make folders for your ❤️ favorited and 👍 liked gens, or to download only data.
-
-Latest: download your most recent creations.
-Or download just “Favorite / Liked” gens.
-
-Open the Explorer
-☞ Click "Start Explorer"
-
-Optionally, you can host the Explorer on your local network, for other devices to access.
-
-Data
-Data is saved directly from Civitai's API, as text files (in “JSON” format). Prompts and metadata are already embedded in the media metadata (e.g. "EXIF" format).
-
-You can explore the generation parameters and details for images and videos, in the civitai-sync Explorer.
-
-
-## Open the Explorer from the terminal
-
-The Explorer can be launched directly, without the CLI:
-
-```
-  civitai-sync browse
+civitai-sync
 ```
 
-or with a named config:
-
+This is an alias for:
 ```
-  civitai-sync browse myaccount
-```
-
-**Network access**
-
-By default the Explorer is only reachable from the machine it runs on (it binds to `127.0.0.1`). To access it from other devices on your local network — a phone, tablet, or another computer — add the `--host` flag:
-
-```
-  civitai-sync browse --host
+npm run cli
 ```
 
-This binds the server to all network interfaces (`0.0.0.0`). The terminal will print both the local address and the LAN address to share with other devices.
+A configuration file for the user is saved in the civitai-sync folder at `/config/default.json`.
 
-> **Security note:** The Explorer has no authentication. Anyone on your local network who can reach the port will have read access to your model library. Only use `--host` on networks you trust. On shared, office, or public networks, omit the flag to keep the server local-only.
+*Start Downloading*
+If your API key is saved, you can choose *Download*.  
+Check the *Settings*, to change download folder, civitai domain, etc.
+
+_Civitai_ keeps generations for 30 days, so download regularly.
+
+
+*Start the Explorer*
+Start the Explorer from the CLI.
+
+Or, without the CLI:
+```
+civitai-sync explorer [optional: account, e.g. "bob"]
+```
+
+This is an alias for:
+```
+npm run explorer [account]
+```
+
+On Windows, double-click `Civitai-Sync-Explorer` in the program folder; this uses the default config.
+
+*Data*
+Data from Civitai's API is saved as JSON text files. Prompts and metadata are already embedded in the downloaded media's metadata (e.g. "EXIF" format).
 
 
 ## Multiple accounts
 
-To download from more than one account, specify a unique name:
+To download from more than one account, give a unique name:
+```
+civitai-sync bob
+```
+
+This is an alias for:
 
 ```
-  npm run cli bob
+npm run cli bob
 ```
 
-You can give a full path to anywhere on the file system, and the config file will be loaded from or created there.
+Or give a full path to anywhere on the file system, and the config file will be loaded from or created there.
 
-Change the download directory to be different for each account, unless you want the data and media for the accounts to be merged.
+_Set each account's download *folder* to be different_, unless you want the data and media for the accounts to be merged.
+
+
+**Network access**
+
+By default the Explorer is only reachable from the machine it runs on (it binds to `127.0.0.1`). To access it from other devices on your trusted local network — a phone, tablet, or another computer — add the `--host` flag:
+
+```
+civitai-sync explorer [account] --host
+```
+
+This is an alias for:
+```
+npm run explorer -- [account] --host
+```
+
+This binds the server to all network interfaces (`0.0.0.0`). The terminal will print both the local address and the LAN address to share with other devices.
+
+> **Security note:** Anyone on your local network who can reach the port will have read access to your library, through the Explorer.
 
 
 ## Manual software update

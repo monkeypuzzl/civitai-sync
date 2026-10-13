@@ -1,41 +1,46 @@
 /*eslint no-unused-vars: "error"*/
 
-import fs from 'node:fs';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
-import { mkdirp } from 'mkdirp';
-import { writeFile, fileExists, toDateString, rename, unlink, copyFile } from './utils.mjs';
-import { readFile, listDirectory, removeDirectoryIfEmpty, isDate } from './utils.mjs';
+import { writeFile, fileExists, toDateString, unlink, rename } from './utils.mjs';
+import { readFile, listDirectory, isDate } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
-import { fetchCivitaiImage } from './civitaiApi.mjs';
+import { downloadMediaFile } from './mediaDownload.mjs';
+import { normalizeMediaId } from './mediaId.mjs';
+import {
+  needsAceWorkflowFill,
+  fetchAceSongIntoSidecar
+} from './aceAudioWorkflow.mjs';
+import { getMediaOverride, reactionsToTags } from './overrides.mjs';
+import { extractInputDescriptors, saveInputMedia } from './inputMedia.mjs';
+import {
+  loadAliasStore,
+  recordAlias,
+  resolveCanonicalId,
+  contentKey,
+  hashFileSha256
+} from './mediaIdentity.mjs';
 
 export function generationsDataDir () { return `${CONFIG.dataPath}/generations`; }
 export function generationsMediaDir () { return `${CONFIG.mediaPath}/generations`; }
 
-export const WORKFLOW_TAGS = [ 'favorite', 'feedback:liked', 'feedback:disliked' ];
-export const WORKFLOW_TAG_DIRECTORIES = { 'favorite': 'favorite', 'feedback:liked': 'liked', 'feedback:disliked': 'disliked' };
-export const MEDIA_DIRECTORIES = { 'all': 'all', ...WORKFLOW_TAG_DIRECTORIES };
-
-export const DOWNLOAD_TYPES_MOD = {
-  ...WORKFLOW_TAG_DIRECTORIES,
-  'favorite': 'favorited', // ♥️
-  'liked': 'liked', // 👍
-  'disliked': 'disliked' // 👎
-};
-
-export function getDownloadTypes (dataOrMedia = 'data') {
-  let ref = CONFIG.generationDataTypes;
-
-  if (dataOrMedia === 'media') {
-    ref = CONFIG.generationMediaTypes;
-  }
-
-  return Object.keys(WORKFLOW_TAG_DIRECTORIES)
-  .filter(type => ref.includes(type))
-  .map(type => WORKFLOW_TAG_DIRECTORIES[type])
-  .map(name => name in DOWNLOAD_TYPES_MOD ? DOWNLOAD_TYPES_MOD[name] : name );
+// The canonical generation media store for a given date — the single source of
+// every downloaded generation media-item, and the source the Exports
+// projection hard-links FROM. Post-cutover (Exports plan C2) the store is flat:
+// `media/generations/<date>`. Per ruling 8 this helper is the SOLE
+// canonical-store reference in the exports / sync code, so the layout is
+// single-sourced here. Never hard-code the legacy `all/` literal in
+// exports/sync code — route every reference through this helper.
+export function canonicalGenerationMediaDir (date = '') {
+  return `${generationsMediaDir()}/${date}`;
 }
+
+// Curation reactions on a media item. A reaction download requests
+// `favorite` and/or `feedback:liked` only (`generationReactions`). Disliked
+// stays a reaction for overrides and exports; it is not a download choice.
+// CLI wording for the download reactions is `DOWNLOAD_TYPES_MOD`.
+export const WORKFLOW_TAGS = [ 'favorite', 'feedback:liked', 'feedback:disliked' ];
+
+export { DOWNLOAD_TYPES_MOD, getDownloadTypes } from './downloadTypes.mjs';
 
 export function generationFilepath ({ id = 0, createdAt = '' }) {
   const date = toDateString(createdAt);
@@ -44,10 +49,30 @@ export function generationFilepath ({ id = 0, createdAt = '' }) {
   return filepath;
 }
 
-export function mediaFilepath ({ date = '', generationId = '', mediaId = '', seed = 0, directory = MEDIA_DIRECTORIES['all'] }) {
+// Mesh format from the blob: lowercase, leading dot stripped. Missing → glb.
+function normalizeMeshFormat (format) {
+  const raw = String(format ?? '').trim().toLowerCase().replace(/^\./, '');
+  return raw || 'glb';
+}
+
+// Same seed default as mediaFilepath's parameter, so attachment names cannot
+// drift from the primary stem.
+function generationStem (generationId, seed, mediaId) {
+  const seedPart = seed === undefined ? 0 : seed;
+  return `${generationId}_${String(seedPart)}_${mediaId}`;
+}
+
+export function generationMediaFilename ({ generationId = '', mediaId = '', seed = 0, type = '', format = '' } = {}) {
   const hasExtension = mediaId.includes('.');
-  const suffix = hasExtension ? '' : '.jpeg';
-  const filename = `${generationId}_${String(seed)}_${mediaId}${suffix}`;
+  let suffix = '';
+  if (!hasExtension) {
+    suffix = type === 'model3d' ? `.${normalizeMeshFormat(format)}` : '.jpeg';
+  }
+  return `${generationStem(generationId, seed, mediaId)}${suffix}`;
+}
+
+export function mediaFilepath ({ date = '', generationId = '', mediaId = '', seed = 0, directory = '', type = '', format = '' } = {}) {
+  const filename = generationMediaFilename({ generationId, mediaId, seed, type, format });
   const mediaDirectory = `${generationsMediaDir()}/${directory.length ? `${directory}/` : '' }${date}`;
   const filepath = path.resolve(mediaDirectory, filename);
 
@@ -116,32 +141,6 @@ export async function getGenerationIdsByDate (date = '', { includeLegacy = false
   return filteredIds;
 }
 
-export async function getFirstGenerationId ({ includeLegacy = false } = {}) {
-  const dates = await getGenerationDates();
-
-  if (!dates.length) {
-    return undefined;
-  }
-
-  const ids = await getGenerationIdsByDate(dates[0], { includeLegacy });
-  
-  if (ids.length) {
-    return ids[0];
-  }
-
-  // Find oldest generation
-  // E.g. in data folder of mixed legacy API and new API generations.
-  for (let date of dates) {
-    const ids = await getGenerationIdsByDate(date, { includeLegacy: false });
-
-    if (ids.length) {
-      return ids[0];
-    }
-  }
-
-  return undefined;
-}
-
 export async function getGeneration (date = '', id, { stringType = false } = {}) {
   const filename = `${generationsDataDir()}/${date}/${id}.json`;
 
@@ -165,6 +164,156 @@ export async function getGeneration (date = '', id, { stringType = false } = {})
   }
 }
 
+function generationPublicFile (date, filename) {
+  return `/media/generations/${date}/${filename}`;
+}
+
+function thumbExtFromUrl (url) {
+  const pathPart = String(url || '').split(/[?#]/)[0];
+  const ext = path.extname(pathPart).toLowerCase().replace(/^\./, '');
+  if (ext === 'png') return 'png';
+  if (ext === 'jpg' || ext === 'jpeg') return 'jpeg';
+  return 'png';
+}
+
+function pushModel3dFile (files, seenUrls, primaryUrl, entry) {
+  const url = entry && entry.url;
+  if (!url || url === primaryUrl || seenUrls.has(url)) return;
+  if (files.some(file => file.path === entry.path)) return;
+  seenUrls.add(url);
+  const row = { role: entry.role, format: entry.format, url, path: entry.path };
+  if (entry.variant) row.variant = entry.variant;
+  files.push(row);
+}
+
+function addModel3dAsset (files, seenUrls, primaryUrl, asset, variant, armatureVariant, date, stem) {
+  if (!asset || typeof asset !== 'object') return;
+  if (asset.url) {
+    const format = normalizeMeshFormat(asset.format);
+    pushModel3dFile(files, seenUrls, primaryUrl, {
+      role: 'variant',
+      variant,
+      format,
+      url: asset.url,
+      path: generationPublicFile(date, `${stem}.${variant}.${format}`)
+    });
+  }
+  const fbx = asset.fbx;
+  if (fbx && fbx.url) {
+    const format = normalizeMeshFormat(fbx.format || 'fbx');
+    pushModel3dFile(files, seenUrls, primaryUrl, {
+      role: 'variant',
+      variant,
+      format,
+      url: fbx.url,
+      path: generationPublicFile(date, `${stem}.${variant}.${format}`)
+    });
+  }
+  const armature = asset.armature;
+  if (armatureVariant && armature && armature.url) {
+    const format = normalizeMeshFormat(armature.format);
+    pushModel3dFile(files, seenUrls, primaryUrl, {
+      role: 'variant',
+      variant: armatureVariant,
+      format,
+      url: armature.url,
+      path: generationPublicFile(date, `${stem}.${armatureVariant}.${format}`)
+    });
+  }
+}
+
+// Attachments of one mesh, excluding the primary URL. Thumb first, then
+// base-format variants (`primary`), then rigged / animated / motion templates.
+function model3dFiles (item, { date, stem, primaryUrl }) {
+  const files = [];
+  const seenUrls = new Set();
+  if (item && item.thumbnailUrl) {
+    const ext = thumbExtFromUrl(item.thumbnailUrl);
+    pushModel3dFile(files, seenUrls, primaryUrl, {
+      role: 'thumb',
+      format: ext,
+      url: item.thumbnailUrl,
+      path: generationPublicFile(date, `${stem}.thumb.${ext}`)
+    });
+  }
+  const variants = Array.isArray(item?.variants) ? item.variants : [];
+  for (const variant of variants) {
+    if (!variant || typeof variant !== 'object' || !variant.url) continue;
+    const format = normalizeMeshFormat(variant.format);
+    pushModel3dFile(files, seenUrls, primaryUrl, {
+      role: 'variant',
+      variant: 'primary',
+      format,
+      url: variant.url,
+      path: generationPublicFile(date, `${stem}.primary.${format}`)
+    });
+  }
+  addModel3dAsset(files, seenUrls, primaryUrl, item?.rigged, 'rigged', '', date, stem);
+  addModel3dAsset(files, seenUrls, primaryUrl, item?.animated, 'animated', '', date, stem);
+  const motions = item?.basicAnimations;
+  if (motions && typeof motions === 'object') {
+    addModel3dAsset(files, seenUrls, primaryUrl, motions.walking, 'walking', 'walking-armature', date, stem);
+    addModel3dAsset(files, seenUrls, primaryUrl, motions.running, 'running', 'running-armature', date, stem);
+  }
+  return files;
+}
+
+function diskPathFromGenerationPublic (publicPath) {
+  const marker = '/media/generations/';
+  if (typeof publicPath !== 'string') return '';
+  const at = publicPath.indexOf(marker);
+  if (at === -1) return '';
+  const rel = publicPath.slice(at + marker.length);
+  if (!rel || rel.split('/').some(part => !part || part === '.' || part === '..')) return '';
+  return path.resolve(generationsMediaDir(), rel);
+}
+
+// Jpeg-poison repair is a rename of `<stem>.jpeg` onto `<stem>.<format>`.
+// No-op when the mesh name already exists, when no `.jpeg` sits beside it,
+// or when the destination is itself a jpeg. Never unlinks a glob. Never
+// mutates saved JSON.
+async function renameJpegPoisonTo (destPath) {
+  if (!destPath) return false;
+  const ext = path.extname(destPath).toLowerCase();
+  if (!ext || ext === '.jpeg' || ext === '.jpg') return false;
+  if (await fileExists(destPath)) return false;
+  const jpegPath = destPath.slice(0, -ext.length) + '.jpeg';
+  if (!(await fileExists(jpegPath))) return false;
+  await rename(jpegPath, destPath);
+  return true;
+}
+
+// After-listen walk. Index rows already say model3d; rename a leftover
+// `.jpeg` onto the mesh name. Idempotent.
+export async function repairIndexedModel3dJpegs (generations) {
+  if (!Array.isArray(generations)) return;
+  for (const gen of generations) {
+    const media = Array.isArray(gen?.media) ? gen.media : [];
+    for (const row of media) {
+      if (row?.type !== 'model3d' || !row.mediaPath) continue;
+      await renameJpegPoisonTo(diskPathFromGenerationPublic(row.mediaPath));
+    }
+  }
+}
+
+function logicalMediaType (step, type) {
+  if (type === 'model3d' || step?.$type === 'polyGen') return 'model3d';
+  if (type === 'audio') return 'audio';
+  if (step?.$type === 'aceStepAudio' && type === 'video') return 'audio';
+  if (type === 'video') return 'video';
+  if (type === 'image' || type == null) return 'image';
+  return null;
+}
+
+// The single logical-type classifier (Phase 5a keystone). This is the
+// hottest seam in the codebase — it runs on every download and every index
+// build — so it preserves exact behaviour for the existing image/video/audio
+// corpus while separating the wire/container type from the logical media
+// type. `model3d` is the fourth logical type (`item.type` or a `polyGen`
+// step). An explicit unknown wire type is skipped. An absent type stays
+// image. Ported from the data-shape probe's `classifyOutputItem` /
+// `isSuppressedStep` (dev/tools/data-shape-probe.mjs), the maintainer-
+// validated reference implementation.
 export function getGeneratedMediaInfo (generation, { hidden = false } = {}) {
   const { createdAt, steps } = generation;
   const date = toDateString(createdAt);
@@ -173,9 +322,56 @@ export function getGeneratedMediaInfo (generation, { hidden = false } = {}) {
   if (!steps) {
     return media;
   }
-  
-  steps.forEach(({ images, metadata }) => {
-    images.forEach(({ id, status, seed, url, type }) => {
+
+  steps.forEach((step) => {
+    // Skip suppressed intermediate steps: the album-cover `imageGen` and the
+    // `chatCompletion` lyric step on multi-step txt2music carry real outputs
+    // in the JSON that are NOT user-facing (the same flag marks Wan-style
+    // pre-interpolation steps). Enumerating them leaks phantom cover images
+    // into the gallery. Older image/video records have no suppressed steps,
+    // so this is a no-op for the existing corpus.
+    if (step?.metadata?.suppressOutput === true) {
+      return;
+    }
+
+    // Canonical-first enumeration: media items live under `step.output`
+    // (canonical) with `step.images` as the legacy alias Civitai dual-emits
+    // during the current rollout (it will be removed upstream). Older records
+    // carry only `images`, so `output ?? images` reads both shapes; the items
+    // expose the same `{ id, status, seed, url, type, duration }` fields.
+    const items = step?.output ?? step?.images;
+
+    if (!Array.isArray(items)) {
+      return;
+    }
+
+    const metadata = step?.metadata;
+    // `params` precedence mirrors buildGenerationEntry (newer shape:
+    // gen.metadata.params; older: step.params). Used only for the cover-mode
+    // audio duration fallback below.
+    const params = generation.metadata?.params || step?.params || {};
+
+    items.forEach((item) => {
+      if (!item || typeof item !== 'object') {
+        return;
+      }
+
+      const { id, status, seed, url, type, width, height, aspectRatio } = item;
+
+      // Logical media type (separate from the wire/container `type`).
+      // model3d (wire type or a polyGen step) wins before the audio / video /
+      // image chain. ACE cover-mode stays the other wire-vs-logical exception.
+      // An absent type is still image. An explicit unknown wire type is skipped.
+      const logicalType = logicalMediaType(step, type);
+      if (!logicalType) return;
+
+      // Duration source: pure-audio `.mp3` outputs carry `item.duration`;
+      // cover-mode `.mp4` outputs do not, so fall back to the requested
+      // `params.duration`. Top-level `gen.duration` is wall-clock generation
+      // time (never audio length) and is intentionally not consulted.
+      const duration = item.duration ?? (logicalType === 'audio' ? params.duration : undefined);
+      const isModel3d = logicalType === 'model3d';
+
       const mediaInfo = {
         date,
         generationId: generation.id,
@@ -183,17 +379,41 @@ export function getGeneratedMediaInfo (generation, { hidden = false } = {}) {
         seed,
         status,
         url,
-        type,
+        type: logicalType,
+        duration,
+        // Blob width/height on a mesh are layout fakes. Do not copy them.
+        width: isModel3d ? 0 : (Number(width) || 0),
+        height: isModel3d ? 0 : (Number(height) || 0),
+        aspectRatio,
         tags: []
       };
 
-      if (status === 'failed' || status === 'expired') {
+      if (isModel3d) {
+        mediaInfo.format = normalizeMeshFormat(item.format);
+        mediaInfo.thumbnailUrl = typeof item.thumbnailUrl === 'string' ? item.thumbnailUrl : '';
+        mediaInfo.files = model3dFiles(item, {
+          date,
+          stem: generationStem(generation.id, seed, id),
+          primaryUrl: url
+        });
+      }
+
+      // No file is saved for these. `canceled` is the wire token (one l).
+      // Indexing it gives Exports a thumbnail path that was never written.
+      if (status === 'failed' || status === 'expired' || status === 'canceled') {
         return;
       }
 
-      if (metadata && 'images' in metadata && metadata.images && id in metadata.images) {
-        const mediaTags = metadata.images[id];
+      // Canonical-first tag-block read: audio and all newer-shape generations
+      // carry reactions under `metadata.output`; the legacy alias is
+      // `metadata.images` (Civitai dual-emits both during the current
+      // rollout). Reading `images`-only would make audio/newer-shape
+      // reactions invisible to the media item, so `reaction=favorite` and the
+      // Favorite export would silently miss them. Per-id fallback so an id
+      // present only in `images` still resolves.
+      const mediaTags = metadata ? (metadata.output?.[id] ?? metadata.images?.[id]) : undefined;
 
+      if (mediaTags) {
         // Image deleted from onsite generator
         if (!!mediaTags.hidden !== hidden) {
           return;
@@ -222,6 +442,27 @@ export function getGeneratedMediaInfo (generation, { hidden = false } = {}) {
   });
   
   return media;
+}
+
+// Effective (override-merged) media info. Thin wrapper over
+// getGeneratedMediaInfo: where a media-item has a local reaction override
+// (keyed by its NORMALIZED id), its `tags` are replaced by the override's
+// reactions; everything else — including the RAW `mediaId` consumers build
+// `thumbnailPath` from — is left untouched. This is the single read seam
+// through which overrides reach the index and the API; getGeneratedMediaInfo
+// stays the pure "what does the server JSON say" function (used for
+// download-time diffing and readServerReactions).
+//
+// Requires loadOverrides() to have populated the override cache; the index
+// awaits it in ensureLoaded()/rebuild() before any entry build.
+export function getEffectiveMediaInfo (generation, { hidden = false } = {}) {
+  const media = getGeneratedMediaInfo(generation, { hidden });
+
+  return media.map(m => {
+    const ov = getMediaOverride(normalizeMediaId(m.mediaId));
+    if (!ov) return m;
+    return { ...m, tags: reactionsToTags(ov) };
+  });
 }
 
 export async function forEachGeneration (fn, { includeLegacy = false }) {
@@ -276,12 +517,31 @@ export async function saveGenerationData (generation) {
 // e.g. downloading while on-site queue is , it should
 // -> refresh the generation data and download missing media.
 // Workaround, use 'Download missing'
+async function fillAceSongSidecar (generation, { secretKey, signal }) {
+  if (!secretKey || (signal && signal.aborted)) return;
+  const params = generation?.metadata?.params || generation?.steps?.[0]?.params || {};
+  if (!needsAceWorkflowFill(params)) return;
+  const audioIds = getGeneratedMediaInfo(generation)
+    .filter((m) => m.type === 'audio')
+    .map((m) => normalizeMediaId(m.mediaId))
+    .filter(Boolean);
+  await fetchAceSongIntoSidecar({
+    workflowId: generation.id,
+    audioIds,
+    secretKey,
+    signal,
+    dataPath: CONFIG.dataPath
+  });
+}
+
 export async function saveGenerations (apiGenerationsResponse, {
     overwrite = false,
     overwriteIfModified = false,
     withImages = true,
     log,
-    signal
+    signal,
+    secretKey,
+    reactions
   } = {}
 ) {
   const { result } = apiGenerationsResponse;
@@ -291,11 +551,17 @@ export async function saveGenerations (apiGenerationsResponse, {
     generationsSaved: 0,
     imagesSaved: 0,
     videosSaved: 0,
+    audioSaved: 0,
+    model3dSaved: 0,
     activity: null,
     error: null,
     lastSavedGenerationId: undefined,
     currentGenerations: [],
-    currentMedia: undefined
+    currentMedia: undefined,
+    // Generations that were freshly saved or overwritten this call. The
+    // download orchestrator passes these to upsertIndexEntries() so the
+    // server index reflects them without a full filesystem rescan.
+    savedItems: []
   };
 
   const { data } = result;
@@ -348,27 +614,10 @@ export async function saveGenerations (apiGenerationsResponse, {
       if (savedGenerationString !== JSON.stringify(generation, null, 2)) {
         shouldOverwrite = true;
 
-        // If "all" images are being saved as well as tags, then when untagged on-site -> remove from tag directory
-        if (!CONFIG.excludeImages &&  CONFIG.generationMediaTypes.length > 1 && CONFIG.generationMediaTypes.includes('all')) {
-          const previousMedia = getGeneratedMediaInfo(JSON.parse(savedGenerationString));
-          const currentMedia = getGeneratedMediaInfo(generation);
-
-          for (let previousMediaInfo of previousMedia) {
-            if (!previousMediaInfo.tags.length) {
-              continue;
-            }
-
-            const currentMediaInfo = currentMedia.find(({ mediaId }) => mediaId === previousMediaInfo.mediaId);
-
-            for (let tag of previousMediaInfo.tags) {
-              if (!currentMediaInfo || !currentMediaInfo.tags.includes(tag)) {
-                // Remove tagged image
-                const itemFilepath = mediaFilepath({ ...previousMediaInfo, directory: MEDIA_DIRECTORIES[tag] });
-                await unlink(itemFilepath);
-              }
-            }
-          }
-        }
+        // Post-cutover there are no tag directories to prune when a reaction
+        // is removed on-site: the canonical store holds the single copy, and
+        // an export's membership is reconciled by the Exports sync engine
+        // (reactive on the change, or on the next bulk/startup reconcile).
       }
     }
 
@@ -395,18 +644,31 @@ export async function saveGenerations (apiGenerationsResponse, {
       currentReportItem.status = 'data-saved';
       report.lastSavedGenerationId = { date, id };
       report.generationsSaved ++;
+      report.savedItems.push(generation);
+
+      if (secretKey) {
+        try {
+          await fillAceSongSidecar(generation, { secretKey, signal });
+        } catch (error) {
+          console.error(error);
+        }
+      }
 
       if (!exists) {
         report.generationsNew ++;
       }
     }
 
-    if (withImages && (!exists || overwrite || shouldOverwrite)) {
-      const mediaReport = await saveGenerationMedia(generation, { signal, onProgress: (a) => setActivity(a) });
+    // JSON exists does not skip media (posts parity). Per-file skip and
+    // expired CDN fail-soft live inside saveGenerationMedia.
+    if (withImages) {
+      const mediaReport = await saveGenerationMedia(generation, { signal, onProgress: (a) => setActivity(a), reactions });
       const { error, aborted, complete } = mediaReport;
 
       report.imagesSaved += mediaReport.imagesSaved;
       report.videosSaved += mediaReport.videosSaved;
+      report.audioSaved += mediaReport.audioSaved;
+      report.model3dSaved += mediaReport.model3dSaved;
       report.aborted = aborted;
       report.complete = complete;
       report.error = null;
@@ -432,7 +694,7 @@ export async function saveGenerations (apiGenerationsResponse, {
 
     // Unchanged since download
     if (currentReportItem.status === 'data-downloaded') {
-      if (report.currentMedia && (report.currentMedia.imagesSaved > 0 || report.currentMedia.videosSaved > 0)) {
+      if (report.currentMedia && (report.currentMedia.imagesSaved > 0 || report.currentMedia.videosSaved > 0 || report.currentMedia.audioSaved > 0 || report.currentMedia.model3dSaved > 0)) {
         currentReportItem.status = 'media-exists';
       }
 
@@ -457,223 +719,169 @@ export function getGenerationImages (generation) {
   return generation.steps.map(step => step.images).flat(); 
 }
 
-export async function fetchMedia (url, filepath, { signal }) {
-  const responseBody = await fetchCivitaiImage(url, { signal });
-
-  // Probably deleted from on-site generator
-  if (!responseBody) {
-    return false;
-  }
-
+async function recordGenerationContentHash (mediaId, filepath) {
   try {
-    const fileStream = fs.createWriteStream(filepath, { flags: 'wx' });
-
-    await pipeline(Readable.fromWeb(responseBody), fileStream);
-    return true;
-  }
-
-  catch (error) {
-    return new Error(`Error fetching media from ${url} to ${filepath}, ${error.message}`);
+    await loadAliasStore();
+    const hex = await hashFileSha256(filepath);
+    if (resolveCanonicalId([contentKey(hex)])) return;
+    await recordAlias(normalizeMediaId(mediaId), contentKey(hex));
+  } catch {
+    // Fail-soft: alias errors must not fail the download.
   }
 }
 
-export async function saveGenerationMedia (generation, { doFetch = true, signal, onProgress } = {}) {
+export async function saveGenerationMedia (generation, { doFetch = true, signal, onProgress, reactions } = {}) {
   const media = getGeneratedMediaInfo(generation);
-  const report = { imagesSaved: 0, videosSaved: 0, error: undefined, aborted: false, complete: false };
+  const report = { imagesSaved: 0, videosSaved: 0, audioSaved: 0, model3dSaved: 0, error: undefined, aborted: false, complete: false };
   const totalMedia = media.length;
+
+  // The run's tag list, not `generationReactions`. Omitted or empty saves
+  // every file. A reaction run passes that run's tags.
+  const selectedReactions = Array.isArray(reactions) ? reactions : [];
+  const saveEveryFile = selectedReactions.length === 0;
 
   for (let mediaIndex = 0; mediaIndex < totalMedia; mediaIndex++) {
     const mediaInfo = media[mediaIndex];
-    const foundFilepaths = [];
-    const missingFilepaths = [];
-    const generationTypes = ['all', ...mediaInfo.tags]
-    .filter(type => CONFIG.generationMediaTypes.includes(type));
-    
-    if (!generationTypes.length) {
+
+    if (!saveEveryFile && !mediaInfo.tags.some(tag => selectedReactions.includes(tag))) {
       continue;
     }
 
-    for (let type of generationTypes) {
-      const itemFilepath = mediaFilepath({ ...mediaInfo, directory: MEDIA_DIRECTORIES[type] });
+    // Always write the single canonical store, media-type-agnostically.
+    // Image / video / audio keep the extension in the id, or `.jpeg` when
+    // the id has no dot. A mesh uses `.<format>` (default glb). No tag-dir copies.
+    const itemFilepath = mediaFilepath(mediaInfo);
 
-      if (await fileExists(itemFilepath)) {
-        foundFilepaths.push(itemFilepath);
-      }
-
-      else {
-        missingFilepaths.push(itemFilepath);
-
-        const itemDirectory = path.dirname(itemFilepath);
-
-        if (!(await fileExists(itemDirectory))) {
-          await mkdirp(itemDirectory);
-        }
-      }
+    if (mediaInfo.type === 'model3d') {
+      await renameJpegPoisonTo(itemFilepath);
     }
 
-    if (!missingFilepaths.length) {
-      continue;
-    }
+    const primaryExists = await fileExists(itemFilepath);
 
-    if (!foundFilepaths.length) {
+    if (mediaInfo.type !== 'model3d') {
+      if (primaryExists) {
+        await recordGenerationContentHash(mediaInfo.mediaId, itemFilepath);
+        continue;
+      }
+
       if (!doFetch) {
         continue;
       }
 
       if (onProgress) onProgress({ phase: 'media', index: mediaIndex + 1, total: totalMedia });
 
-      const itemFilepath = missingFilepaths[0];
-      const result = await fetchMedia(mediaInfo.url, itemFilepath, { signal });
+      const result = await downloadMediaFile(mediaInfo.url, itemFilepath, { signal });
 
-      // Could be partial download
-      if (signal && signal.aborted && await fileExists(itemFilepath)) {
-        await unlink(itemFilepath);
+      if (result.status === 'aborted') {
         report.aborted = true;
         return report;
       }
 
-      // Probably deleted from on-site generator
-      if (result === false) {
+      // Non-200: removed on the generator, or the CDN has no object. No file.
+      if (result.status !== 'published') {
         continue;
       }
 
-      else if (result.constructor === Error) {
-        report.error = { message: result.message, mediaInfo };
-        return report;
-      }
-
-      if (mediaInfo.type === 'video') {
+      if (mediaInfo.type === 'audio') {
+        report.audioSaved++;
+      } else if (mediaInfo.type === 'video') {
         report.videosSaved++;
       } else {
         report.imagesSaved++;
       }
-      missingFilepaths.splice(0, 1);
-      foundFilepaths.push(itemFilepath);
 
-      if (!missingFilepaths.length) {
-        continue;
+      await recordGenerationContentHash(mediaInfo.mediaId, itemFilepath);
+      continue;
+    }
+
+    // Mesh: a primary already on disk still leaves thumb and variants to fetch.
+    // model3dSaved counts a primary download only, never a rename and never imagesSaved.
+    if (primaryExists) {
+      await recordGenerationContentHash(mediaInfo.mediaId, itemFilepath);
+    } else if (doFetch) {
+      if (onProgress) onProgress({ phase: 'media', index: mediaIndex + 1, total: totalMedia });
+      const result = await downloadMediaFile(mediaInfo.url, itemFilepath, { signal });
+      if (result.status === 'aborted') {
+        report.aborted = true;
+        return report;
+      }
+      if (result.status === 'published') {
+        report.model3dSaved++;
+        await recordGenerationContentHash(mediaInfo.mediaId, itemFilepath);
       }
     }
 
-    const sourceFilepath = foundFilepaths[0];
-
-    for (let itemFilepath of missingFilepaths) {
-      await copyFile(sourceFilepath, itemFilepath);
+    if (doFetch && Array.isArray(mediaInfo.files)) {
+      for (const file of mediaInfo.files) {
+        const disk = diskPathFromGenerationPublic(file.path);
+        if (!disk || !file.url) continue;
+        if (await fileExists(disk)) continue;
+        const result = await downloadMediaFile(file.url, disk, { signal });
+        if (result.status === 'aborted') {
+          report.aborted = true;
+          return report;
+        }
+      }
     }
   }
-  
+
+  // Inputs are captured whenever files are fetched, including on a reaction
+  // run. The file filter above does not skip them. Data only does.
+  if (doFetch && CONFIG.downloadMedia !== false) {
+    const inputDescriptors = extractInputDescriptors(generation, 'generation');
+    await saveInputMedia(inputDescriptors, { signal, onProgress });
+
+    if (signal && signal.aborted) {
+      report.aborted = true;
+      return report;
+    }
+  }
+
   report.complete = true;
   return report;
 }
 
-export async function setupWorkflowTags () {
-  // Move date-ordered folders in /media to /media/all
-  const mediaDirectoryAll = `${generationsMediaDir()}/${MEDIA_DIRECTORIES['all']}`;
-
-  if (!(await fileExists(mediaDirectoryAll))) {
-    await mkdirp(mediaDirectoryAll);
-  }
-
-  await renameAllGenerationImages();
-  await copyAllGeneratedMediaTypes();
-}
-
-
-export async function copyAllGeneratedMediaTypes () {
-  await forEachGeneration(async (generation) => {
-    await saveGenerationMedia(generation, { doFetch: false });
-  }, { includeLegacy: true });
-}
-
 export async function deleteAllDeletedMedia () {
-  console.log('Deleting saved media that has been deleted from the onsite generator...');
+  console.log('Removing local generation files that were deleted on Civitai...');
   let count = 0;
+  const hiddenGenerations = [];
 
   await forEachGeneration(async (generation) => {
-    const { steps } = generation;
+    // Once per generation. The tag block may live only on `output` (audio);
+    // requiring an `images` key skipped those files.
+    const hiddenMedia = getGeneratedMediaInfo(generation, { hidden: true });
 
-    if (!steps) {
+    if (!hiddenMedia.length) {
       return;
     }
 
-    for (const { metadata } of steps) {
-      if (metadata && 'images' in metadata) {
-        const hiddenMedia = getGeneratedMediaInfo(generation, { hidden: true });
-
-        if (!hiddenMedia.length) {
-          continue;
-        }
-
-        for (const mediaInfo of hiddenMedia) {
-          const directories = ['all', ...mediaInfo.tags.map(tag => MEDIA_DIRECTORIES[tag])];
-
-          for (const directory of directories) {
-            const filepath = mediaFilepath({ ...mediaInfo, directory });
-
-            if (await fileExists(filepath)) {
-              await unlink(filepath);
-              count ++;
-            }
-          }
+    for (const mediaInfo of hiddenMedia) {
+      // Post-cutover there is a single canonical copy; unlink it, plus each
+      // listed attachment. No glob. Export hard links self-heal on the next reconcile.
+      const paths = [mediaFilepath(mediaInfo)];
+      for (const file of mediaInfo.files || []) {
+        const disk = diskPathFromGenerationPublic(file.path);
+        if (disk) paths.push(disk);
+      }
+      const seen = new Set();
+      for (const filepath of paths) {
+        if (!filepath || seen.has(filepath)) continue;
+        seen.add(filepath);
+        if (await fileExists(filepath)) {
+          await unlink(filepath);
+          count ++;
         }
       }
     }
+
+    hiddenGenerations.push(generation);
   }, { includeLegacy: true });
 
-  console.log(`${count} images were deleted.`);
-}
-
-export async function renameGenerationImages (generation) {
-  const date = toDateString(generation.createdAt);
-  const mediaDirectory = `${generationsMediaDir()}/${MEDIA_DIRECTORIES['all']}/${date}`;
-
-  if (!(await fileExists(mediaDirectory))) {
-    await mkdirp(mediaDirectory);
+  if (hiddenGenerations.length) {
+    // Dynamic import: serverIndex already imports this module.
+    const { applyGenerationRemovals } = await import('./serverIndex.mjs');
+    await applyGenerationRemovals(hiddenGenerations);
   }
 
-  const images = getGenerationImages(generation);
-  let renamedCount = 0;
-  
-  for (let image of images) {
-    const { id, seed } = image;
-    const mediaInfo = { directory: MEDIA_DIRECTORIES['all'], date, generationId: generation.id, mediaId: id, seed };
-    const filepath = mediaFilepath(mediaInfo);
-
-    if (await fileExists(filepath)) {
-      continue;
-    }
-
-    else {
-      const legacyFilepaths = legacyMediaFilepaths(mediaInfo);
-
-      for (let legacyFilepath of legacyFilepaths) {
-        if (await fileExists(legacyFilepath)) {
-          await rename(legacyFilepath, filepath);
-          renamedCount ++;
-          continue;
-        }
-      }
-    }
-  }
-
-  return renamedCount;
-}
-
-export async function renameAllGenerationImages () {
-  let totalRenamedCount = 0;
-
-  await forEachGeneration(async (generation) => {
-    const renamedCount = await renameGenerationImages(generation);
-    totalRenamedCount += renamedCount;
-  }, { includeLegacy: true });
-
-  // Remove empty directories
-  const dates = await getGenerationDates();
-
-  for (let date of dates) {
-    const legacyMediaDirectory = `${generationsMediaDir()}/${date}`;
-    await removeDirectoryIfEmpty(legacyMediaDirectory);
-  }
-
-  return totalRenamedCount;
+  console.log(`${count} files were removed.`);
 }

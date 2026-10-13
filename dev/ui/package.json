@@ -1,0 +1,5 @@
+{
+  "//": "Marks dev/ui as an ESM subtree so node --test can import the lib/*.js modules without the MODULE_TYPELESS_PACKAGE_JSON warning. esbuild (build.mjs) is unaffected.",
+  "type": "module",
+  "private": true
+}

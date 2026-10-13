@@ -1,35 +1,39 @@
-import inquirer from 'inquirer';
 import chalk from 'chalk';
 import select, { Separator } from '@inquirer/select';
-import { fetchGenerations, formatCompletion, listenForEscKeyPress } from './downloadActions.mjs';
 import { mainMenu } from './mainMenu.mjs';
+import { downloadMenu } from './downloadMenu.mjs';
 import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
-import { getSecretKey } from './keyActions.mjs';
-import { dateIsOlderThanDays, fileExists } from './utils.mjs';
-import { getGenerationDates, getDownloadTypes } from './generations.mjs';
-import { setDownloadOptions } from './downloadOptionsMenu.mjs';
+import { getDownloadTypes, generationDownloadTags, generationMenuChoice, rememberGenerationDownload } from './downloadTypes.mjs';
 
-let previousMenuItem;
+function withFilesNote (description) {
+  if (CONFIG.downloadMedia === false) return `${description}\nFiles are not saved.`;
+  return description;
+}
 
 export async function downloadGenerations (mode = 'latest') {
-  const secretKey = await getSecretKey(); 
-  const tags = [];
+  const [
+    { fetchGenerations, formatCompletion, listenForEscKeyPress },
+    { getSecretKey, requestKey },
+    { default: inquirer },
+    { default: confirm }
+  ] = await Promise.all([
+    import('./downloadActions.mjs'),
+    import('./keyActions.mjs'),
+    import('inquirer'),
+    import('@inquirer/confirm')
+  ]);
+
+  const secretKey = await getSecretKey();
+  if (secretKey) await rememberGenerationDownload(mode);
+
+  const tags = generationDownloadTags(mode);
   const ui = new inquirer.ui.BottomBar();
-  const downloadTypes = getDownloadTypes('data');
+  const downloadTypes = getDownloadTypes();
   const labels = {
     'latest': 'Downloading latest generations',
-    'oldest': 'Downloading oldest generations',
     'missing-tags': `Downloading ${downloadTypes.join(', ')} generations`,
     'missing-all': 'Downloading all generations'
   };
-
-  if (CONFIG.excludeImages && !CONFIG.generationDataTypes.includes('all')) {
-    tags.push(...CONFIG.generationDataTypes);
-  }
-  
-  else if (!CONFIG.excludeImages && (mode === 'missing-tags' || !CONFIG.generationMediaTypes.includes('all'))) {
-    tags.push(...CONFIG.generationMediaTypes.filter(type => type !== 'all'));
-  }
 
   function log (text) {
     if (text) ui.updateBottomBar(text);
@@ -42,27 +46,26 @@ export async function downloadGenerations (mode = 'latest') {
   const options = {
     secretKey,
     overwriteIfModified: true,
-    withImages: !CONFIG.excludeImages,
+    withImages: CONFIG.downloadMedia !== false,
     tags,
     latest: mode === 'latest',
-    oldest: mode === 'oldest',
     resume: mode === 'missing-tags' || mode === 'missing-all',
     log,
     signal: escKeyController.signal
   };
 
   const label = labels[mode];
+  let result;
 
   try {
     clearTerminal();
 
     ui.updateBottomBar(`${chalk.hex('#a5d8ff')(label)}...\n${chalk.dim('Press Esc to stop')}\n`);
 
-    const result = await fetchGenerations(options);
+    result = await fetchGenerations(options);
 
     log(formatCompletion(result));
-
-    return result;
+    import('./ownModels.mjs').then(m => m.scheduleOwnModelsCheck({ secretKey })).catch(() => {});
   }
 
   catch (error) {
@@ -73,6 +76,16 @@ export async function downloadGenerations (mode = 'latest') {
     ui.close();
     escKeyController.stop();
   }
+
+  if ((result?.errors || []).some(e => e?.code === 'UNAUTHORIZED') || result?.error?.code === 'UNAUTHORIZED') {
+    const answer = await confirm({ message: chalk.red('\nNot authorized. Your API key needs updating. Update now?'), default: true });
+
+    if (answer) {
+      await requestKey();
+    }
+  }
+
+  return result;
 }
 
 export async function downloadGenerationsMenu (doClearTerminal = true) {
@@ -82,64 +95,40 @@ export async function downloadGenerationsMenu (doClearTerminal = true) {
     return mainMenu();
   }
 
-  const dataDirExists = await fileExists(`${CONFIG.dataPath}/generations`);
-  const dates = await getGenerationDates();
-  const hasGenerations = !!dates.length;
-  const oldestDate = dates[0];
-  const hasOldGenerations = hasGenerations && dateIsOlderThanDays(oldestDate, 30);
-  const downloadTypes = getDownloadTypes(CONFIG.excludeImages ? 'data' : 'media');
-  const typesSentenceCase = downloadTypes.length ? downloadTypes[0][0].toUpperCase() + downloadTypes.join('/').slice(1) : '';
-  const choices = [];
-
-  choices.push(
+  const reactionChoice = generationMenuChoice(CONFIG.generationReactions);
+  const choices = [
     {
       name: 'Latest',
-      value: 'download-latest-generations',
-      description: `Download the most recent generations that have not yet been saved.${CONFIG.generationDataTypes.includes('all') ? '' : `\n${typesSentenceCase} generations will be downloaded.` }`
+      value: 'latest',
+      description: withFilesNote('Download the most recent generations that have not yet been saved. Missing files on those jobs are fetched too.')
     }
-  );
-  
-  if (hasGenerations && !hasOldGenerations) {
-    choices.push(
-      {
-        name: 'Oldest',
-        value: 'download-oldest-generations',
-        description: 'Resume downloading the oldest generations that have not yet been saved.'
-      }
-    );
-  }
+  ];
 
-  if (downloadTypes.length) {
+  if (reactionChoice) {
     choices.push({
-      name: typesSentenceCase,
-      value: 'download-missing-workflow-tags',
-      description: `Download ${downloadTypes.join('/')} generations in the last 30 days.\nAny missing will be saved.`
+      name: reactionChoice.label,
+      value: reactionChoice.value,
+      description: withFilesNote(`Download ${reactionChoice.label} generations in the last 30 days.\nMissing records and files in that period are saved.`)
     });
   }
 
-  if (dataDirExists && CONFIG.generationDataTypes.includes('all')) {
-    choices.push({
-      name: 'All',
-      value: 'download-missing-all',
-      description: `Download all generations in the last 30 days${downloadTypes.length ? ` (including ${downloadTypes.join('/')})` : ''}.\nAny missing will be saved.`
-    });
-  }
-  
   choices.push(
     {
-      name: 'Options',
-      value: 'download-options',
-      description: 'Select options for generation downloads'
+      name: 'All',
+      value: 'missing-all',
+      description: withFilesNote('Download all generations in the last 30 days.\nMissing records and files in that period are saved.')
     },
-
     new Separator(),
-
     {
       name: 'Back',
       value: 'back',
-      description: 'Back to main menu'
+      description: 'Back to Downloads'
     }
   );
+
+  let highlighted = 'latest';
+  if (CONFIG.generationDownload === 'all') highlighted = 'missing-all';
+  else if (CONFIG.generationDownload === 'reactions' && reactionChoice) highlighted = reactionChoice.value;
 
   if (doClearTerminal) {
     clearTerminal();
@@ -153,32 +142,23 @@ export async function downloadGenerationsMenu (doClearTerminal = true) {
     message: 'Download generations:',
     choices,
     theme: customTheme,
-    default: previousMenuItem !== 'back' ? previousMenuItem : undefined
+    default: highlighted
   });
 
-  previousMenuItem = answer;
-
   switch (answer) {
-    case 'download-latest-generations':
+    case 'latest':
     await downloadGenerations('latest');
     return downloadGenerationsMenu(false);
 
-    case 'download-oldest-generations':
-    await downloadGenerations('oldest');
-    return downloadGenerationsMenu(false);
-
-    case 'download-missing-workflow-tags':
+    case 'missing-tags':
     await downloadGenerations('missing-tags');
     return downloadGenerationsMenu(false);
 
-    case 'download-missing-all':
+    case 'missing-all':
     await downloadGenerations('missing-all');
     return downloadGenerationsMenu(false);
 
-    case 'download-options':
-    return setDownloadOptions();
-
     case 'back':
-    return mainMenu();
+    return downloadMenu();
   }
 }

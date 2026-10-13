@@ -1,69 +1,69 @@
 import chalk from 'chalk';
-import inquirer from 'inquirer';
 import confirm from '@inquirer/confirm';
+import input from '@inquirer/input';
 import select, { Separator } from '@inquirer/select';
 import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { mainMenu } from './mainMenu.mjs';
 import { getSecretKey, requestKey, testKey, removeKey, encryptKey, unEncryptKey, getAvailableSecretKey } from './keyActions.mjs';
-import { openDataDirectory, openMediaDirectory, countDownloads, formatCountReport, formatElapsed } from './downloadActions.mjs';
 import { setConfigParam } from './config.mjs';
 import { fileExists } from './utils.mjs';
+import { normalizeGenerationReactions } from './downloadTypes.mjs';
 import { CIVITAI_DOMAINS, getCivitaiDomain } from './civitaiDomain.mjs';
-import { refreshOnce } from './userData.mjs';
+import {
+  EXPLORER_ACCESS_DEVICE,
+  EXPLORER_ACCESS_LAN,
+  normalizeExplorerAccess,
+  explorerAccessLabel,
+  explorerAccessDescription
+} from './explorerServer.mjs';
 
 let previousMenuItem;
 
+// Once per process, and not before the Settings prompt. Test and Update
+// already talk to Civitai. Back covers a visit that only changed folders:
+// Civitai domain can appear on the next open, not in the middle of this one.
+function scheduleSettingsRefresh () {
+  import('./userData.mjs')
+    .then(({ refreshOnce }) => refreshOnce({ secretKey: getAvailableSecretKey() }))
+    .catch(() => {});
+}
+
+const REACTION_OPTION_LABELS = {
+  favorite: 'Favorited',
+  'feedback:liked': 'Liked'
+};
+
+function reactionOptionsName () {
+  const labels = normalizeGenerationReactions(CONFIG.generationReactions)
+    .map(type => REACTION_OPTION_LABELS[type]);
+  return `Reaction options: ${labels.length ? labels.join(', ') : 'none'}`;
+}
+
 export async function keyOptions ({ clear = true, message } = {}) {
-  // Kick off (at most) one background refresh per CLI session so the
-  // allowAltDomain / username fields reflect recent Civitai-side changes.
-  // The menu renders from current CONFIG; when the refresh completes, the
-  // updated state will appear the next time keyOptions is re-invoked after a
-  // user action (which it always is on selection).
-  refreshOnce({ secretKey: getAvailableSecretKey() }).catch(() => {});
-
-  const dataDirExists = await fileExists(`${CONFIG.dataPath}/generations`) || await fileExists(`${CONFIG.dataPath}/posts`);
-  const choices = [];
-
-  if (dataDirExists) {
-    choices.push(
-      {
-        name: 'Open download directory',
-        value: 'open-directory',
-        description: CONFIG.dataPath === CONFIG.mediaPath
-          ? `Open ${chalk.italic(CONFIG.dataPath)} in file explorer`
-          : 'Open data or media directory in file explorer'
-      }
-    );
-  }
-
-  choices.push(
+  const countDirExists = await fileExists(`${CONFIG.dataPath}/generations`) || await fileExists(`${CONFIG.dataPath}/posts`);
+  const showSyncDeleted = CONFIG.downloadMedia !== false
+    && await fileExists(`${CONFIG.mediaPath}/generations`);
+  const choices = [
     {
-      name: 'Change download directory',
+      name: 'Folders',
       value: 'change-directory',
       description: CONFIG.dataPath === CONFIG.mediaPath
-        ? `Data & media: ${chalk.italic(CONFIG.dataPath)}`
-        : `Data: ${chalk.italic(CONFIG.dataPath)}\nMedia: ${chalk.italic(CONFIG.mediaPath)}`
+        ? `Media & Data: ${chalk.italic(CONFIG.dataPath)}`
+        : `Media: ${chalk.italic(CONFIG.mediaPath)}\nData: ${chalk.italic(CONFIG.dataPath)}`
+    },
+    {
+      name: CONFIG.downloadMedia !== false ? 'Files: Media and data' : 'Files: Data only',
+      value: 'files',
+      description: CONFIG.downloadMedia !== false
+        ? 'Generations, posts, and comics save their files.'
+        : 'Generations, posts, and comics save the record only.'
     }
-  );
-
-  if (dataDirExists) {
-    choices.push(new Separator());
-
-    choices.push(
-      {
-        name: 'Count downloads',
-        value: 'count-downloads',
-        description: 'Count saved generations, posts, images and videos'
-      }
-    );
-  }
-
-  choices.push(new Separator());
+  ];
 
   if (CONFIG.allowAltDomain === true) {
     choices.push(
       {
-        name: `Change Domain: ${getCivitaiDomain()}`,
+        name: `Civitai domain: ${getCivitaiDomain()}`,
         value: 'change-domain',
         description: `Choose: ${chalk.italic(CIVITAI_DOMAINS.join(', '))}`
       }
@@ -71,6 +71,19 @@ export async function keyOptions ({ clear = true, message } = {}) {
   }
 
   choices.push(
+    {
+      name: `Explorer access: ${explorerAccessLabel(CONFIG.explorerAccess)}`,
+      value: 'explorer-access',
+      description: explorerAccessDescription(CONFIG.explorerAccess)
+    },
+    {
+      name: reactionOptionsName(),
+      value: 'reaction-options',
+      description: 'Choose reactions to include in the Download > Generations menu.'
+    },
+
+    new Separator(),
+
     {
       name: 'Test API key',
       value: 'test-key',
@@ -97,10 +110,29 @@ export async function keyOptions ({ clear = true, message } = {}) {
       name: 'Delete API key',
       value: 'delete-key',
       description: 'Delete key'
-    },
+    }
+  );
 
+  if (countDirExists || showSyncDeleted) {
+    choices.push(new Separator());
+    if (countDirExists) {
+      choices.push({
+        name: 'Count downloads',
+        value: 'count-downloads',
+        description: 'Count generations, posts and media'
+      });
+    }
+    if (showSyncDeleted) {
+      choices.push({
+        name: 'Sync deleted',
+        value: 'sync-deleted',
+        description: `Remove generation files from the last 30 days that you have since\ndeleted in the onsite generator.\n\nFirst, run ${chalk.bold('Download > Generations > All')}, then ${chalk.bold('Sync deleted')}.`
+      });
+    }
+  }
+
+  choices.push(
     new Separator(),
-
     {
       name: 'Back',
       value: 'back',
@@ -132,21 +164,30 @@ export async function keyOptions ({ clear = true, message } = {}) {
   let secretKey, result, confirmDelete;
 
   switch (answer) {
-    case 'open-directory':
-    if (CONFIG.dataPath !== CONFIG.mediaPath) {
-      return openDirectoryMenu();
-    }
-    openDataDirectory();
-    return keyOptions({ clear: false });
-
     case 'change-directory':
     return changeDirectoryMenu();
+
+    case 'files':
+    return changeFilesMenu();
+
+    case 'reaction-options': {
+      const { setReactionOptions } = await import('./downloadOptionsMenu.mjs');
+      return setReactionOptions();
+    }
+
+    case 'sync-deleted': {
+      const { runSyncDeleted } = await import('./downloadOptionsMenu.mjs');
+      return runSyncDeleted();
+    }
 
     case 'count-downloads':
     return runCountDownloads();
 
     case 'change-domain':
     return changeDomainMenu();
+
+    case 'explorer-access':
+    return changeExplorerAccessMenu();
 
     case 'test-key':
     secretKey = await getSecretKey();
@@ -155,6 +196,7 @@ export async function keyOptions ({ clear = true, message } = {}) {
       return keyOptions();
     }
 
+    scheduleSettingsRefresh();
     result = await testKey(secretKey);
 
     if (result.success) {
@@ -162,12 +204,12 @@ export async function keyOptions ({ clear = true, message } = {}) {
     }
 
     else if (result.error) {
-      if (result.httpStatus === 500) {
+      const is5xx = result.httpStatus >= 500 && result.httpStatus < 600;
+      if (is5xx || (result.retryable && result.httpStatus >= 500)) {
         message = chalk.red(`The web service is down. Please check again shortly.`);
-      }
-
-      else {
-        message = chalk.red(`Your API key does not work. Does it need updating?`);
+      } else {
+        const sentence = result.message || 'The API key was rejected.';
+        message = chalk.red(`${sentence}\nDoes the key need updating?`);
       }
     }
     return keyOptions({ message });
@@ -197,6 +239,7 @@ export async function keyOptions ({ clear = true, message } = {}) {
     return keyOptions();
     
     case 'back':
+    scheduleSettingsRefresh();
     return mainMenu();
   }
 }
@@ -236,7 +279,108 @@ async function changeDomainMenu () {
   return keyOptions({ message: chalk.green(`Domain set to ${getCivitaiDomain()}`) });
 }
 
+async function changeFilesMenu () {
+  const savingFiles = CONFIG.downloadMedia !== false;
+  const choices = [
+    {
+      name: 'Media and data',
+      value: true,
+      description: savingFiles ? chalk.dim('(current)') : ''
+    },
+    {
+      name: 'Data only',
+      value: false,
+      description: savingFiles ? '' : chalk.dim('(current)')
+    },
+    new Separator(),
+    {
+      name: 'Back',
+      value: 'back',
+      description: 'Back to Settings'
+    }
+  ];
+
+  clearTerminal();
+
+  const answer = await select({
+    message: 'Files:',
+    choices,
+    theme: customTheme,
+    pageSize: choices.length,
+    loop: false,
+    default: savingFiles
+  });
+
+  if (answer === 'back') {
+    return keyOptions();
+  }
+
+  if (CONFIG.downloadMedia !== answer) {
+    await setConfigParam('downloadMedia', answer);
+  }
+
+  return keyOptions({
+    message: chalk.green(`Files set to ${answer ? 'Media and data' : 'Data only'}`)
+  });
+}
+
+async function changeExplorerAccessMenu () {
+  const current = normalizeExplorerAccess(CONFIG.explorerAccess);
+  const choices = [
+    {
+      name: 'This device only',
+      value: EXPLORER_ACCESS_DEVICE,
+      description: current === EXPLORER_ACCESS_DEVICE
+        ? chalk.dim('(current)')
+        : explorerAccessDescription(EXPLORER_ACCESS_DEVICE)
+    },
+    {
+      name: 'Local network',
+      value: EXPLORER_ACCESS_LAN,
+      description: current === EXPLORER_ACCESS_LAN
+        ? chalk.dim('(current)')
+        : explorerAccessDescription(EXPLORER_ACCESS_LAN)
+    }
+  ];
+
+  choices.push(new Separator(), {
+    name: 'Back',
+    value: 'back',
+    description: 'Back to Settings'
+  });
+
+  clearTerminal();
+
+  const answer = await select({
+    message: 'Explorer access:',
+    choices,
+    theme: customTheme,
+    pageSize: choices.length,
+    loop: false,
+    default: current
+  });
+
+  if (answer === 'back') {
+    return keyOptions();
+  }
+
+  if (answer !== current) {
+    await setConfigParam('explorerAccess', answer);
+  }
+
+  return keyOptions({
+    message: chalk.green(`Explorer access set to ${explorerAccessLabel(answer)}`)
+  });
+}
+
 async function runCountDownloads () {
+  const [
+    { countDownloads, formatCountReport, formatElapsed },
+    { default: inquirer }
+  ] = await Promise.all([
+    import('./downloadActions.mjs'),
+    import('inquirer')
+  ]);
   const ui = new inquirer.ui.BottomBar();
   const startTime = Date.now();
 
@@ -281,15 +425,15 @@ let previousMenuItemEditDirectory;
 async function changeDirectoryMenu (doClearTerminal = true) {
   const choices = [
     {
-      name: 'Data directory',
-      value: 'set-data-directory',
-      description: `${chalk.italic(CONFIG.dataPath)}${CONFIG.mediaPath === CONFIG.dataPath ? `\n${chalk.hex('#FFA500')('Media is currently set to download into the same directory as data')}` : ''}`,
+      name: 'Media',
+      value: 'set-media-directory',
+      description: `${chalk.italic(CONFIG.mediaPath)}${CONFIG.mediaPath === CONFIG.dataPath ? `\n${chalk.hex('#FFA500')('Media is currently set to download into the same directory as data')}` : ''}`,
     },
 
     {
-      name: 'Media directory',
-      value: 'set-media-directory',
-      description: `${chalk.italic(CONFIG.mediaPath)}${CONFIG.mediaPath === CONFIG.dataPath ? `\n${chalk.hex('#FFA500')('Media is currently set to download into the same directory as data')}` : ''}`,
+      name: 'Data',
+      value: 'set-data-directory',
+      description: `${chalk.italic(CONFIG.dataPath)}${CONFIG.mediaPath === CONFIG.dataPath ? `\n${chalk.hex('#FFA500')('Media is currently set to download into the same directory as data')}` : ''}`,
     },
 
     new Separator(),
@@ -308,7 +452,7 @@ async function changeDirectoryMenu (doClearTerminal = true) {
   }
 
   const answer = await select({
-    message: 'Change directory:',
+    message: 'Folders:',
     choices,
     theme: customTheme,
     pageSize: choices.length,
@@ -332,84 +476,10 @@ async function changeDirectoryMenu (doClearTerminal = true) {
   return changeDirectoryMenu();
 }
 
-let previousMenuItemDirectory;
-
-async function openDirectoryMenu (doClearTerminal = true) {
-  const mediaDirExists = CONFIG.dataPath !== CONFIG.mediaPath && (
-    await fileExists(`${CONFIG.mediaPath}/generations`) || await fileExists(`${CONFIG.mediaPath}/posts`)
-  );
-
-  const choices = [
-    {
-      name: 'Data directory',
-      value: 'open-data-directory',
-      description: `Open ${chalk.italic(CONFIG.dataPath)} in file explorer`,
-    }
-  ];
-
-  if (mediaDirExists) {
-    choices.push(
-      {
-        name: 'Media directory',
-        value: 'open-media-directory',
-        description: `Open ${chalk.italic(CONFIG.mediaPath)} in file explorer`,
-      }
-    );
-  }
-
-  choices.push(
-    new Separator(),
-
-    {
-      name: 'Back',
-      value: 'back',
-      description: 'Back to Settings'
-    }
-  );
-
-  if (doClearTerminal) {
-    clearTerminal();
-  } else {
-    console.log();
-  }
-
-  const answer = await select({
-    message: 'Open directory:',
-    choices,
-    theme: customTheme,
-    pageSize: choices.length,
-    loop: false,
-    default: previousMenuItemDirectory !== 'back' ? previousMenuItemDirectory : undefined
-  });
-
-  previousMenuItemDirectory = answer;
-
-  switch (answer) {
-    case 'open-data-directory':
-    openDataDirectory();
-    break;
-
-    case 'open-media-directory':
-    openMediaDirectory();
-    break;
-
-    case 'back':
-    return keyOptions();
-  }
-
-  return openDirectoryMenu();
-}
-
 async function setDataDownloadLocation () {
-  const result = await inquirer.prompt([
-    {
-      type: 'input',
-      message: `New DATA root directory, currently "${CONFIG.dataPath}" (press Enter to cancel):`,
-      name: 'download-directory'
-    }
-  ]);
-
-  const newPath = result['download-directory'];
+  const newPath = await input({
+    message: `New DATA root directory, currently "${CONFIG.dataPath}" (press Enter to cancel):`
+  });
 
   if (newPath) {
     await setConfigParam('dataPath', newPath);
@@ -427,15 +497,9 @@ async function setDataDownloadLocation () {
 }
 
 async function setMediaDownloadLocation () {
-  const result = await inquirer.prompt([
-    {
-      type: 'input',
-      message: `New MEDIA root directory, currently ${CONFIG.mediaPath} (press Enter to cancel):`,
-      name: 'download-directory'
-    }
-  ]);
-
-  const newPath = result['download-directory'];
+  const newPath = await input({
+    message: `New MEDIA root directory, currently ${CONFIG.mediaPath} (press Enter to cancel):`
+  });
 
   if (newPath) {
     await setConfigParam('mediaPath', newPath);

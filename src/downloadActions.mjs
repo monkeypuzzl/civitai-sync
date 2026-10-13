@@ -1,16 +1,15 @@
 import path from 'node:path';
 import process from 'node:process';
-import { exec } from 'node:child_process';
 import chalk from 'chalk';
-import confirm from '@inquirer/confirm';
 import { fileExists, listDirectory, readFile, wait } from './utils.mjs';
-import { APP_DIRECTORY, CONFIG, OS, clearTerminal } from './cli.mjs';
-import { forEachGeneration, getGeneratedMediaInfo, mediaFilepath, getFirstGenerationId, saveGenerations, getGenerationImages, DOWNLOAD_TYPES_MOD } from './generations.mjs';
+import { APP_DIRECTORY, CONFIG, clearTerminal } from './cli.mjs';
+import { forEachGeneration, getGeneratedMediaInfo, mediaFilepath, saveGenerations, getGenerationImages, DOWNLOAD_TYPES_MOD } from './generations.mjs';
 import { getPostDates, postsDataDir, postImageFilepath } from './posts.mjs';
-import { requestKey } from './keyActions.mjs';
-import { getAllRequests } from './civitaiApi.mjs';
+import { getAllRequests, formatApiError } from './civitaiApi.mjs';
 import { setConfigParam } from './config.mjs';
-import { rebuildIndex } from './serverIndex.mjs';
+import { upsertIndexEntries } from './serverIndex.mjs';
+
+export { openDataDirectory, openMediaDirectory } from './openDirectory.mjs';
 
 const MAX_FETCH_ATTEMPTS = 10;
 
@@ -74,11 +73,13 @@ export function formatMonthYearRange (fromDate, toDate) {
   return from === to ? from : `${from} – ${to}`;
 }
 
-export function formatMediaCounts (imagesSaved, videosSaved) {
+export function formatMediaCounts (imagesSaved, videosSaved, audioSaved = 0, model3dSaved = 0) {
   const parts = [];
 
   if (imagesSaved > 0) parts.push(plural(imagesSaved, 'image'));
   if (videosSaved > 0) parts.push(plural(videosSaved, 'video'));
+  if (audioSaved > 0) parts.push(plural(audioSaved, 'audio file'));
+  if (model3dSaved > 0) parts.push(`${model3dSaved} 3D`);
   if (!parts.length) return '';
 
   return `${parts.join(', ')} saved`;
@@ -129,7 +130,6 @@ export async function fetchGenerations (options = {}) {
   const {
     withImages = true,
     latest = false,
-    oldest = false,
     resume = false,
     overwrite = false,
     overwriteIfModified = true,
@@ -162,6 +162,8 @@ export async function fetchGenerations (options = {}) {
     generationsNew: 0,
     imagesSaved: 0,
     videosSaved: 0,
+    audioSaved: 0,
+    model3dSaved: 0,
     activity: null,
     currentTag: tags.length ? (DOWNLOAD_TYPES_MOD[tags[0]] || tags[0]) : '',
     cursor,
@@ -177,7 +179,7 @@ export async function fetchGenerations (options = {}) {
     const aggregateReport = {
       time: report.time, count: 0, fromDate: '', toDate: '',
       generationsDownloaded: 0, generationsSaved: 0, generationsNew: 0,
-      imagesSaved: 0, videosSaved: 0, errors: [],
+      imagesSaved: 0, videosSaved: 0, audioSaved: 0, model3dSaved: 0, errors: [],
       aborted: false, complete: false
     };
 
@@ -191,6 +193,8 @@ export async function fetchGenerations (options = {}) {
         aggregateReport.generationsNew += tagReport.generationsNew || 0;
         aggregateReport.imagesSaved += tagReport.imagesSaved || 0;
         aggregateReport.videosSaved += tagReport.videosSaved || 0;
+        aggregateReport.audioSaved += tagReport.audioSaved || 0;
+        aggregateReport.model3dSaved += tagReport.model3dSaved || 0;
         if (tagReport.errors?.length) aggregateReport.errors.push(...tagReport.errors);
         if (tagReport.fromDate && (!aggregateReport.fromDate || tagReport.fromDate < aggregateReport.fromDate)) {
           aggregateReport.fromDate = tagReport.fromDate;
@@ -214,13 +218,9 @@ export async function fetchGenerations (options = {}) {
     cursor = undefined;
   }
 
-  else if (oldest) {
-    cursor = await getFirstGenerationId();
-  }
-
   function reportText ({ esc = true } = {}) {
     const elapsed = formatElapsed(Date.now() - new Date(report.time).getTime());
-    const mode = report.currentTag || (latest ? 'latest' : oldest ? 'oldest' : 'all');
+    const mode = report.currentTag || (latest ? 'latest' : 'all');
     const activityText = formatActivity(report.activity);
 
     const title = chalk.hex('#a5d8ff')(`Downloading ${mode}`);
@@ -228,9 +228,9 @@ export async function fetchGenerations (options = {}) {
       ? `${title} ${chalk.dim('·')} ${chalk.dim(activityText)}`
       : title;
 
-    const newText = report.generationsNew > 0 ? chalk.green(plural(report.generationsNew, 'new')) : '';
-    const mediaText = formatMediaCounts(report.imagesSaved, report.videosSaved);
-    const batchDateStr = report.batchDate ? formatMonthYear(report.batchDate) : '';
+    const newText = report.generationsNew > 0 ? chalk.green(plural(report.generationsNew, 'new generation')) : '';
+    const mediaText = formatMediaCounts(report.imagesSaved, report.videosSaved, report.audioSaved, report.model3dSaved);
+    const batchDateStr = report.batchDate ? formatDate(report.batchDate) : '';
     const arrow = report.paginating && !isAborted() ? ' →' : '';
     const resultParts = [
       batchDateStr ? `${batchDateStr}${arrow}` : '',
@@ -254,31 +254,6 @@ export async function fetchGenerations (options = {}) {
   async function batchIterator (data, { cursor, previousCursor, nextCursor }) {
     if (isAborted()) {
       report.aborted = true;
-      return report;
-    }
-
-    if (data.error) {
-      if (data.error.json.data.code === 'UNAUTHORIZED') {
-        const answer = await confirm({ message: chalk.red('\nNot authorized. Your API key needs updating. Update now?'), default: true });
-
-        if (answer) {
-          await requestKey();
-        }
-
-        report.errors.push({ error: 'UNAUTHORIZED' });
-        return report;
-      }
-
-      try {
-        const { url, json: { message, code } } = data.error;
-        log(chalk.red(`${message} (code ${code})\n  ${url}`));
-      }
-
-      catch (error) {
-        log(chalk.red(`Download error: ${error.message}`));
-      }
-
-      report.errors.push(data.error);
       return report;
     }
 
@@ -322,7 +297,9 @@ export async function fetchGenerations (options = {}) {
       generationsNew: report.generationsNew,
       generationsSaved: report.generationsSaved,
       imagesSaved: report.imagesSaved,
-      videosSaved: report.videosSaved
+      videosSaved: report.videosSaved,
+      audioSaved: report.audioSaved,
+      model3dSaved: report.model3dSaved
     };
 
     function updateReport (currentReport) {
@@ -330,6 +307,8 @@ export async function fetchGenerations (options = {}) {
       report.generationsSaved = reportBefore.generationsSaved + currentReport.generationsSaved;
       report.imagesSaved = reportBefore.imagesSaved + currentReport.imagesSaved;
       report.videosSaved = reportBefore.videosSaved + currentReport.videosSaved;
+      report.audioSaved = reportBefore.audioSaved + currentReport.audioSaved;
+      report.model3dSaved = reportBefore.model3dSaved + currentReport.model3dSaved;
       report.activity = currentReport.activity;
       report.lastSavedGenerationId = currentReport.lastSavedGenerationId;
       report.currentGenerations = currentReport.currentGenerations;
@@ -355,7 +334,7 @@ export async function fetchGenerations (options = {}) {
       if (onProgress) onProgress({ ...report });
     }
 
-    const result = await saveGenerations(data, { overwrite, overwriteIfModified, withImages, log: logSaveProgress, signal });
+    const result = await saveGenerations(data, { overwrite, overwriteIfModified, withImages, reactions: tags, log: logSaveProgress, signal, secretKey });
 
     if (result.error) {
       report.aborted = true;
@@ -367,7 +346,15 @@ export async function fetchGenerations (options = {}) {
     updateReport(result);
     report.complete = true;
 
-    if (report.generationsDownloaded && (result.generationsNew > 0 || result.imagesSaved > 0 || result.videosSaved > 0 || resume || oldest)) {
+    // Per-batch incremental index update. The Explorer can reflect the new
+    // generations immediately and we avoid the end-of-download full rescan.
+    // Failures here must not interrupt the download — the manual
+    // "Rebuild Index" button is the user-visible self-heal.
+    if (result.savedItems && result.savedItems.length) {
+      await upsertIndexEntries({ generations: result.savedItems }).catch(() => {});
+    }
+
+    if (report.generationsDownloaded && (result.generationsNew > 0 || result.imagesSaved > 0 || result.videosSaved > 0 || result.audioSaved > 0 || result.model3dSaved > 0 || resume)) {
       return report;
     }
 
@@ -423,10 +410,9 @@ export async function fetchGenerations (options = {}) {
     report.aborted = true;
   }
 
-  const hasData = (report.generationsNew || 0) > 0 || (report.imagesSaved || 0) > 0 || (report.videosSaved || 0) > 0;
+  const hasData = (report.generationsNew || 0) > 0 || (report.imagesSaved || 0) > 0 || (report.videosSaved || 0) > 0 || (report.audioSaved || 0) > 0 || (report.model3dSaved || 0) > 0;
   if (hasData || report.complete) {
     await setConfigParam('lastDownloadGenerations', new Date().toISOString()).catch(() => {});
-    await rebuildIndex().catch(() => {});
   }
 
   if (onProgress) onProgress({ ...report });
@@ -437,7 +423,7 @@ export function formatCompletion (report) {
   if (!report || typeof report !== 'object') return '';
 
   const elapsed = formatElapsed(Date.now() - new Date(report.time).getTime());
-  const hasNewData = (report.generationsNew || 0) > 0 || (report.imagesSaved || 0) > 0 || (report.videosSaved || 0) > 0;
+  const hasNewData = (report.generationsNew || 0) > 0 || (report.imagesSaved || 0) > 0 || (report.videosSaved || 0) > 0 || (report.audioSaved || 0) > 0 || (report.model3dSaved || 0) > 0;
 
   if (!hasNewData && !report.aborted && !(report.errors?.length)) {
     return `${chalk.hex('#a5d8ff')('Up to date')} ${chalk.dim('·')} no new generations found.\n`;
@@ -459,11 +445,11 @@ export function formatCompletion (report) {
   }
 
   const newText = (report.generationsNew || 0) > 0 ? chalk.green(plural(report.generationsNew, 'new generation')) : '';
-  const mediaText = formatMediaCounts(report.imagesSaved || 0, report.videosSaved || 0);
+  const mediaText = formatMediaCounts(report.imagesSaved || 0, report.videosSaved || 0, report.audioSaved || 0, report.model3dSaved || 0);
   const contentParts = [newText, mediaText].filter(Boolean);
   const line1 = `${label} ${chalk.dim('·')} ${contentParts.join(` ${chalk.dim('·')} `)}`;
 
-  const dateRange = formatMonthYearRange(report.fromDate, report.toDate);
+  const dateRange = formatDateRange(report.fromDate, report.toDate);
   const timeParts = [dateRange, `elapsed ${elapsed}`].filter(Boolean);
   const line2 = chalk.dim(`  ${timeParts.join(' · ')}`);
 
@@ -473,7 +459,7 @@ export function formatCompletion (report) {
     const errorMessages = {};
 
     for (const err of report.errors) {
-      const msg = err?.json?.message || err?.message || err?.error || 'Unknown error';
+      const msg = formatApiError(err);
       errorMessages[msg] = (errorMessages[msg] || 0) + 1;
     }
 
@@ -546,42 +532,6 @@ export function getMediaPath () {
   return generationsMediaPath;
 }
 
-function getRootDataPath () {
-  if (!CONFIG.dataPath.startsWith('/')) {
-    return path.join(APP_DIRECTORY, CONFIG.dataPath);
-  }
-  return CONFIG.dataPath;
-}
-
-function getRootMediaPath () {
-  if (!CONFIG.mediaPath.startsWith('/')) {
-    return path.join(APP_DIRECTORY, CONFIG.mediaPath);
-  }
-  return CONFIG.mediaPath;
-}
-
-export async function openDataDirectory () {
-  const OPEN_COMMAND = OS === 'win32' ? 'explorer' : 'open';
-  const dir = getRootDataPath();
-
-  exec(`${OPEN_COMMAND} ${dir}`, (error, stdout, stderr) => {
-    if (error || stderr) {
-      console.log('The directory does not exist. It will be created when you start downloading.');
-    }
-  });
-}
-
-export async function openMediaDirectory () {
-  const OPEN_COMMAND = OS === 'win32' ? 'explorer' : 'open';
-  const dir = getRootMediaPath();
-
-  exec(`${OPEN_COMMAND} ${dir}`, (error, stdout, stderr) => {
-    if (error || stderr) {
-      console.log('The directory does not exist. It will be created when you start downloading.');
-    }
-  });
-}
-
 export async function countGenerations ({ withImages = true, withMissingImages = false, includeLegacy = true } = {}) {
   const startAt = Date.now();
   let generations = 0;
@@ -650,11 +600,14 @@ export async function countDownloads ({ onProgress } = {}) {
     generations: 0,
     genImages: 0,
     genVideos: 0,
+    genAudio: 0,
+    genModel3d: 0,
     genFromDate: '',
     genToDate: '',
     posts: 0,
     postImages: 0,
     postVideos: 0,
+    postAudio: 0,
     postFromDate: '',
     postToDate: '',
   };
@@ -670,7 +623,15 @@ export async function countDownloads ({ onProgress } = {}) {
     for (const item of media) {
       const filepath = mediaFilepath(item);
       if (await fileExists(filepath)) {
-        if (item.mediaId.endsWith('.mp4')) {
+        // Phase 5a: classify by the logical `type` from getGeneratedMediaInfo
+        // (audio includes cover-mode `.mp4`). The `.mp4` extension fallback is
+        // retained only for older video records whose wire item carried no
+        // `type`, mirroring buildGenerationEntry's back-compat path.
+        if (item.type === 'model3d') {
+          report.genModel3d++;
+        } else if (item.type === 'audio') {
+          report.genAudio++;
+        } else if (item.type === 'video' || item.mediaId.endsWith('.mp4')) {
           report.genVideos++;
         } else {
           report.genImages++;
@@ -703,6 +664,7 @@ export async function countDownloads ({ onProgress } = {}) {
           const filepath = postImageFilepath({
             postId: post.id,
             publishedAt: post.publishedAt,
+            createdAt: post.createdAt,
             index: i + 1,
             imageId: image.id,
             type: image.type
@@ -711,6 +673,8 @@ export async function countDownloads ({ onProgress } = {}) {
           if (await fileExists(filepath)) {
             if (image.type === 'video') {
               report.postVideos++;
+            } else if (image.type === 'audio') {
+              report.postAudio++;
             } else {
               report.postImages++;
             }
@@ -738,7 +702,9 @@ export function formatCountReport (report) {
     const genMediaParts = [];
     if (report.genImages > 0) genMediaParts.push(`${report.genImages.toLocaleString()} images`);
     if (report.genVideos > 0) genMediaParts.push(`${report.genVideos.toLocaleString()} videos`);
-    const mediaSuffix = genMediaParts.length ? ` ${chalk.dim('·')} ${genMediaParts.join(', ')} saved` : '';
+    if (report.genAudio > 0) genMediaParts.push(`${report.genAudio.toLocaleString()} audio`);
+    if (report.genModel3d > 0) genMediaParts.push(`${report.genModel3d.toLocaleString()} 3D`);
+    const mediaSuffix = genMediaParts.length ? ` ${chalk.dim('·')} ${genMediaParts.join(', ')}` : '';
 
     lines.push(`  ${chalk.bold('Generations')} ${chalk.dim('·')} ${report.generations.toLocaleString()}${mediaSuffix}`);
 
@@ -751,7 +717,8 @@ export function formatCountReport (report) {
     const postMediaParts = [];
     if (report.postImages > 0) postMediaParts.push(`${report.postImages.toLocaleString()} images`);
     if (report.postVideos > 0) postMediaParts.push(`${report.postVideos.toLocaleString()} videos`);
-    const mediaSuffix = postMediaParts.length ? ` ${chalk.dim('·')} ${postMediaParts.join(', ')} saved` : '';
+    if (report.postAudio > 0) postMediaParts.push(`${report.postAudio.toLocaleString()} audio`);
+    const mediaSuffix = postMediaParts.length ? ` ${chalk.dim('·')} ${postMediaParts.join(', ')}` : '';
 
     lines.push(`  ${chalk.bold('Posts')} ${chalk.dim('·')} ${report.posts.toLocaleString()}${mediaSuffix}`);
 

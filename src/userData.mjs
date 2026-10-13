@@ -4,10 +4,14 @@
 //
 // A single entry point (`getCivitaiUserData`) talks to Civitai to learn who
 // the stored API key belongs to and whether the user is eligible to pick an
-// alternative domain. Two wrappers gate the call:
+// alternative domain. The first write of `allowAltDomain` also seeds
+// `CONFIG.domain` (civitai.red when the SessionUser flag is true). Two
+// wrappers gate the call:
 //
 //   fillIfMissing  — lazy: runs only when username or allowAltDomain is missing.
-//                    Used at CLI start-up and inside resolveUsername (posts flow).
+//                    Used at CLI start-up, after API-key save, and inside
+//                    resolveUsername (posts flow). Callers must not await it
+//                    on a paint path — a failing Civitai cannot block the CLI.
 //   refreshOnce    — forced refresh at most once per process lifetime.
 //                    Used on the first CLI Settings entry and the Explorer
 //                    Settings mount (via POST /api/user/refresh).
@@ -19,6 +23,8 @@
 import { CONFIG } from './cli.mjs';
 import { setConfig, setConfigParam } from './config.mjs';
 import { getCivitaiUser, getMe } from './civitaiApi.mjs';
+import { CIVITAI_DOMAINS } from './civitaiDomain.mjs';
+import { altDomainEligibleOf } from './civitaiWire.mjs';
 
 let hasRefreshedThisSession = false;
 let inflight = null;
@@ -35,7 +41,7 @@ function isValidUser (user) {
     user
     && typeof user.username === 'string'
     && user.username.length > 0
-    && typeof user.showNsfw === 'boolean'
+    && typeof altDomainEligibleOf(user) === 'boolean'
   );
 }
 
@@ -43,12 +49,18 @@ function isValidUser (user) {
 // the fields civitai-sync uses. Falls back to /api/v1/me for `username` only
 // when auth.getUser does not return a valid user.
 //
+// First write of `allowAltDomain` (absent / undefined — new config, upgraded
+// config that never stored the field, or a key rotation that cleared it) also
+// seeds `CONFIG.domain`: civitai.red when the SessionUser flag is true,
+// otherwise civitai.com. Later refreshes update allowAltDomain from that flag
+// but leave an already-chosen domain alone.
+//
 // Known limitation (H3 + N1): the `/api/v1/me` fallback response does not
-// include `showNsfw`, so `allowAltDomain` is NOT updated on that path. The
-// next successful auth.getUser call will fill it in.
+// include the SessionUser flag, so `allowAltDomain` is NOT updated on that
+// path. The next successful auth.getUser call will fill it in.
 //
 // Note: Civitai caches the SessionUser server-side for up to 4 hours (see
-// getSessionUser in the Civitai source). Recent changes to showNsfw made in
+// getSessionUser in the Civitai source). Recent changes to the flag made in
 // the browser may take a few minutes to propagate to this call.
 export async function getCivitaiUserData ({ secretKey }) {
   if (!secretKey) return null;
@@ -56,15 +68,21 @@ export async function getCivitaiUserData ({ secretKey }) {
   const user = await getCivitaiUser({ secretKey });
 
   if (isValidUser(user)) {
-    await setConfig({
+    const eligible = altDomainEligibleOf(user);
+    const isFirstAllowAltDomain = CONFIG.allowAltDomain === undefined;
+    const next = {
       username: user.username,
-      allowAltDomain: user.showNsfw
-    });
+      allowAltDomain: eligible
+    };
+    if (isFirstAllowAltDomain) {
+      next.domain = eligible ? CIVITAI_DOMAINS[1] : CIVITAI_DOMAINS[0];
+    }
+    await setConfig(next);
 
-    return { username: user.username, allowAltDomain: user.showNsfw };
+    return { username: user.username, allowAltDomain: eligible };
   }
 
-  // Fallback: /api/v1/me only returns `username` (no `showNsfw`). Writes
+  // Fallback: /api/v1/me only returns `username` (no alt-domain flag). Writes
   // username if present but leaves `allowAltDomain` untouched.
   const me = await getMe({ secretKey });
 

@@ -16,6 +16,7 @@ const ctx = await esbuild.context({
     path.join(SRC, 'styles', 'main.css')
   ],
   bundle: true,
+  splitting: true,
   outdir: DIST,
   format: 'esm',
   jsx: 'automatic',

@@ -1,12 +1,10 @@
 /*eslint no-unused-vars: ["error", { "caughtErrors": "all", "caughtErrorsIgnorePattern": "^ignore" }]*/
 /*eslint no-empty: ["error", { "allowEmptyCatch": true }]*/
 // import confirm from '@inquirer/confirm';
-import extractZip from 'extract-zip';
 import { mkdirp } from 'mkdirp';
 import { fetchModel, fetchFile } from './civitaiApi.mjs';
 import { fileExists, readFile, writeFile, listFiles, listDirectories, rename, unlink, rm, cp } from './utils.mjs';
-import { APP_DIRECTORY, CURRENT_VERSION } from './cli.mjs';
-import { spawnChild } from './childProcess.mjs';
+import { APP_DIRECTORY, CURRENT_VERSION, SOFTWARE, applySoftwareCache } from './cli.mjs';
 import { civitaiUrl } from './civitaiDomain.mjs';
 
 
@@ -27,12 +25,6 @@ const PROGRAM_DIRECTORIES = [
   'src'
 ];
 const HTML_FIRST_PARAGRAPH = /<p>(.*?)<\/p>/;
-export const SOFTWARE = {
-  current: {},
-  latest: {},
-  hasUpdate: false,
-  checkedAt: 0
-};
 const SOFTWARE_UPDATE_CHECK_EVERY = 12; // hours
 
 export async function fetchModelLatestVersion (modelId) {
@@ -173,12 +165,7 @@ export async function saveSoftwareUpdateInfo (data) {
 export async function checkForSoftwareUpdate ({ force = false } = {}) {
   if (!force && !SOFTWARE.checkedAt) {
     const cached = await loadSoftwareUpdateInfo();
-    const hasValidFileCache = !!cached && cached.currentVersion === CURRENT_VERSION;
-    
-    if (hasValidFileCache) {
-      Object.keys(cached)
-      .forEach(key => SOFTWARE[key] = cached[key]);
-    }
+    applySoftwareCache(SOFTWARE, cached, CURRENT_VERSION);
   }
 
   if (force || !SOFTWARE.checkedAt || Date.now() - SOFTWARE.checkedAt > SOFTWARE_UPDATE_CHECK_EVERY * 1000 * 60 * 60) {
@@ -244,6 +231,7 @@ export async function unzipSoftwareUpdate (version) {
 
   try {
     console.log('Extracting software');
+    const { default: extractZip } = await import('extract-zip');
     await extractZip(zipFilepath, { dir: unzipTmpDirectory });
     await rename(unzipTmpDirectory, unzipDirectory);
   }
@@ -289,6 +277,7 @@ export async function installSoftwareUpdate (version) {
 
   if (!hasSamePackageDependencies(newPackage, currentPackage)) {
     let npmLog = '';
+    const { spawnChild } = await import('./childProcess.mjs');
 
     console.log('Installing dependencies...');
 

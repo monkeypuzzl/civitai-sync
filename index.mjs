@@ -3,18 +3,17 @@
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
-import { ExitPromptError } from '@inquirer/core';
+import { isPromptForceClose, requestShutdown } from './src/explorerServer.mjs';
 import { launchCLI } from './src/cli.mjs';
 
-// signal-exit throws ExitPromptError synchronously during process teardown,
-// which bypasses async try/catch. Intercept it here and exit cleanly.
-process.on('uncaughtException', async (err) => {
-  if (err instanceof ExitPromptError) {
-    try {
-      const { shutdownBrowseServer } = await import('./src/mainMenu.mjs');
-      await shutdownBrowseServer();
-    } catch { /* best-effort */ }
-    process.exit(0);
+// signal-exit rejects the open prompt with ExitPromptError during teardown,
+// which bypasses async try/catch. Checkbox uses a second copy of that class.
+// requestShutdown is idempotent, so this does not cut off a shutdown the
+// keypress listener already started, and it does not print the stack.
+process.on('uncaughtException', (err) => {
+  if (isPromptForceClose(err)) {
+    requestShutdown();
+    return;
   }
   console.error(err);
   process.exit(1);

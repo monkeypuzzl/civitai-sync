@@ -4,7 +4,9 @@
 // default public surface (smaller catalog in the new arrangement); alternative
 // hostnames like `civitai.red` expose the full set. The user's ability to
 // choose an alternative domain is gated on `CONFIG.allowAltDomain`, which is
-// derived from `user.showNsfw` returned by `auth.getUser`.
+// derived from the SessionUser alt-domain flag returned by `auth.getUser`.
+// The first write of that flag also seeds `CONFIG.domain` (civitai.red when
+// the flag is true).
 //
 // All callers that build API URLs, Referer headers, or informational links in
 // the CLI/Explorer UI must route through `getCivitaiDomain()` so the effective

@@ -12,12 +12,21 @@ export const DEFAULT_CONFIG = {
   dataPath: `data`,
   mediaPath: `media`,
   username: '',
-  generationMediaTypes: ['all'].sort(),
-  generationDataTypes: ['all'],
+  // Files and the record when true. The record only when false. Generations,
+  // posts, comics, and generation inputs share this switch.
+  downloadMedia: true,
+  // `favorite` and/or `feedback:liked`, in that order, or []. Never `all`
+  // or `feedback:disliked`. Remembered runs (`generationDownload`,
+  // `postDownload`) are written by a download start, not defaulted here.
+  generationReactions: [],
   keyEncrypt: false,
-  excludeImages: false,
   secretKey: '',
-  domain: 'civitai.com'
+  domain: 'civitai.com',
+  // Who can reach the Explorer process: this device (loopback) or the LAN
+  // (all interfaces). Bind addresses stay in explorerServer.mjs — this key is the
+  // user-facing preference. Missing/invalid values coerce to 'device' at
+  // resolveExplorerHost; old configs are not rewritten on load.
+  explorerAccess: 'device'
 };
 
 const currentConfig = {};

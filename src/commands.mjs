@@ -2,6 +2,7 @@ import process from 'node:process';
 import { getSecretKey } from './keyActions.mjs';
 import { fetchGenerationsInterval } from './downloadActions.mjs';
 import { deleteAllDeletedMedia } from './generations.mjs';
+import { healMedia } from './mediaHeal.mjs';
 import { DEFAULT_CONFIG_PATH, useConfig, CONFIG } from './cli.mjs';
 
 const commandlineArgs = process.argv.slice(2);
@@ -32,17 +33,31 @@ switch (command) {
 
   options = {
     interval: 60, // seconds
-    withImages: !CONFIG.excludeImages,
+    withImages: CONFIG.downloadMedia !== false,
     latest: true,
     overwriteIfModified: true,
-    tags: [],           // "favorite", "liked", "disliked"
+    tags: [],
     secretKey,
     listeningForKeyPress: false
   };
   fetchGenerationsInterval(options);
   break;
 
-  case 'remove-deleted':
-  deleteAllDeletedMedia();
+  case 'sync-deleted':
+  await deleteAllDeletedMedia();
+  break;
+
+  case 'heal-media':
+  secretKey = await getSecretKey();
+  {
+    const report = await healMedia({ secretKey });
+    const parts = [
+      `${report.healed} healed`,
+      `${report.unrecoverable} unrecoverable`,
+      `${report.failed} still broken`,
+      `${report.unchanged} unchanged`
+    ];
+    console.log(`Media heal: ${parts.join(', ')}`);
+  }
   break;
 }

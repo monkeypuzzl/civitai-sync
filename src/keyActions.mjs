@@ -5,9 +5,7 @@ import password from '@inquirer/password';
 import { CONFIG, CONFIG_PATH } from './cli.mjs';
 import { encryptAES, decryptAES } from './crypto.mjs';
 import { setConfig } from './config.mjs';
-import { getGenerations } from './civitaiApi.mjs';
 import { CIVITAI_DOMAINS } from './civitaiDomain.mjs';
-import { resetUserDataSession } from './userData.mjs';
 
 let SECRET_KEY;
 
@@ -108,19 +106,29 @@ export async function unEncryptKey (encryptedKey) {
 }
 
 export async function testKey (secretKey) {
-  const data = await getGenerations({ secretKey });
+  try {
+    const { getGenerations, normalizeCivitaiError } = await import('./civitaiApi.mjs');
+    const data = await getGenerations({ secretKey });
 
-  if (!data) {
-    return { error: true };
+    if (!data) {
+      return { error: true, code: 'UNKNOWN', message: 'Empty response' };
+    }
+
+    if (data.error) {
+      const err = normalizeCivitaiError(data.error);
+      return {
+        error: true,
+        code: err.code,
+        httpStatus: err.httpStatus,
+        message: err.message,
+        retryable: err.retryable
+      };
+    }
+
+    return { success: true };
+  } catch (error) {
+    return { error: true, code: 'UNKNOWN', message: error.message };
   }
-  
-  else if (data.error) {
-    const { code, httpStatus } = data.error.json.data;
-
-    return { error: true, code, httpStatus };
-  }
-
-  return { success: true };
 }
 
 export async function getSecretKey () {
@@ -155,7 +163,7 @@ export async function getSecretKey () {
 // server so they do not hijack the terminal.
 export function getAvailableSecretKey () {
   if (SECRET_KEY) return SECRET_KEY;
-  if (!CONFIG.secretKey) return null;
+  if (!CONFIG?.secretKey) return null;
   if (CONFIG.keyEncrypt) return null;
   return CONFIG.secretKey;
 }
@@ -173,12 +181,16 @@ export async function requestKey () {
   if (!newKey) {
     return null;
   }
-  
+
+  const { fillIfMissing, resetUserDataSession } = await import('./userData.mjs');
+
   SECRET_KEY = newKey;
   // A new API key may belong to a different user, or the same user with
   // different content permissions. Clear identity-derived fields so the next
-  // refresh repopulates them cleanly. Reset domain to the default as well,
-  // to avoid being stuck on civitai.red without eligibility confirmation.
+  // refresh repopulates them cleanly. Reset domain to civitai.com as well,
+  // to avoid being stuck on civitai.red without eligibility confirmation; the
+  // next first-write of allowAltDomain will seed .red if the SessionUser
+  // flag is true.
   await setConfig({
     username: '',
     allowAltDomain: undefined,
@@ -197,6 +209,9 @@ export async function requestKey () {
 
   console.log(chalk.green(`Key saved ${encryptedKey ? '(encrypted) ' : ''}in config at ${CONFIG_PATH}`));
 
+  // Do not await: a failing or slow auth.getUser must not hold the menu.
+  fillIfMissing({ secretKey: newKey }).catch(() => {});
+
   return newKey;
 }
 
@@ -210,5 +225,6 @@ export async function removeKey () {
     allowAltDomain: undefined,
     domain: CIVITAI_DOMAINS[0]
   });
+  const { resetUserDataSession } = await import('./userData.mjs');
   resetUserDataSession();
 }

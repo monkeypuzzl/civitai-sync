@@ -11,14 +11,15 @@ export async function showInfo () {
 ${chalk.bold('Model page')}:
 ${civitaiUrl('/models/526058')}
 
-${chalk.bold('Discussion page')} for ideas, issues, newest comments:  
+${chalk.bold('Discussion page')} for ideas, issues, comments:  
 ${civitaiUrl('/articles/5676')}
 
 ${chalk.bold('Create API key')}:
 ${civitaiUrl('/user/account')}
 
-${chalk.bold('Download generations, posts, and media')} by following the instructions in the "Download" menu. You can also browse your local library of creations in the browser by selecting "Browse Creations" from the main menu.
-Choose a download directory. By default, Data and media is saved in the program folder in "data" and "media" and config files are saved in the "config".
+${chalk.bold('Download')}: save your Generations, Posts, and Comics.
+${chalk.bold('Explore')}: open the "Explorer" for a website library of your creations.
+${chalk.bold('Settings')}: change download folder, civitai domain, API key and more.
 `);
 
   const choices = [

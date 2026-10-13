@@ -58,14 +58,6 @@ export function toDateString (input) {
   return '';
 }
 
-export function dateIsOlderThanDays (isoString, numDays) {
-  const d = new Date();
-
-  d.setDate(d.getDate() - numDays);
-  
-  return toDateString(isoString) < toDateString(d.toISOString());
-}
-
 export function isDate (dateString) {
   return !isNaN((new Date(dateString)).getTime());
 }
@@ -103,22 +95,14 @@ export async function listDirectories (dir, options = {}) {
   .map(({ name }) => name);
 }
 
-export async function removeDirectoryIfEmpty (dir, { removeDotFiles = true } = {}) {
+export async function removeDirectoryIfEmpty (dir) {
   if (!(await fileExists (dir))) {
     return true;
   }
 
   const files = await listDirectory(dir);
-  const dotFiles = removeDotFiles ? files.filter(filename => filename.startsWith('.')) : [];
 
-  // e.g. operating system thumbnail/metadata
-  if (removeDotFiles) {
-    for (let filename of dotFiles) {
-      await unlink(`${dir}/${filename}`);
-    }
-  }
-
-  if ((files.length - dotFiles.length) === 0) {
+  if (files.length === 0) {
     try {
       await rmdir(dir);
       return true;
