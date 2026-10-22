@@ -336,17 +336,23 @@ export async function backfillAspectFileDims ({
   mediaPath = CONFIG?.mediaPath
 } = {}) {
   await waitForExplorerIdle();
-  if (!dataPath || !mediaPath) return;
+  if (!dataPath || !mediaPath) return { wrote: false };
   const items = mediaItems == null ? await mediaItemsFromIndex() : mediaItems;
   const sidecar = readSidecarSync(dataPath);
   let dirty = false;
-
+  const holes = [];
   for (const item of items || []) {
-    await waitForExplorerIdle();
     if (item?.type === 'model3d') continue;
     const id = normalizeMediaId(item?.id);
     if (!id) continue;
     if (!needsFileProbe(item)) continue;
+    holes.push(item);
+  }
+
+  for (const item of holes) {
+    await waitForExplorerIdle();
+    const id = normalizeMediaId(item?.id);
+    if (!id) continue;
     const filepath = diskPathFromThumbnail(item.thumbnailPath, mediaPath);
     if (!filepath) continue;
 
@@ -380,4 +386,5 @@ export async function backfillAspectFileDims ({
   }
 
   if (dirty) await writeFile(sidecarFilePath(dataPath), sidecar);
+  return { wrote: dirty };
 }

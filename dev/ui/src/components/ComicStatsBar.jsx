@@ -1,8 +1,6 @@
 import { TimeText } from './TimeText.jsx';
 
 export function ComicStatsBar ({ stats, comicTotal, totalLabel = 'comics' }) {
-  if (!stats && comicTotal == null) return null;
-
   const total = comicTotal !== undefined ? comicTotal : stats?.totalComics;
   const chapters = stats?.comicChapters;
   const panels = stats?.comicPanels;
@@ -20,10 +18,8 @@ export function ComicStatsBar ({ stats, comicTotal, totalLabel = 'comics' }) {
     }
   ].filter(Boolean);
 
-  if (!items.length) return null;
-
   return (
-    <ul class="stats-bar">
+    <ul class="stats-bar" aria-hidden={items.length ? undefined : 'true'}>
       {items.flatMap((item, i) => {
         const cell = (
           <li key={`item-${i}`} class="stat-item">

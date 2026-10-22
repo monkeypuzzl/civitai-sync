@@ -8,10 +8,10 @@
 // Upstream path:   civitai-src/packages/civitai-shared/src/basemodel.constants.ts
 // Upstream range:  basemodel.constants.ts ecosystems / ecosystemGroups / baseModelRecords / ecosystemSettings / MODEL3D_ECOSYSTEM_IDS; generation/config/workflows.ts workflowConfigs.ecosystemIds (coverage); form-graph/generation/video/wan.graph.ts wanVersionDefs; form-graph/generation/** *VersionOptions / VersionGroup / *VersionDefs; version-ids.ts shared numeric maps
 // Upstream branch: main
-// Upstream commit: f6bbd3ded78ddbddc152bf74abb431ed68504999
+// Upstream commit: 103e59d87ce86c1e30b5c7af103352406f4a682a
 // Fields read:     ecosystem key/displayName/sortOrder, group id/displayName/ecosystemIds/sortOrder, baseModelRecords name→ecosystem, defaults.model.id, output type, picker options
 //
-// Refreshed at:    2026-10-12T17:11:44.878Z
+// Refreshed at:    2026-10-22T20:07:15.000Z
 // Refresh by:      node dev/tools/refresh-vendored-civitai.mjs families
 // Verify drift:    node dev/tools/refresh-vendored-civitai.mjs verify
 //
@@ -50,12 +50,14 @@
 //   src/shared/form-graph/generation/image/flux.graph.ts
 //   src/shared/form-graph/generation/image/flux2-klein.graph.ts
 //   src/shared/form-graph/generation/image/flux2.graph.ts
+//   src/shared/form-graph/generation/image/flux3-klein.graph.ts
 //   src/shared/form-graph/generation/image/hi-dream-o1.graph.ts
 //   src/shared/form-graph/generation/image/hi-dream.graph.ts
 //   src/shared/form-graph/generation/image/ideogram.graph.ts
 //   src/shared/form-graph/generation/image/krea2.graph.ts
 //   src/shared/form-graph/generation/image/lens.graph.ts
 //   src/shared/form-graph/generation/image/mage-flow.graph.ts
+//   src/shared/form-graph/generation/image/moss-image.graph.ts
 //   src/shared/form-graph/generation/image/nano-banana.graph.ts
 //   src/shared/form-graph/generation/image/openai.graph.ts
 //   src/shared/form-graph/generation/image/qwen.graph.ts
@@ -272,6 +274,28 @@ export const CIVITAI_MODEL_FAMILIES = Object.freeze({
     ])
   }),
   Object.freeze({
+    "id": "Flux3Klein",
+    "label": "Flux.3 Klein",
+    "outputType": "image",
+    "members": ["Flux3Klein","Flux3Klein_base"],
+    "variants": Object.freeze([
+      Object.freeze({
+        "id": "Flux3Klein:3407486",
+        "optionKey": "3407486",
+        "label": "Klein",
+        "ecosystemKeys": ["Flux3Klein"],
+        "versionIds": [3407486]
+      }),
+      Object.freeze({
+        "id": "Flux3Klein:3407485",
+        "optionKey": "3407485",
+        "label": "Klein Base",
+        "ecosystemKeys": ["Flux3Klein_base"],
+        "versionIds": [3407485]
+      })
+    ])
+  }),
+  Object.freeze({
     "id": "Pony",
     "label": "Pony Diffusion",
     "outputType": "image",
@@ -313,21 +337,6 @@ export const CIVITAI_MODEL_FAMILIES = Object.freeze({
         "label": "2.7",
         "ecosystemKeys": ["WanImage27"],
         "versionIds": [2828170]
-      })
-    ])
-  }),
-  Object.freeze({
-    "id": "Imagen4",
-    "label": "Imagen 4",
-    "outputType": "image",
-    "members": ["Imagen4"],
-    "variants": Object.freeze([
-      Object.freeze({
-        "id": "Imagen4:1889632",
-        "optionKey": "1889632",
-        "label": "Imagen 4",
-        "ecosystemKeys": ["Imagen4"],
-        "versionIds": [1889632]
       })
     ])
   }),
@@ -381,13 +390,6 @@ export const CIVITAI_MODEL_FAMILIES = Object.freeze({
     "members": ["OpenAI"],
     "variants": Object.freeze([
       Object.freeze({
-        "id": "OpenAI:1733399",
-        "optionKey": "1733399",
-        "label": "v1",
-        "ecosystemKeys": ["OpenAI"],
-        "versionIds": [1733399]
-      }),
-      Object.freeze({
         "id": "OpenAI:2512167",
         "optionKey": "2512167",
         "label": "v1.5",
@@ -398,7 +400,7 @@ export const CIVITAI_MODEL_FAMILIES = Object.freeze({
         "id": "OpenAI:2880272",
         "optionKey": "2880272",
         "label": "v2",
-        "ecosystemKeys": [],
+        "ecosystemKeys": ["OpenAI"],
         "versionIds": [2880272]
       })
     ])
@@ -631,6 +633,21 @@ export const CIVITAI_MODEL_FAMILIES = Object.freeze({
     ])
   }),
   Object.freeze({
+    "id": "Krea3",
+    "label": "Krea 3",
+    "outputType": "image",
+    "members": ["Krea3"],
+    "variants": Object.freeze([
+      Object.freeze({
+        "id": "Krea3:3405360",
+        "optionKey": "3405360",
+        "label": "Krea 3",
+        "ecosystemKeys": ["Krea3"],
+        "versionIds": [3405360]
+      })
+    ])
+  }),
+  Object.freeze({
     "id": "MAI",
     "label": "MAI",
     "outputType": "image",
@@ -838,6 +855,28 @@ export const CIVITAI_MODEL_FAMILIES = Object.freeze({
     ])
   }),
   Object.freeze({
+    "id": "MossImage",
+    "label": "MOSS Image",
+    "outputType": "image",
+    "members": ["MossImage"],
+    "variants": Object.freeze([
+      Object.freeze({
+        "id": "MossImage:3409867",
+        "optionKey": "3409867",
+        "label": "SFT",
+        "ecosystemKeys": ["MossImage"],
+        "versionIds": [3409867]
+      }),
+      Object.freeze({
+        "id": "MossImage:3409868",
+        "optionKey": "3409868",
+        "label": "Base",
+        "ecosystemKeys": [],
+        "versionIds": [3409868]
+      })
+    ])
+  }),
+  Object.freeze({
     "id": "Upscaler",
     "label": "Upscaler",
     "outputType": "image",
@@ -951,21 +990,6 @@ export const CIVITAI_MODEL_FAMILIES = Object.freeze({
         "label": "Standard",
         "ecosystemKeys": ["Veo3"],
         "versionIds": [2827945]
-      })
-    ])
-  }),
-  Object.freeze({
-    "id": "Sora2",
-    "label": "Sora 2",
-    "outputType": "video",
-    "members": ["Sora2"],
-    "variants": Object.freeze([
-      Object.freeze({
-        "id": "Sora2:2320065",
-        "optionKey": "2320065",
-        "label": "Sora 2",
-        "ecosystemKeys": ["Sora2"],
-        "versionIds": [2320065]
       })
     ])
   }),
@@ -1361,6 +1385,8 @@ export const CIVITAI_MODEL_FAMILIES = Object.freeze({
   "Flux.2 Klein 9B":             "Flux2Klein_9B",
   "Flux.2 Klein 9B-base":        "Flux2Klein_9B_base",
   "Flux.3":                      "Flux3",
+  "Flux.3 Klein":                "Flux3Klein",
+  "Flux.3 Klein-base":           "Flux3Klein_base",
   "Grok":                        "Grok",
   "HappyHorse":                  "HappyHorse",
   "HiDream":                     "HiDream",
@@ -1375,6 +1401,8 @@ export const CIVITAI_MODEL_FAMILIES = Object.freeze({
   "Kling":                       "Kling",
   "Kolors":                      "Kolors",
   "Krea 2":                      "Krea2",
+  "Krea 2 Turbo":                "Krea2",
+  "Krea 3":                      "Krea3",
   "LTXV":                        "LTXV",
   "LTXV 2.3":                    "LTXV23",
   "LTXV 2.5":                    "LTXV25",
@@ -1382,6 +1410,7 @@ export const CIVITAI_MODEL_FAMILIES = Object.freeze({
   "Lens":                        "Lens",
   "Lumina":                      "Lumina",
   "MAI":                         "MAI",
+  "MOSS Image":                  "MossImage",
   "MageFlow":                    "MageFlow",
   "Ming Image Design 0.1":       "Ming",
   "Ming Image Design Layer 0.1": "MingLayer",

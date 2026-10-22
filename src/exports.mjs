@@ -44,10 +44,15 @@ export function notifyReactionsChanged (normalizedMediaItemIds) {
 import nodeFs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { createHash } from 'node:crypto';
 
 import { CONFIG } from './cli.mjs';
 import { writeFile, readFile, fileExists, listFiles, unlink, copyFile, rename, rm } from './utils.mjs';
 import { applyFacets, mediaItemToFilterable } from './explorerQuery.mjs';
+import { exportLiftQuery } from './modelsQuery.mjs';
+import { hydratedResourceSlots, resolveResourceLineName, resolveResourceVersionName } from './checkpointResolution.mjs';
+import { getModelVersionFromCache } from './modelVersionCache.mjs';
+import { isRatingTagName } from '../dev/ui/src/lib/browsing-level.js';
 import { getIndex, getMediaItemById, isProduced } from './serverIndex.mjs';
 import { currentOwnModels } from './ownModels.mjs';
 import { normalizeMediaId } from './mediaId.mjs';
@@ -57,9 +62,14 @@ import { comicsMediaDir } from './comics.mjs';
 
 export const EXPORT_VERSION = 2;
 
-// The op-count above which a bulk plan must be confirmed rather than applied
-// silently (mirrors the UI's single drift/confirm threshold).
-export const PLAN_OP_THRESHOLD = 200;
+// A copy asks only when this sync would write more than the ceiling, or add
+// more than COPY_ADD_AUTO_MAX files. Equal to a ceiling still applies.
+// Hard-link plans, including removals, apply on their own. A cloud-sync
+// destination path uses the lower byte ceiling. The values are binary
+// (1024-based), matching file-size display elsewhere.
+export const COPY_BYTES_AUTO_MAX = 10 * 1024 ** 3;
+export const CLOUD_COPY_BYTES_AUTO_MAX = 2 * 1024 ** 3;
+export const COPY_ADD_AUTO_MAX = 5000;
 
 // --- Storage paths ---------------------------------------------------------
 //
@@ -102,20 +112,104 @@ export function deriveSlug (name, existing = []) {
 // stored query is a flat params object handed straight to `applyFacets`.
 
 const PERSISTABLE_QUERY_KEYS = new Set([
-  'tag', 'reaction', 'type', 'ecosystem', 'model', 'version', 'resourceType', 'resource',
+  'tag', 'postTag', 'rating', 'reaction', 'mediaType', 'models',
   'aspect', 'dateFrom', 'dateTo', 'cfgMin', 'cfgMax', 'stepsMin', 'stepsMax',
-  'status', 'inPost', 'publication', 'usedAsInput', 'q', 'scope',
-  'workflow', 'workflowMode', 'mine'
+  'status', 'inPost', 'publication', 'usedAsInput', 'q',
+  'workflow', 'workflowMode'
 ]);
 
+function liftRatingQuery (query) {
+  const out = { ...(query || {}) };
+  const parts = String(out.tag || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!parts.length) return out;
+  const tags = [];
+  const lifted = [];
+  for (const part of parts) {
+    if (isRatingTagName(part)) lifted.push(part.toLowerCase());
+    else tags.push(part);
+  }
+  if (!lifted.length) return out;
+  const existing = String(out.rating || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const seen = new Set();
+  const merged = [];
+  for (const token of [...existing, ...lifted]) {
+    if (seen.has(token)) continue;
+    seen.add(token);
+    merged.push(token);
+  }
+  out.rating = merged.join(',');
+  if (tags.length) out.tag = tags.join(',');
+  else delete out.tag;
+  return out;
+}
+
+function corpusLookup () {
+  let index;
+  try { index = getIndex(); } catch { return null; }
+  if (!index) return null;
+  const items = [];
+  if (Array.isArray(index.mediaItems)) items.push(...index.mediaItems);
+  if (Array.isArray(index.generations)) items.push(...index.generations);
+  const modelIdsByName = new Map();
+  const versionIdsByName = new Map();
+  const remember = (map, name, id) => {
+    if (!name || id == null || id === '') return;
+    const key = String(name);
+    const set = map.get(key) || new Set();
+    set.add(String(id));
+    map.set(key, set);
+  };
+  for (const item of items) {
+    let slots = [];
+    try { slots = hydratedResourceSlots(item, getModelVersionFromCache); } catch { slots = []; }
+    for (const slot of slots) {
+      remember(modelIdsByName, resolveResourceLineName(slot, getModelVersionFromCache), slot?.modelId);
+      remember(versionIdsByName, resolveResourceVersionName(slot, getModelVersionFromCache), slot?.versionId);
+    }
+  }
+  const list = (map, name) => [...(map.get(String(name)) || [])];
+  return {
+    modelIdsForName: name => list(modelIdsByName, name),
+    versionIdsForName: name => list(versionIdsByName, name)
+  };
+}
+
 export function sanitizeQuery (query = {}) {
+  const lifted = exportLiftQuery(liftRatingQuery(query), corpusLookup());
   const out = {};
-  for (const [key, value] of Object.entries(query || {})) {
+  for (const [key, value] of Object.entries(lifted)) {
     if (PERSISTABLE_QUERY_KEYS.has(key) && value !== undefined && value !== null && value !== '') {
       out[key] = value;
     }
   }
   return out;
+}
+
+function exportQueryChanged (before, after) {
+  const keys = new Set([
+    ...Object.keys(before || {}),
+    ...Object.keys(after || {})
+  ]);
+  for (const key of keys) {
+    const left = before?.[key];
+    const right = after?.[key];
+    const a = left == null ? '' : String(left);
+    const b = right == null ? '' : String(right);
+    if (a !== b) return true;
+  }
+  return false;
+}
+
+/** One upgrade pass. Writes a stored export only when its query changes. */
+export async function migrateStoredExportQueries () {
+  const slugs = await listSlugsOnDisk();
+  for (const slug of slugs) {
+    const record = await readExportRecord(slug);
+    if (!record || record.query == null || typeof record.query !== 'object') continue;
+    const nextQuery = sanitizeQuery(record.query);
+    if (!exportQueryChanged(record.query, nextQuery)) continue;
+    await writeFile(exportFilePath(slug), { ...record, query: nextQuery });
+  }
 }
 
 // --- CRUD over data/exports/<slug>.json -----------------------------------
@@ -393,9 +487,10 @@ export function diff (desired, onDisk) {
 
 // --- Pure plan classifier -------------------------------------------------
 //
-// `confirm` when (copy mode AND bytes are moved) OR (>200 total ops) OR (any
-// deletion); else `auto`. `add`/`remove` accept either counts or the diff's
-// arrays/sets.
+// `confirm` only for a copy that would write more than its byte ceiling, or
+// add more than COPY_ADD_AUTO_MAX files. Hard links, and any number of
+// removals, are `auto`. `add` accepts a count or the diff's array/set.
+// `cloud` is the destination path (`isCloudSyncPath`), not the probe warning.
 
 function count (value) {
   if (Array.isArray(value)) return value.length;
@@ -404,12 +499,11 @@ function count (value) {
   return Number.isFinite(n) ? n : 0;
 }
 
-export function classifyPlan ({ mode, add = 0, remove = 0, bytesNeeded = 0 } = {}) {
-  const addN = count(add);
-  const removeN = count(remove);
-  if (mode === 'copy' && count(bytesNeeded) > 0) return 'confirm';
-  if (addN + removeN > PLAN_OP_THRESHOLD) return 'confirm';
-  if (removeN > 0) return 'confirm';
+export function classifyPlan ({ mode, add = 0, bytesNeeded = 0, cloud = false } = {}) {
+  if (mode !== 'copy') return 'auto';
+  const ceiling = cloud ? CLOUD_COPY_BYTES_AUTO_MAX : COPY_BYTES_AUTO_MAX;
+  if (count(bytesNeeded) > ceiling) return 'confirm';
+  if (count(add) > COPY_ADD_AUTO_MAX) return 'confirm';
   return 'auto';
 }
 
@@ -869,7 +963,13 @@ async function computeSyncPlan (exportDef, { mediaItems, fs = defaultFsFacade } 
     }
   }
 
-  const classification = classifyPlan({ mode, add: addKeys, remove: removeKeys, bytesNeeded });
+  const classification = classifyPlan({
+    mode,
+    add: addKeys,
+    remove: removeKeys,
+    bytesNeeded,
+    cloud: isCloudSyncPath(exportRoot)
+  });
 
   const warnings = [];
   if (skippedNoSource > 0) warnings.push({ code: 'post-only-skipped', count: skippedNoSource });
@@ -1130,6 +1230,18 @@ function settleSyncJob (job, out) {
 
 // --- Bulk sync entry points -----------------------------------------------
 
+// A copy that would use more than 90% of free space stays Pending and writes
+// nothing. Shared by the row Sync button and by the download-completion auto-apply.
+async function rejectCopyForSpace (slug, plan, fs) {
+  if (plan.mode !== 'copy' || !(plan.bytesNeeded > 0)) return null;
+  const available = await availableBytesNear(plan.exportRoot, fs);
+  if (available != null && plan.bytesNeeded > 0.9 * available) {
+    setStatus(slug, { state: 'pending', reason: { code: 'insufficient-space' } });
+    return { error: 'insufficient-space', bytesNeeded: plan.bytesNeeded, available };
+  }
+  return null;
+}
+
 // Background entry used by the server route. Returns the plan + jobId in
 // milliseconds, then applies in the background under the per-export lock.
 export async function startBulkSync (slug, { mediaItems, fs = defaultFsFacade, schedule = (fn) => { setTimeout(fn, 0); } } = {}) {
@@ -1140,13 +1252,8 @@ export async function startBulkSync (slug, { mediaItems, fs = defaultFsFacade, s
   if (!planOutcome.ok) return { failSoft: true, code: planOutcome.code };
   const plan = planOutcome.value;
 
-  if (plan.mode === 'copy' && plan.bytesNeeded > 0) {
-    const available = await availableBytesNear(plan.exportRoot, fs);
-    if (available != null && plan.bytesNeeded > 0.9 * available) {
-      setStatus(slug, { state: 'pending', reason: { code: 'insufficient-space' } });
-      return { error: 'insufficient-space', bytesNeeded: plan.bytesNeeded, available };
-    }
-  }
+  const space = await rejectCopyForSpace(slug, plan, fs);
+  if (space) return space;
 
   const job = createJob(slug, plan);
   setStatus(slug, {
@@ -1309,16 +1416,17 @@ function scheduleReactiveSync (ids) {
 // --- Download-completion hook ---------------------------------------------
 //
 // New downloads only ADD canonical files, so every export (annotation-based
-// AND metadata-only, e.g. model=X) may gain matching items. Trivial plans
-// (link-mode adds under the threshold) auto-apply; anything that would
-// classify as `confirm` (a large or copy-mode operation) is marked Pending
-// for the user to confirm, honouring the plan-and-confirm gate.
+// AND metadata-only, e.g. model=X) may gain matching items. A plan that
+// classifies as `auto` applies. A large copy stays Pending for Sync.
+// A copy that would fill the disk stays Pending with `insufficient-space`
+// and writes nothing. Startup reconcile is a different walk and does not
+// apply.
 
 export function notifyDownloadCompleted () {
   Promise.resolve().then(() => reconcileAndAutoApply()).catch(() => {});
 }
 
-async function reconcileAndAutoApply ({ mediaItems, fs = defaultFsFacade } = {}) {
+export async function reconcileAndAutoApply ({ mediaItems, fs = defaultFsFacade } = {}) {
   const list = await listExports();
   for (const exp of list) {
     await withLiveExport(exp.slug, async (rec) => {
@@ -1330,6 +1438,8 @@ async function reconcileAndAutoApply ({ mediaItems, fs = defaultFsFacade } = {})
         return;
       }
       if (plan.classification === 'auto') {
+        const space = await rejectCopyForSpace(rec.slug, plan, fs);
+        if (space) return;
         const job = createJob(rec.slug, plan);
         await applySyncPlan(rec, plan, { fs, job });
       } else {
@@ -1351,6 +1461,81 @@ async function reconcileAndAutoApply ({ mediaItems, fs = defaultFsFacade } = {})
 // on the next sync. Non-applying + fail-soft, so a missing drive at boot never
 // throws.
 
+const MEMBERSHIP_VERSION = 1;
+
+function membershipPath () {
+  if (!CONFIG?.dataPath) return null;
+  return path.join(CONFIG.dataPath, 'index', 'export-membership.json');
+}
+
+function sha256Text (text) {
+  return createHash('sha256').update(String(text)).digest('hex');
+}
+
+function queryIsTimeRelative (query) {
+  const q = sanitizeQuery(query || {});
+  return ['publication', 'status', 'inPost'].some((key) => q[key] != null && q[key] !== '');
+}
+
+function membershipQueryToken (exp) {
+  const q = sanitizeQuery(exp?.query || {});
+  const stable = {};
+  for (const key of Object.keys(q).sort()) stable[key] = q[key];
+  return sha256Text(JSON.stringify(stable) + '\n' + (exp?.includeInputMedia === true));
+}
+
+async function corpusToken () {
+  const root = CONFIG?.dataPath;
+  if (!root) return '';
+  const rels = [
+    'index/generations.ndjson',
+    'index/posts.ndjson',
+    'index/comics.ndjson',
+    'index/model3ds.ndjson',
+    'index/media-file-dims.json',
+    'index/ace-audio-id3.json',
+    'media-item-aliases.json',
+    'overrides/annotations.json',
+    'tag-cache/tags.ndjson',
+    'model-cache/own-models.json',
+    'model-cache/versions.ndjson'
+  ];
+  const lines = [];
+  for (const rel of rels) {
+    try {
+      const st = await nodeFs.stat(path.join(root, rel));
+      lines.push(`${rel}\t${st.size}\t${st.mtimeMs}`);
+    } catch {
+      lines.push(`${rel}\tabsent`);
+    }
+  }
+  return sha256Text(lines.join('\n'));
+}
+
+async function readMembership () {
+  const filepath = membershipPath();
+  if (!filepath) return null;
+  try {
+    const parsed = JSON.parse(await readFile(filepath));
+    if (!parsed || parsed._version !== MEMBERSHIP_VERSION || !parsed.exports) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function desiredFromMembership (row) {
+  const ids = row?.ids;
+  if (!Array.isArray(ids)) return null;
+  const resolved = [];
+  for (const id of ids) {
+    const item = getMediaItemById(id);
+    if (!item) return null;
+    resolved.push(item);
+  }
+  return resolved;
+}
+
 export async function reconcileExports ({ mediaItems, fs = defaultFsFacade } = {}) {
   if (reconcileBarrier) {
     const barrier = reconcileBarrier;
@@ -1359,13 +1544,45 @@ export async function reconcileExports ({ mediaItems, fs = defaultFsFacade } = {
   }
   await rebuildDependencyMap().catch(() => {});
   const list = await listExports();
+  const useMemory = mediaItems == null;
+  const corpus = useMemory ? await corpusToken() : '';
+  const stored = useMemory ? await readMembership() : null;
+  const remembered = stored && stored.corpus === corpus ? stored.exports : null;
+  const staged = {};
+  let stageStable = true;
+
   for (const exp of list) {
     // Yield so a page request can run. Do not call the Explorer idle
     // gate: a status GET must not own this walk.
     await new Promise((resolve) => { setImmediate(resolve); });
     await failSoft(exp.slug, async () => {
       const exportRoot = resolveExportRoot(exp);
-      const desired = await evaluateExportInBatches(exp, { mediaItems });
+      const timeRelative = queryIsTimeRelative(exp.query);
+      const token = membershipQueryToken(exp);
+      let desired = null;
+      if (useMemory && !timeRelative && remembered?.[exp.slug]?.query === token) {
+        desired = desiredFromMembership(remembered[exp.slug]);
+      }
+      if (!desired) {
+        const before = useMemory && !timeRelative ? await corpusToken() : '';
+        desired = await evaluateExportInBatches(exp, { mediaItems });
+        if (useMemory && !timeRelative) {
+          const after = await corpusToken();
+          if (before && before === after) {
+            staged[exp.slug] = {
+              query: token,
+              ids: desired.map((item) => item?.id).filter((id) => id != null && id !== '')
+            };
+          } else {
+            stageStable = false;
+          }
+        }
+      } else if (useMemory && !timeRelative) {
+        staged[exp.slug] = {
+          query: token,
+          ids: desired.map((item) => item?.id).filter((id) => id != null && id !== '')
+        };
+      }
       const onDisk = await walkExportKeys(exportRoot, { fs });
       const { desiredMap } = await collectDesiredSources(desired, { fs, onDiskSet: new Set(onDisk) });
       const { add, remove } = diff([...desiredMap.keys()], onDisk);
@@ -1381,6 +1598,17 @@ export async function reconcileExports ({ mediaItems, fs = defaultFsFacade } = {
       return null;
     }).catch(() => { /* fail-soft already recorded a Pending reason */ });
   }
+
+  if (!useMemory || !stageStable) return;
+  const cacheable = list.filter((exp) => !queryIsTimeRelative(exp.query));
+  if (!cacheable.length || !cacheable.every((exp) => staged[exp.slug])) return;
+  const filepath = membershipPath();
+  if (!filepath) return;
+  await writeFile(filepath, {
+    _version: MEMBERSHIP_VERSION,
+    corpus,
+    exports: staged
+  });
 }
 
 // =========================================================================
@@ -1403,14 +1631,7 @@ export async function reconcileExports ({ mediaItems, fs = defaultFsFacade } = {
 // already computed inside computeSyncPlan, so the caller decides auto-apply vs
 // confirm without re-deriving the threshold. Fail-soft on an offline
 // destination (same codes as sync).
-export async function planExport (slug, { mediaItems, fs = defaultFsFacade } = {}) {
-  const exportDef = await readExport(slug);
-  if (!exportDef) return { error: 'not-found' };
-
-  const planOutcome = await failSoft(slug, () => computeSyncPlan(exportDef, { mediaItems, fs }));
-  if (!planOutcome.ok) return { failSoft: true, code: planOutcome.code };
-  const plan = planOutcome.value;
-
+function planPayload (plan, extra = {}) {
   return {
     dryRun: true,
     classification: plan.classification, // 'auto' | 'confirm'
@@ -1420,8 +1641,58 @@ export async function planExport (slug, { mediaItems, fs = defaultFsFacade } = {
     bytesNeeded: plan.bytesNeeded,
     estimatedSeconds: plan.estimatedSeconds,
     desiredCount: plan.desiredCount,
-    warnings: plan.warnings
+    warnings: plan.warnings,
+    ...extra
   };
+}
+
+async function planOf (exportDef, { mediaItems, fs }) {
+  try {
+    const plan = await computeSyncPlan(exportDef, { mediaItems, fs });
+    return { ok: true, plan };
+  } catch (error) {
+    if (FAIL_SOFT_CODES.has(error?.code)) return { ok: false, code: error.code };
+    throw error;
+  }
+}
+
+export async function planExport (slug, { mediaItems, fs = defaultFsFacade } = {}) {
+  const exportDef = await readExport(slug);
+  if (!exportDef) return { error: 'not-found' };
+
+  const planOutcome = await failSoft(slug, () => computeSyncPlan(exportDef, { mediaItems, fs }));
+  if (!planOutcome.ok) return { failSoft: true, code: planOutcome.code };
+  return planPayload(planOutcome.value);
+}
+
+// Plan a candidate edit or create without writing the export, removing the
+// old folder, or marking the saved export Pending. `slug` is the export
+// being edited. Omit it to plan a new export; the derived slug is not reserved.
+export async function planExportDraft (draft = {}, { slug, mediaItems, fs = defaultFsFacade } = {}) {
+  const name = String(draft.name ?? '').trim();
+  if (!name) return { error: 'name-required' };
+  const existing = slug ? await readExport(slug) : null;
+  if (slug && !existing) return { error: 'not-found' };
+
+  const resolvedSlug = existing
+    ? existing.slug
+    : deriveSlug(name, await listSlugsOnDisk());
+  const pathText = draft.path !== undefined ? String(draft.path).trim() : '';
+  const exportDef = {
+    slug: resolvedSlug,
+    name,
+    type: existing?.type || 'smart',
+    query: sanitizeQuery(draft.query || {}),
+    path: pathText || existing?.path || `media/exports/${resolvedSlug}`,
+    linkMode: draft.linkMode || existing?.linkMode || 'auto',
+    includeInputMedia: typeof draft.includeInputMedia === 'boolean'
+      ? draft.includeInputMedia
+      : existing?.includeInputMedia === true
+  };
+
+  const planned = await planOf(exportDef, { mediaItems, fs });
+  if (!planned.ok) return { failSoft: true, code: planned.code };
+  return planPayload(planned.plan, { slug: resolvedSlug, path: exportDef.path });
 }
 
 // --- delete-with-files removal --------------------------------------------
@@ -1639,6 +1910,52 @@ async function pruneDirIfEmpty (dir, fs) {
     catch (error) { if (error?.code === 'ENOENT') return true; throw tagDestination(error); }
   }
   return false;
+}
+
+// How many files Delete files would unlink. An empty or missing folder is 0.
+// The read does not delete. An owned folder counts every file the tree
+// removal would take, including a probe file. A custom folder counts this
+// export's files and the probe file only.
+async function countTreeFiles (root, fs) {
+  let count = 0;
+  async function walk (dir) {
+    let entries;
+    try {
+      entries = await fs.readdir(dir);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return;
+      throw error;
+    }
+    for (const ent of entries) {
+      const name = ent?.name;
+      if (!name) continue;
+      const isDir = typeof ent.isDirectory === 'function' && ent.isDirectory();
+      if (isDir) await walk(path.join(dir, name));
+      else count++;
+    }
+  }
+  await walk(root);
+  return count;
+}
+
+export async function countRemovalFiles (slug, { fs: injected } = {}) {
+  const fs = fsFor(injected);
+  const exportDef = await readExport(slug);
+  if (!exportDef) return { error: 'not-found' };
+  const classified = await classifyRemovalRoot(exportDef, fs, await listExports());
+  if (classified.error) return { error: classified.error, code: classified.code };
+  if (classified.absent) return { files: 0 };
+  try {
+    if (classified.kind === 'owned') {
+      return { files: await countTreeFiles(classified.root, fs) };
+    }
+    const keys = await walkExportKeys(classified.root, { fs });
+    const probes = await listProbeNames(classified.root, fs);
+    const materialised = keys.filter(isMaterialisedExportKey).length;
+    return { files: materialised + probes.length };
+  } catch (error) {
+    return { error: 'incomplete', code: error?.code || 'EIO' };
+  }
 }
 
 // Delete files. The record stays when the folder could not be verified gone.

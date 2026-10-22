@@ -14,9 +14,11 @@
 //   4. Freeform `meta.Model` string (external/off-site tooling per
 //      image-onsite.ts) → synthetic checkpoint with modelName only.
 //   5. Display label at READ time via resolveModelGroupKey /
-//      hydrateResource / hydrateItemForDisplay — if versionId is set and
-//      modelName is empty/'(unknown)', resolve through the model-version
-//      cache. A resolvable versionId must not land in the No model bucket.
+//      resolveResourceVersionName / hydrateResource / hydrateItemForDisplay.
+//      A resolvable versionId must not land in the No model bucket, and
+//      must not land in the Unknown version section. Version name is
+//      cache data.name, then the recorded versionName. The line stub
+//      Version <id> is not a version name.
 //      Cache-offline stub is `Version ${versionId}` (stable on the id until
 //      refresh fills the line name). The lightbox detail payload uses the
 //      same seam so `(unknown)` never ships as a user-facing line name;
@@ -46,9 +48,12 @@ function versionKey (r) {
 }
 
 /**
- * Union decomposed resource slots. Primary wins on versionId; extras
- * without a versionId append when modelName is not already present.
- * Media-item projection only — generation entries stay job-shaped.
+ * Union decomposed resource slots. Primary wins on versionId. A later row
+ * with that id does not replace strength or type; it fills a missing
+ * version name, model name, model id, base model, or AIR onto a clone.
+ * Extras without a versionId append when modelName is not already present.
+ * Media-item projection only — generation entries stay job-shaped. The
+ * caller must point the media item at the returned checkpoint.
  *
  * @param {object[]} [primary]
  * @param {object[]} [extra]
@@ -74,7 +79,17 @@ export function unionDecomposedSlots (primary = [], extra = []) {
     if (!r || typeof r !== 'object') continue;
     const vk = versionKey(r);
     if (vk) {
-      if (seenVersion.has(vk)) continue;
+      if (seenVersion.has(vk)) {
+        const idx = resources.findIndex(slot => versionKey(slot) === vk);
+        if (idx !== -1) {
+          const filled = fillIdentityHoles(resources[idx], r);
+          if (filled) {
+            resources[idx] = filled;
+            remember(filled);
+          }
+        }
+        continue;
+      }
       seenVersion.add(vk);
       resources.push(r);
       remember(r);
@@ -141,6 +156,78 @@ export function decomposeCivitaiMetaResource (r) {
     air: r.air,
     strength: r.strength ?? r.weight
   });
+}
+
+function finiteVersionId (value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function mapPostedResourceRow (r) {
+  if (!r || typeof r !== 'object') return null;
+  const modelVersionId = finiteVersionId(r.modelVersionId)
+    ? r.modelVersionId
+    : (finiteVersionId(r.versionId) ? r.versionId : null);
+  if (modelVersionId == null) return null;
+  const row = { modelVersionId };
+  const typeRaw = r.modelType ?? r.type;
+  if (typeof typeRaw === 'string' && typeRaw) row.type = typeRaw.toLowerCase();
+  const weightRaw = r.strength ?? r.weight;
+  if (typeof weightRaw === 'number' && Number.isFinite(weightRaw)) row.weight = weightRaw;
+  const versionName = r.versionName ?? r.modelVersionName;
+  if (typeof versionName === 'string' && versionName) row.modelVersionName = versionName;
+  if (typeof r.modelName === 'string' && r.modelName) row.modelName = r.modelName;
+  if (r.modelId != null && r.modelId !== '') row.modelId = r.modelId;
+  if (typeof r.baseModel === 'string' && r.baseModel) row.baseModel = r.baseModel;
+  return row;
+}
+
+function nonEmptyMetaObject (meta) {
+  return meta && typeof meta === 'object' && !Array.isArray(meta) && Object.keys(meta).length
+    ? meta
+    : null;
+}
+
+/**
+ * One view of a post image or comic panel for index projection and input
+ * URLs. A non-empty `image.meta` wins over `generationData.meta`. Sibling
+ * `techniques`, `imageResources`, and `process` on the image win when
+ * present, including an empty techniques or resources array. Withheld meta
+ * (`hideMeta` or `hasMeta === false`) does not fall through to the body.
+ * Older files keep the split fields when no body is stored.
+ *
+ * @param {object|null|undefined} image
+ * @returns {{ meta: object|null, process: string|undefined, techniques: object[]|undefined, imageResources: object[] }}
+ */
+export function postedGenerationView (image) {
+  const withheld = image?.hideMeta === true || image?.hasMeta === false;
+  const body = image && image.generationData;
+  const bodyOk = !!(body && typeof body === 'object' && !Array.isArray(body));
+  const imageMeta = withheld ? null : nonEmptyMetaObject(image?.meta);
+  const bodyMeta = withheld || !bodyOk ? null : nonEmptyMetaObject(body.meta);
+  const meta = imageMeta || bodyMeta;
+
+  const imageProcess = image && typeof image.process === 'string' && image.process ? image.process : undefined;
+  const bodyProcess = bodyOk && typeof body.process === 'string' && body.process ? body.process : undefined;
+
+  const techniques = image && Array.isArray(image.techniques)
+    ? image.techniques
+    : (bodyOk && Array.isArray(body.techniques) ? body.techniques : undefined);
+
+  let imageResources;
+  if (image && Array.isArray(image.imageResources)) {
+    imageResources = image.imageResources;
+  } else if (bodyOk && Array.isArray(body.resources)) {
+    imageResources = body.resources.map(mapPostedResourceRow).filter(Boolean);
+  } else {
+    imageResources = image && Array.isArray(image.imageResources) ? image.imageResources : [];
+  }
+
+  return {
+    meta,
+    process: imageProcess || bodyProcess,
+    techniques,
+    imageResources
+  };
 }
 
 function syntheticCheckpoint ({ modelName, versionId, baseModel, ecosystem }) {
@@ -238,6 +325,67 @@ export function resolveCheckpoint ({ resources = [], meta = null, params = {}, s
   return { resources: [], checkpoint: null };
 }
 
+function blankIdentityName (value) {
+  return value == null || value === '' || UNKNOWN_NAMES.has(value);
+}
+
+/**
+ * Copy identity fields the earlier slot lacks. Strength and type stay.
+ * Returns a new object, or null when the earlier slot already has each field.
+ * The earlier object is not mutated, so a generation entry that shares it
+ * stays job-shaped.
+ *
+ * @param {object} keeper
+ * @param {object} extra
+ * @returns {object|null}
+ */
+function fillIdentityHoles (keeper, extra) {
+  if (!extra || typeof extra !== 'object') return null;
+  let next = null;
+  const write = (field, value) => {
+    if (!next) next = { ...keeper };
+    next[field] = value;
+  };
+  if (blankIdentityName(keeper.versionName) && !blankIdentityName(extra.versionName)) {
+    write('versionName', extra.versionName);
+  }
+  if (blankIdentityName(keeper.modelName) && !blankIdentityName(extra.modelName)) {
+    write('modelName', extra.modelName);
+  }
+  if ((keeper.modelId == null || keeper.modelId === '') && extra.modelId != null && extra.modelId !== '') {
+    write('modelId', extra.modelId);
+  }
+  if ((keeper.baseModel == null || keeper.baseModel === '') && extra.baseModel) {
+    write('baseModel', extra.baseModel);
+  }
+  if ((!keeper.air || !keeper.air.ecosystem) && extra.air?.ecosystem) {
+    write('air', extra.air);
+  }
+  return next;
+}
+
+/**
+ * Read-time version name for one resource. Cache `data.name`, then a
+ * recorded `versionName`. Empty when neither is present — callers that
+ * need a visible stub add `Version <id>` themselves. Never the line name.
+ *
+ * @param {object|null|undefined} resource
+ * @param {(id: number|string) => object|null} [getModelVersion]
+ * @returns {string}
+ */
+export function resolveResourceVersionName (resource, getModelVersion = () => null) {
+  if (!resource || typeof resource !== 'object') return '';
+  const cached = resource.versionId != null && resource.versionId !== '' && typeof getModelVersion === 'function'
+    ? getModelVersion(resource.versionId)
+    : null;
+  const cacheName = cached?.data?.name;
+  if (typeof cacheName === 'string' && cacheName) return cacheName;
+  if (typeof resource.versionName === 'string' && resource.versionName && !UNKNOWN_NAMES.has(resource.versionName)) {
+    return resource.versionName;
+  }
+  return '';
+}
+
 /**
  * Read-time line name for one decomposed resource. Same stub rules as
  * treeNodeLabel: cache model name → recorded modelName → `Model ${id}` →
@@ -316,7 +464,7 @@ export function hydrateResource (r, getModelVersion = () => null) {
   const modelId = r.modelId ?? data.model?.id ?? data.modelId ?? null;
   const recordedName = r.modelName && !UNKNOWN_NAMES.has(r.modelName) ? r.modelName : null;
   const modelName = recordedName || data.model?.name || r.modelName;
-  const versionName = r.versionName || data.name || null;
+  const versionName = resolveResourceVersionName(r, getModelVersion) || null;
   let air = r.air;
   if (!air?.ecosystem && typeof data.air === 'string' && data.air) {
     air = parseAir(data.air) || air;

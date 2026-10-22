@@ -55,11 +55,10 @@ export function readHistoryFocus () {
   }
 }
 
-export function shouldLoadFocusPrefix (focus, { loading, itemCount, hasMore } = {}) {
+export function shouldLoadFocusPrefix (focus, { loading, hasMore, idFound } = {}) {
   if (!focus || loading || !hasMore) return false;
-  const index = Number(focus.index);
-  if (!Number.isFinite(index)) return false;
-  return itemCount <= index;
+  if (idFound) return false;
+  return true;
 }
 
 export function openOriginNode (e, { href, bag } = {}) {

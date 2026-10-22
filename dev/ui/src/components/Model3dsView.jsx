@@ -9,7 +9,13 @@ import { formatDate } from '../lib/format.js';
 import { model3dFileRows, model3dShownFormat, viewableMeshFiles } from '../lib/param-display.js';
 import { FacetBar } from './FacetBar.jsx';
 import { DetailPage } from './DetailPage.jsx';
+import { OriginSiblingNav } from './OriginSiblingNav.jsx';
 import { EntityHeader } from './EntityHeader.jsx';
+import { containerFilterChips } from '../lib/filter-chips.js';
+import { containerUnfilteredHref } from '../lib/media-href.js';
+import { useScopeChipTree } from '../lib/scope-chip-tree.js';
+import { useOwnModelsKnown } from '../lib/own-models-rev.js';
+import { MODEL3D_PUBLICATION_LABELS } from '../lib/publication.js';
 import { OpenFolderButton } from './OpenFolderButton.jsx';
 import { useMagicEscape } from '../hooks/useMagicEscape.js';
 import { ActiveMesh, MeshViewport, useMeshHost } from './MeshStage.jsx';
@@ -27,11 +33,7 @@ const PUBLICATION_FACET = {
   kind: 'chips',
   label: 'Publication',
   options: ['published', 'draft', 'unpublished'],
-  optionLabels: {
-    published: 'Published',
-    draft: 'Draft',
-    unpublished: 'Unpublished'
-  }
+  optionLabels: MODEL3D_PUBLICATION_LABELS
 };
 
 const SORT_FIELDS = [{ value: 'date', label: 'Date' }];
@@ -42,10 +44,9 @@ const GROUP_AXES = [
 ];
 
 function statusLabel (status) {
-  if (status === 'published' || status === 'Published') return 'Published';
-  if (status === 'draft' || status === 'Draft') return 'Draft';
-  if (status === 'unpublished' || status === 'Unpublished') return 'Unpublished';
-  return '';
+  if (status == null || status === '') return '';
+  const raw = String(status);
+  return MODEL3D_PUBLICATION_LABELS[raw] || MODEL3D_PUBLICATION_LABELS[raw.toLowerCase()] || '';
 }
 
 function stillSrc (item) {
@@ -176,8 +177,10 @@ function backToList () {
   pushState({ view: 'model3ds', entityId: null });
 }
 
-function Model3dDetail ({ id }) {
+function Model3dDetail ({ id, params }) {
   useMagicEscape();
+  const modelTree = useScopeChipTree(params && params.models);
+  const ownKnown = useOwnModelsKnown();
   const [data, setData] = useState(null);
   const [failed, setFailed] = useState(false);
   const meshPref = useMeshViewerPref();
@@ -187,11 +190,18 @@ function Model3dDetail ({ id }) {
   const [meshReady, setMeshReady] = useState(false);
   const [meshPath, setMeshPath] = useState('');
 
+  const paramsKey = JSON.stringify(params || {});
+  // An id change blanks, the same as the first load. A query change keeps
+  // the open model until the new origin arrives.
+  useEffect(() => {
+    setFailed(false);
+    setData(null);
+  }, [id]);
+
   useEffect(() => {
     let stale = false;
     setFailed(false);
-    setData(null);
-    getModel3d(id).then(body => {
+    getModel3d(id, params).then(body => {
       if (stale) return;
       if (!body || body.error || !body.index) setFailed(true);
       else setData(body);
@@ -199,7 +209,7 @@ function Model3dDetail ({ id }) {
       if (!stale) setFailed(true);
     });
     return () => { stale = true; };
-  }, [id]);
+  }, [id, paramsKey]);
 
   const entry = data && data.index;
   const when = detailIso(entry);
@@ -252,9 +262,16 @@ function Model3dDetail ({ id }) {
     <DetailPage
       flow
       scrollKey={entry.id || id}
+      chrome={<OriginSiblingNav origin={entry && entry.origin} routeParams={params} />}
       sidebar={(
         <>
-          <EntityHeader title={entry.name} label="3D" date={when} />
+          <EntityHeader
+            title={entry.name}
+            label="3D"
+            date={when}
+            href={containerUnfilteredHref('model3ds', entry.id || id, params)}
+            filters={containerFilterChips('model3ds', entry.id || id, params, { modelTree, ownKnown })}
+          />
           {label ? (
             <div class="meta-section">
               <h2 class="meta-label">Status</h2>
@@ -291,6 +308,7 @@ function Model3dDetail ({ id }) {
     >
       <MeshViewport
         stillSrc={stillSrc(entry)}
+        reactions={entry.stillReactions}
         enabled={meshPref.enabled}
         onToggle={() => {
           if (meshPref.enabled) {
@@ -336,7 +354,7 @@ function Model3dDetail ({ id }) {
   );
 }
 
-export function Model3dsView ({ entityId }) {
-  if (entityId) return <Model3dDetail id={entityId} />;
+export function Model3dsView ({ entityId, params }) {
+  if (entityId) return <Model3dDetail id={entityId} params={params} />;
   return <Model3dList />;
 }

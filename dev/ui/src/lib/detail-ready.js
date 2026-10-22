@@ -138,6 +138,10 @@ function prefetchChunk (view) {
   return Promise.resolve();
 }
 
+export function invalidateDetailCache () {
+  cache.clear();
+}
+
 export function loadMediaDetail (id, params, anchor) {
   return getMediaDetail(id, {
     origin: fileOriginFrom(params) || undefined,

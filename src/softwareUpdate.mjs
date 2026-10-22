@@ -3,6 +3,7 @@
 // import confirm from '@inquirer/confirm';
 import { mkdirp } from 'mkdirp';
 import { fetchModel, fetchFile } from './civitaiApi.mjs';
+import { runAsBackground } from './requestScheduler.mjs';
 import { fileExists, readFile, writeFile, listFiles, listDirectories, rename, unlink, rm, cp } from './utils.mjs';
 import { APP_DIRECTORY, CURRENT_VERSION, SOFTWARE, applySoftwareCache } from './cli.mjs';
 import { civitaiUrl } from './civitaiDomain.mjs';
@@ -28,7 +29,7 @@ const HTML_FIRST_PARAGRAPH = /<p>(.*?)<\/p>/;
 const SOFTWARE_UPDATE_CHECK_EVERY = 12; // hours
 
 export async function fetchModelLatestVersion (modelId) {
-  const model = await fetchModel(modelId);
+  const model = await runAsBackground(() => fetchModel(modelId));
 
   if (model.error) {
     return null;
@@ -200,7 +201,7 @@ export async function downloadSoftwareUpdate (url, version, { secretKey } = {}) 
 
   try {
     console.log('Downloading software');
-    await fetchFile(url, zipTmpFilepath, { secretKey });
+    await runAsBackground(() => fetchFile(url, zipTmpFilepath, { secretKey }));
     await rename(zipTmpFilepath, zipFilepath);
   }
 

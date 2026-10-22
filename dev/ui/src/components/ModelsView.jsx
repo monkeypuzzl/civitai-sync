@@ -1,5 +1,5 @@
 import { Fragment } from 'preact';
-import { useState, useEffect, useMemo, useCallback } from 'preact/hooks';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'preact/hooks';
 import { getModels, getMedia } from '../api.js';
 import { familyIsSelected, variantRowsForSection } from '../lib/model-catalog-filters.js';
 import { familyCatalogParams } from '../lib/family-catalog-params.js';
@@ -19,6 +19,8 @@ import {
   shouldLoadFocusPrefix,
   readHistoryFocus
 } from '../lib/open-origin-node.js';
+import { resolveFocusId } from '../lib/gallery-focus.js';
+import { useIndexEpoch } from '../lib/index-settle.js';
 import { modelsTypeHref } from '../lib/detail-resources.js';
 import { modelsOriginQuery } from '../lib/media-href.js';
 import { useDocumentTitle } from '../lib/page-title.js';
@@ -452,17 +454,20 @@ function VersionStrip ({ versions, shownVersionId, entityId }) {
 
 function FamilyGallery ({ familyId, urlState }) {
   const { sort } = urlState;
-  const query = useMemo(() => ({ familyId, sort }), [familyId, sort]);
+  const query = useMemo(() => ({ models: `family.${familyId}`, sort }), [familyId, sort]);
+  const reloadEpoch = useIndexEpoch();
   const { items, loading, sentinelRef, hasMore, loadMore, pending } = useGalleryData({
     fetcher: getMedia,
-    query
+    query,
+    reloadEpoch
   });
 
   useEffect(() => {
-    if (shouldLoadFocusPrefix(readHistoryFocus(), { loading, itemCount: items.length, hasMore })) {
+    const focus = readHistoryFocus();
+    if (shouldLoadFocusPrefix(focus, { loading, hasMore, idFound: resolveFocusId(items, focus) != null })) {
       loadMore();
     }
-  }, [loading, items.length, hasMore, loadMore]);
+  }, [loading, items, hasMore, loadMore]);
 
   const originParams = useMemo(
     () => modelsOriginQuery('', { sort, familyId }),
@@ -511,17 +516,20 @@ function FamilyGallery ({ familyId, urlState }) {
 function ModelLeafGallery ({ versionId, urlState }) {
   const { sort } = urlState;
 
-  const query = useMemo(() => ({ versionId, sort }), [versionId, sort]);
+  const query = useMemo(() => ({ models: `version.${versionId}`, sort }), [versionId, sort]);
+  const reloadEpoch = useIndexEpoch();
   const { items, loading, sentinelRef, hasMore, loadMore, pending } = useGalleryData({
     fetcher: getMedia,
-    query
+    query,
+    reloadEpoch
   });
 
   useEffect(() => {
-    if (shouldLoadFocusPrefix(readHistoryFocus(), { loading, itemCount: items.length, hasMore })) {
+    const focus = readHistoryFocus();
+    if (shouldLoadFocusPrefix(focus, { loading, hasMore, idFound: resolveFocusId(items, focus) != null })) {
       loadMore();
     }
-  }, [loading, items.length, hasMore, loadMore]);
+  }, [loading, items, hasMore, loadMore]);
 
   const originParams = useMemo(
     () => modelsOriginQuery(versionId, { sort }),
@@ -572,19 +580,24 @@ export function ModelsView ({ entityId }) {
   const [urlState, updateUrl] = useUrlState(URL_SCHEMA);
   const { resourceType, family, variant, modelVersionId, familyId, mine } = urlState;
   const ownRev = useOwnModelsRevision();
+  const indexEpoch = useIndexEpoch();
   const modelId = entityId ? idFromToken(entityId) : null;
   const isPage = Boolean(modelId);
 
   const [payload, setPayload] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchKey = isPage
-    ? `page:${modelId}:${modelVersionId}:${ownRev}`
-    : `catalog:${resourceType.join(',')}|${family.join(',')}|${variant.join(',')}|${mine ? 1 : 0}|${ownRev}`;
+  const identity = isPage
+    ? `page:${modelId}:${modelVersionId}`
+    : `catalog:${resourceType.join(',')}|${family.join(',')}|${variant.join(',')}|${mine ? 1 : 0}`;
+  const fetchKey = `${identity}:${ownRev}:${indexEpoch}`;
+  const identityRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    const samePage = identityRef.current === identity;
+    identityRef.current = identity;
+    if (!samePage) setLoading(true);
     const req = isPage
       ? getModels({ modelId, versionId: modelVersionId || undefined })
       : getModels({ resourceType, family, variant, mine: mine ? '1' : '' });

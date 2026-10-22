@@ -4,7 +4,12 @@ import path from 'node:path';
 import { writeFile, readFile, fileExists, toDateString } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
 import { downloadMediaFile } from './mediaDownload.mjs';
+import { mapPool, MEDIA_POOL_WIDTH } from './requestScheduler.mjs';
+import { applyStorageFault } from './downloadFault.mjs';
+import { flushFetchMiss } from './fetchMiss.mjs';
 import { getCivitaiImageBase } from './civitaiApi.mjs';
+import { byteMissKeepsOpen, markContainerOpen, commitOpenContainer } from './downloadOpen.mjs';
+import { comparableDownloadJson } from './signedUrl.mjs';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -133,36 +138,58 @@ function thumbSourceUrl (image, cdnBase) {
   return '';
 }
 
-async function downloadOne (url, full, signal) {
+async function downloadOne (url, full, signal, report) {
   if (!url) return false;
   if (signal && signal.aborted) return false;
   const result = await downloadMediaFile(url, full, { signal });
+  if (report && applyStorageFault(report, result)) return false;
   if (result.status === 'aborted') return false;
+  if (report && byteMissKeepsOpen(result)) report.incomplete = true;
   return result.status === 'published' || result.status === 'skipped' || await fileExists(full);
 }
 
 export async function saveModel3dMedia (model, { signal, secretKey } = {}) {
   const report = { filesSaved: 0, aborted: false, thumbPath: '', planned: [] };
+  try {
   const place = containerDir(model);
   if (!place) return report;
 
   const planned = planFiles(model, place);
-  for (const row of planned) {
-    if (signal && signal.aborted) {
+  let opening = null;
+  const ensureOpen = () => {
+    if (CONFIG.downloadMedia === false) return Promise.resolve();
+    if (!opening) {
+      opening = markContainerOpen(model, (doc) => commitOpenContainer(doc, 'model3ds', async (body) => {
+        const filepath = model3dFilepath({ id: body.id, createdAt: body.createdAt });
+        if (!filepath) return '';
+        await writeFile(filepath, JSON.stringify(body, null, 2));
+        return filepath;
+      }));
+    }
+    return opening;
+  };
+
+  await mapPool(planned, MEDIA_POOL_WIDTH, async (row, _index, poolSignal) => {
+    const live = poolSignal || signal;
+    if (live && live.aborted) {
       report.aborted = true;
-      break;
+      return { stop: true };
     }
     const existed = await fileExists(row.full);
     if (!existed && row.url) {
-      const ok = await downloadOne(row.url, row.full, signal);
-      if (signal && signal.aborted) {
+      await ensureOpen();
+      const ok = await downloadOne(row.url, row.full, live, report);
+      if (report.fault === 'storage' || (live && live.aborted)) {
         report.aborted = true;
-        break;
+        return { stop: true };
       }
-      if (ok && !existed && await fileExists(row.full)) report.filesSaved += 1;
+      if (ok && await fileExists(row.full)) report.filesSaved += 1;
     }
     if (await fileExists(row.full)) report.planned.push(row);
-  }
+    return null;
+  }, { signal });
+  if (signal?.aborted) report.aborted = true;
+  if (report.aborted) return report;
 
   const source = thumbSourceUrl(model && model.thumbnailImage, '');
   let thumbUrl = source;
@@ -177,12 +204,16 @@ export async function saveModel3dMedia (model, { signal, secretKey } = {}) {
     if (insideDir(place.dir, full)) {
       const existed = await fileExists(full);
       if (!existed) {
-        const ok = await downloadOne(thumbUrl, full, signal);
+        await ensureOpen();
+        const ok = await downloadOne(thumbUrl, full, signal, report);
+        if (report.fault === 'storage') return report;
         if (ok && !existed && await fileExists(full)) report.filesSaved += 1;
       }
       if (await fileExists(full)) report.thumbPath = mediaUrl(place.date, place.idStr, filename);
     }
   }
+
+  if (signal?.aborted) report.aborted = true;
 
   if (!report.thumbPath) {
     for (const ext of ['png', 'jpeg']) {
@@ -195,6 +226,9 @@ export async function saveModel3dMedia (model, { signal, secretKey } = {}) {
   }
 
   return report;
+  } finally {
+    await flushFetchMiss();
+  }
 }
 
 function persistable (model, mediaReport) {
@@ -249,6 +283,8 @@ export async function saveModel3d (model, {
     mediaReport = await saveModel3dMedia(model, { signal, secretKey });
     report.filesSaved = mediaReport.filesSaved || 0;
     report.aborted = mediaReport.aborted === true;
+    if (mediaReport.fault) report.fault = mediaReport.fault;
+    if (report.fault === 'storage') return report;
   } else {
     const place = containerDir(model);
     if (place) {
@@ -269,14 +305,28 @@ export async function saveModel3d (model, {
     }
   }
 
-  const next = persistable(model, mediaReport);
+  let doc = model;
+  if (withImages && CONFIG.downloadMedia !== false) {
+    doc = { ...model };
+    const stopped = mediaReport.aborted === true || mediaReport.fault === 'storage';
+    if (mediaReport.incomplete === true || (stopped && model.downloadOpen === true)) doc.downloadOpen = true;
+    else delete doc.downloadOpen;
+  } else if (await fileExists(filepath)) {
+    try {
+      const prev = JSON.parse(await readFile(filepath));
+      if (prev.downloadOpen === true) doc = { ...model, downloadOpen: true };
+    } catch (ignoreErr) {
+      doc = model;
+    }
+  }
+  const next = persistable(doc, mediaReport);
   const text = JSON.stringify(next, null, 2);
   const exists = await fileExists(filepath);
   let changed = !exists;
   if (exists) {
     try {
       const prev = await readFile(filepath);
-      changed = prev !== text;
+      changed = comparableDownloadJson(JSON.parse(prev)) !== comparableDownloadJson(next);
     } catch (ignoreErr) {
       changed = true;
     }

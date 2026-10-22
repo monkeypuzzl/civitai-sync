@@ -8,10 +8,10 @@
 // Upstream path:   civitai-src/src/shared/generation/config/workflows.ts
 // Upstream range:  lines 171-468 (the `workflowConfigs` WorkflowConfigs export)
 // Upstream branch: main
-// Upstream commit: f6bbd3ded78ddbddc152bf74abb431ed68504999
+// Upstream commit: 103e59d87ce86c1e30b5c7af103352406f4a682a
 // Fields read:     object key (identifier), label, category, modeLabel (when set)
 //
-// Refreshed at:    2026-10-12T17:11:44.692Z
+// Refreshed at:    2026-10-22T17:10:23.162Z
 // Refresh by:      node dev/tools/refresh-vendored-civitai.mjs workflows
 // Verify drift:    node dev/tools/refresh-vendored-civitai.mjs verify
 //
@@ -48,11 +48,14 @@
 //   read label. Its output word is the same choice the badge just made
 //   (digit-leading keyword, otherwise the category with its first
 //   character upper-cased). One badge stores one expansion.
-//   Pass 5 writes display labels and reads label. A label that starts with
-//   the seven characters "Create " or equals the mode phrase is replaced
-//   (bare identifier → mode phrase; suffix after ":" → hyphen to space,
-//   then the first character of each word upper-cased). Every other row
-//   keeps its job label.
+//   Pass 5 writes display labels and reads label. A label equal to the
+//   mode phrase is replaced. A bare identifier becomes the mode phrase.
+//   A suffixed identifier becomes the suffix with hyphens turned into
+//   spaces and the first character of each word upper-cased, then
+//   prefixed with the input keyword and a space when that suffix does
+//   not already start with the keyword. The input keyword is the word
+//   pass 1 taught for the token before "2". A label that starts with
+//   "Create " is kept. Every other row keeps its job label.
 //   After those identity-row labels, bare-mode insertion sets each emitted
 //   mode that is not already a key to the mode phrase.
 //   Derivation rejection prints the capture-failure report and exits 5.
@@ -71,6 +74,11 @@ export const CIVITAI_WORKFLOWS = Object.freeze({
   "img2img": Object.freeze({
     "identifier": "img2img",
     "label": "Image Variations",
+    "category": "image"
+  }),
+  "img2img:avatar": Object.freeze({
+    "identifier": "img2img:avatar",
+    "label": "Avatar",
     "category": "image"
   }),
   "img2img:edit": Object.freeze({
@@ -248,23 +256,24 @@ export const WORKFLOW_ABBREVIATION_EXPANSIONS = Object.freeze({
 
 export const WORKFLOW_DISPLAY_LABELS = Object.freeze({
   "img2img":                   "Image Variations",
-  "img2img:edit":              "Edit",
+  "img2img:avatar":            "Avatar",
+  "img2img:edit":              "Image Edit",
   "img2img:face-fix":          "Image Face Fix",
   "img2img:hires-fix":         "Image Hires Fix",
   "img2img:preprocess":        "Control Preprocessor",
   "img2img:remove-background": "Remove Background",
   "img2img:upscale":           "Upscale",
-  "img2model3d":               "Image to 3D",
+  "img2model3d":               "Create 3D Model",
   "img2vid":                   "Image to Video",
   "img2vid:first-last":        "First/Last Frame",
   "img2vid:ref2vid":           "Reference to Video",
-  "txt2img":                   "Text to Image",
+  "txt2img":                   "Create Image",
   "txt2img:draft":             "Draft",
-  "txt2img:face-fix":          "Face Fix",
-  "txt2img:hires-fix":         "Hires Fix",
-  "txt2model3d":               "Text to 3D",
-  "txt2music":                 "Text to Music",
-  "txt2vid":                   "Text to Video",
+  "txt2img:face-fix":          "Create + Face Fix",
+  "txt2img:hires-fix":         "Create + Hires Fix",
+  "txt2model3d":               "Create 3D Model",
+  "txt2music":                 "Create Music",
+  "txt2vid":                   "Create Video",
   "vid2vid":                   "Video to Video",
   "vid2vid:edit":              "Edit Video",
   "vid2vid:extend":            "Extend Video",

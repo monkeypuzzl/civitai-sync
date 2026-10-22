@@ -34,7 +34,31 @@ export async function setReactionOptions () {
 }
 
 export async function runSyncDeleted () {
+  const { getAvailableSecretKey } = await import('./keyActions.mjs');
+  const { requireLibraryAccount } = await import('./accountIdentity.mjs');
+  const gate = await requireLibraryAccount(getAvailableSecretKey());
+  if (!gate.ok) {
+    console.log(gate.message);
+    return keyOptions({ clear: false });
+  }
   const { deleteAllDeletedMedia } = await import('./generations.mjs');
   await deleteAllDeletedMedia();
+  return keyOptions({ clear: false });
+}
+
+export async function runRecheckMetadata () {
+  const { getSecretKey } = await import('./keyActions.mjs');
+  const { listenForEscKeyPress } = await import('./downloadActions.mjs');
+  const { recheckSavedMetadata } = await import('./recheckMetadata.mjs');
+  const secretKey = await getSecretKey();
+  if (!secretKey) return keyOptions();
+  const esc = listenForEscKeyPress({
+    onAbort: () => console.log('Stopping…')
+  });
+  try {
+    await recheckSavedMetadata({ secretKey, signal: esc.signal });
+  } finally {
+    esc.stop();
+  }
   return keyOptions({ clear: false });
 }

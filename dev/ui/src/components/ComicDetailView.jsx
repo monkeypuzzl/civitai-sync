@@ -1,7 +1,9 @@
 import { useState, useEffect, useMemo, useRef } from 'preact/hooks';
 import { detailCacheKey, loadContainerDetail, prefetchOriginNeighbours, useHeldDetail } from '../lib/detail-ready.js';
+import { quietSlotPatch } from '../lib/origin-page.js';
+import { useIndexEpoch } from '../lib/index-settle.js';
 import { OpenFolderButton, OpenJsonButton } from './OpenFolderButton.jsx';
-import { formatDate, copyToClipboard, normalizeMediaId } from '../lib/format.js';
+import { formatDate, copyToClipboard, memberReactionFields, normalizeMediaId, genreLabel } from '../lib/format.js';
 import { TimeText } from './TimeText.jsx';
 import { mediaFileCopy } from '../lib/sidebar-links.js';
 import { originMembershipKind } from '../lib/nav-tabs.js';
@@ -14,9 +16,12 @@ import { MediaTile } from './MediaTile.jsx';
 import { OriginSiblingNav } from './OriginSiblingNav.jsx';
 import { DetailPage } from './DetailPage.jsx';
 import { EntityHeader } from './EntityHeader.jsx';
+import { containerFilterChips } from '../lib/filter-chips.js';
+import { containerUnfilteredHref } from '../lib/media-href.js';
+import { useScopeChipTree } from '../lib/scope-chip-tree.js';
 import { memberMediaHref, openPreservingOriginBag } from '../lib/open-origin-node.js';
 import { useDocumentTitle } from '../lib/page-title.js';
-import { useOwnModelsRevision } from '../lib/own-models-rev.js';
+import { useOwnModelsKnown, useOwnModelsRevision } from '../lib/own-models-rev.js';
 import { useMagicEscape } from '../hooks/useMagicEscape.js';
 
 function backToComics () {
@@ -44,11 +49,14 @@ function panelToTile (m, selectId) {
     seen.add(inp.kind);
     kinds.push(inp.kind);
   }
+  const marks = memberReactionFields(m);
   return {
     id: selectId,
     type: m.type || 'image',
     hasInputs: inputs.length > 0,
     inputKinds: kinds,
+    tags: marks.tags,
+    reactions: marks.reactions,
     media: [{
       mediaId: selectId,
       type: m.type || 'image',
@@ -164,10 +172,13 @@ function chapterBadgeClass (status) {
 
 export function ComicDetailView ({ comicId, params }) {
   useMagicEscape();
+  const modelTree = useScopeChipTree(params && params.models);
   const [copied, setCopied] = useState(null);
   const quietAppliedRef = useRef(null);
   const ownRev = useOwnModelsRevision();
-  const cacheKey = detailCacheKey({ view: 'comics', id: comicId, params }) + `:own${ownRev}`;
+  const ownKnown = useOwnModelsKnown();
+  const indexEpoch = useIndexEpoch();
+  const cacheKey = detailCacheKey({ view: 'comics', id: comicId, params }) + `:own${ownRev}:ix${indexEpoch}`;
   const held = useHeldDetail(cacheKey, () => loadContainerDetail('comics', comicId, params));
   const data = held.displayed;
   const onRoute = held.shownKey === cacheKey && data?.index?.id != null
@@ -197,8 +208,10 @@ export function ComicDetailView ({ comicId, params }) {
       delete nextParams.from;
       changed = true;
     }
-    if (!origin.slotInUrl && nextParams.slot) {
-      delete nextParams.slot;
+    const slotPatch = quietSlotPatch({ urlSlot: nextParams.slot, origin });
+    if (slotPatch) {
+      if (slotPatch.slot) nextParams.slot = slotPatch.slot;
+      else delete nextParams.slot;
       changed = true;
     }
     if (!changed) return;
@@ -275,7 +288,7 @@ export function ComicDetailView ({ comicId, params }) {
     ? comic.deletedPanels
     : (raw?.deletedPanels || []);
   const references = Array.isArray(raw?.references) ? raw.references : [];
-  const tags = comic.tags || [];
+  const genreText = genreLabel(comic.genre);
   const comicDate = comic.date || (comic.createdAt ? String(comic.createdAt).slice(0, 10) : '');
   const mediaCopy = mediaFileCopy({
     count: readingMedia.length,
@@ -294,7 +307,13 @@ export function ComicDetailView ({ comicId, params }) {
       chrome={<OriginSiblingNav origin={origin} routeParams={params} />}
       sidebar={(
         <>
-          <EntityHeader title={comic.name} label="Comic" date={dateStr} />
+          <EntityHeader
+            title={comic.name}
+            label="Comic"
+            date={dateStr}
+            href={containerUnfilteredHref('comics', comicId, params)}
+            filters={containerFilterChips('comics', comicId, params, { modelTree, ownKnown })}
+          />
           {resourceRows.length > 0 && (
             <ModelMembership
               rows={resourceRows}
@@ -303,16 +322,14 @@ export function ComicDetailView ({ comicId, params }) {
             />
           )}
           {workflowLines.length > 0 ? <WorkflowSection lines={workflowLines} /> : null}
-          {tags.length > 0 && (
+          {genreText ? (
             <div class="meta-section">
-              <h2 class="meta-label">Tags</h2>
+              <h2 class="meta-label">Genre</h2>
               <ul class="meta-tags">
-                {tags.map(tag => (
-                  <li key={tag.id || tag.name || tag} class="meta-tag">{tag.name || tag}</li>
-                ))}
+                <li class="meta-tag">{genreText}</li>
               </ul>
             </div>
-          )}
+          ) : null}
           <div class="meta-section">
             <h2 class="meta-label">Files</h2>
             <div class="meta-actions">

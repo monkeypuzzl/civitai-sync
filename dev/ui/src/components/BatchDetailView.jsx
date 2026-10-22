@@ -19,12 +19,17 @@ import { originMembershipKind } from '../lib/nav-tabs.js';
 import { workflowSidebarLine } from '../lib/workflow-line.js';
 import { ModelMembership, RelatedStrip, WorkflowSection } from './SidebarSections.jsx';
 import { detailCacheKey, loadContainerDetail, prefetchOriginNeighbours, useHeldDetail } from '../lib/detail-ready.js';
+import { quietSlotPatch } from '../lib/origin-page.js';
+import { useIndexEpoch } from '../lib/index-settle.js';
 import { MediaTile } from './MediaTile.jsx';
 import { OriginSiblingNav } from './OriginSiblingNav.jsx';
 import { DetailPage } from './DetailPage.jsx';
 import { EntityHeader } from './EntityHeader.jsx';
+import { containerFilterChips } from '../lib/filter-chips.js';
+import { containerUnfilteredHref } from '../lib/media-href.js';
+import { useScopeChipTree } from '../lib/scope-chip-tree.js';
 import { useDocumentTitle } from '../lib/page-title.js';
-import { useOwnModelsRevision } from '../lib/own-models-rev.js';
+import { useOwnModelsKnown, useOwnModelsRevision } from '../lib/own-models-rev.js';
 import { useMagicEscape } from '../hooks/useMagicEscape.js';
 
 // Per Implementation Contract item 3: switching from a detail route back
@@ -36,10 +41,13 @@ function backToGenerations () {
 
 export function BatchDetailView ({ batchId, params }) {
   useMagicEscape();
+  const modelTree = useScopeChipTree(params && params.models);
   const [copied, setCopied] = useState(null);
   const quietAppliedRef = useRef(null);
   const ownRev = useOwnModelsRevision();
-  const cacheKey = detailCacheKey({ view: 'generations', id: batchId, params }) + `:own${ownRev}`;
+  const ownKnown = useOwnModelsKnown();
+  const indexEpoch = useIndexEpoch();
+  const cacheKey = detailCacheKey({ view: 'generations', id: batchId, params }) + `:own${ownRev}:ix${indexEpoch}`;
   const held = useHeldDetail(cacheKey, () => loadContainerDetail('generations', batchId, params));
   const data = held.displayed;
   const onRoute = held.shownKey === cacheKey && data?.index?.id != null
@@ -64,8 +72,10 @@ export function BatchDetailView ({ batchId, params }) {
       delete nextParams.from;
       changed = true;
     }
-    if (!origin.slotInUrl && nextParams.slot) {
-      delete nextParams.slot;
+    const slotPatch = quietSlotPatch({ urlSlot: nextParams.slot, origin });
+    if (slotPatch) {
+      if (slotPatch.slot) nextParams.slot = slotPatch.slot;
+      else delete nextParams.slot;
       changed = true;
     }
     if (!changed) return;
@@ -158,6 +168,7 @@ export function BatchDetailView ({ batchId, params }) {
     omitModelIdentity: Boolean(modelBlock),
     omitWorkflowAliases: Boolean(workflowLine)
   });
+  const prompt = String(index.prompt || '').trim() || facts.promptText || '';
   const fileActions = (
     <>
       {(() => {
@@ -207,6 +218,8 @@ export function BatchDetailView ({ batchId, params }) {
             label={entityHeaderLabel('generation', batchType)}
             date={dateStr}
             chips={facts.headerChips}
+            href={containerUnfilteredHref('generations', batchId, params)}
+            filters={containerFilterChips('generations', batchId, params, { modelTree, ownKnown })}
           />
           {(modelBlock || additional.length > 0) && (
             <ModelMembership
@@ -226,14 +239,14 @@ export function BatchDetailView ({ batchId, params }) {
             captionFor={(_inp, i) => inputCaptions[i]}
           />
 
-          {index.prompt && (
+          {prompt && (
             <div class="meta-section">
               <h2 class="meta-label">Prompt</h2>
-              <p class="meta-prompt">{index.prompt}</p>
+              <p class="meta-prompt">{prompt}</p>
               <div class="meta-actions">
                 <button
                   class={`meta-action${copied === 'prompt' ? ' copied' : ''}`}
-                  onClick={() => doCopy(index.prompt, 'prompt')}
+                  onClick={() => doCopy(prompt, 'prompt')}
                 >
                   {copied === 'prompt' ? 'Copied' : 'Copy prompt'}
                 </button>

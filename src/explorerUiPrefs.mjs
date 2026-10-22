@@ -4,14 +4,22 @@
 // `sticky: true` URL-schema keys (user-data class). Missing file = empty
 // document; GET / load never creates the file. Unknown keys and a higher
 // `_version` survive load → write (overrides.mjs rule). PATCH accepts
-// `(view, key)` pairs in STICKY_REGISTRY, only `allowed` values, and a
-// top-level `meshViewer` of `on` or `off`. That field is not a URL key.
+// `(view, key)` pairs in STICKY_REGISTRY, only `allowed` values, a
+// top-level `meshViewer` of `on` or `off`, a top-level `downloadTypes`
+// array of download ids, a top-level `downloadAdvancedOpen` boolean,
+// `downloadAuto` boolean, `downloadEvery` period id, and `downloadRecheck` boolean.
+// None of these is a URL key. An empty or invalid `downloadTypes` does not
+// clear a stored set. An invalid advanced flag does not clear a stored one.
 //
 // Leaf module: no `serverIndex` import. Persistence is mkdirp + atomic
 // rename via `utils.writeFile`.
 
 import { readFile, writeFile } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
+import { canonicalizeDownloadTypes } from './downloadQueue.mjs';
+import { DOWNLOAD_PERIODS } from './autoDownload.mjs';
+
+const DOWNLOAD_PERIOD_IDS = new Set(DOWNLOAD_PERIODS.map(period => period.id));
 
 export const UI_PREFS_VERSION = 1;
 
@@ -90,6 +98,49 @@ export async function patchUiPrefs (partial) {
     if ((value === 'on' || value === 'off') && _prefs.meshViewer !== value) {
       _prefs.meshViewer = value;
       changed = true;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(partial, 'downloadAdvancedOpen')) {
+    const value = partial.downloadAdvancedOpen;
+    if (typeof value === 'boolean' && _prefs.downloadAdvancedOpen !== value) {
+      _prefs.downloadAdvancedOpen = value;
+      changed = true;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(partial, 'downloadAuto')) {
+    const value = partial.downloadAuto;
+    if (typeof value === 'boolean' && _prefs.downloadAuto !== value) {
+      _prefs.downloadAuto = value;
+      changed = true;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(partial, 'downloadEvery')) {
+    const value = partial.downloadEvery;
+    if (DOWNLOAD_PERIOD_IDS.has(value) && _prefs.downloadEvery !== value) {
+      _prefs.downloadEvery = value;
+      changed = true;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(partial, 'downloadRecheck')) {
+    const value = partial.downloadRecheck;
+    if (typeof value === 'boolean' && _prefs.downloadRecheck !== value) {
+      _prefs.downloadRecheck = value;
+      changed = true;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(partial, 'downloadTypes')) {
+    const next = canonicalizeDownloadTypes(partial.downloadTypes);
+    if (next.length) {
+      const current = canonicalizeDownloadTypes(_prefs.downloadTypes);
+      if (current.length !== next.length || current.some((id, i) => id !== next[i])) {
+        _prefs.downloadTypes = next;
+        changed = true;
+      }
     }
   }
 

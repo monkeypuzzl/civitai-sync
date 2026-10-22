@@ -6,7 +6,9 @@ import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { mainMenu } from './mainMenu.mjs';
 import { getSecretKey, requestKey, testKey, removeKey, encryptKey, unEncryptKey, getAvailableSecretKey } from './keyActions.mjs';
 import { setConfigParam } from './config.mjs';
-import { fileExists } from './utils.mjs';
+import { fileExists, listDirectory, isDate } from './utils.mjs';
+import { hasSavedPosts } from './postsPresence.mjs';
+import { comicsDataDir } from './comics.mjs';
 import { normalizeGenerationReactions } from './downloadTypes.mjs';
 import { CIVITAI_DOMAINS, getCivitaiDomain } from './civitaiDomain.mjs';
 import {
@@ -18,6 +20,20 @@ import {
 } from './explorerServer.mjs';
 
 let previousMenuItem;
+
+async function hasSavedComicJson () {
+  try {
+    const names = await listDirectory(comicsDataDir());
+    for (const name of names) {
+      if (!isDate(name)) continue;
+      const files = await listDirectory(`${comicsDataDir()}/${name}`);
+      if (files.some(file => file.endsWith('.json'))) return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
 
 // Once per process, and not before the Settings prompt. Test and Update
 // already talk to Civitai. Back covers a visit that only changed folders:
@@ -43,6 +59,7 @@ export async function keyOptions ({ clear = true, message } = {}) {
   const countDirExists = await fileExists(`${CONFIG.dataPath}/generations`) || await fileExists(`${CONFIG.dataPath}/posts`);
   const showSyncDeleted = CONFIG.downloadMedia !== false
     && await fileExists(`${CONFIG.mediaPath}/generations`);
+  const showRecheck = await hasSavedPosts() || await hasSavedComicJson();
   const choices = [
     {
       name: 'Folders',
@@ -113,7 +130,7 @@ export async function keyOptions ({ clear = true, message } = {}) {
     }
   );
 
-  if (countDirExists || showSyncDeleted) {
+  if (countDirExists || showSyncDeleted || showRecheck) {
     choices.push(new Separator());
     if (countDirExists) {
       choices.push({
@@ -127,6 +144,13 @@ export async function keyOptions ({ clear = true, message } = {}) {
         name: 'Sync deleted',
         value: 'sync-deleted',
         description: `Remove generation files from the last 30 days that you have since\ndeleted in the onsite generator.\n\nFirst, run ${chalk.bold('Download > Generations > All')}, then ${chalk.bold('Sync deleted')}.`
+      });
+    }
+    if (showRecheck) {
+      choices.push({
+        name: 'Recheck metadata',
+        value: 'recheck-metadata',
+        description: 'Re-read metadata (prompt, tags, model, workflow) for all published media, updating the saved data.'
       });
     }
   }
@@ -178,6 +202,11 @@ export async function keyOptions ({ clear = true, message } = {}) {
     case 'sync-deleted': {
       const { runSyncDeleted } = await import('./downloadOptionsMenu.mjs');
       return runSyncDeleted();
+    }
+
+    case 'recheck-metadata': {
+      const { runRecheckMetadata } = await import('./downloadOptionsMenu.mjs');
+      return runRecheckMetadata();
     }
 
     case 'count-downloads':

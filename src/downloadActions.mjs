@@ -3,11 +3,12 @@ import process from 'node:process';
 import chalk from 'chalk';
 import { fileExists, listDirectory, readFile, wait } from './utils.mjs';
 import { APP_DIRECTORY, CONFIG, clearTerminal } from './cli.mjs';
-import { forEachGeneration, getGeneratedMediaInfo, mediaFilepath, saveGenerations, getGenerationImages, DOWNLOAD_TYPES_MOD } from './generations.mjs';
+import { forEachGeneration, getGeneratedMediaInfo, mediaFilepath, saveGenerations, saveGenerationMedia, saveGenerationData, generationFilepath, getGenerationImages, DOWNLOAD_TYPES_MOD } from './generations.mjs';
 import { getPostDates, postsDataDir, postImageFilepath } from './posts.mjs';
 import { getAllRequests, formatApiError } from './civitaiApi.mjs';
 import { setConfigParam } from './config.mjs';
-import { upsertIndexEntries } from './serverIndex.mjs';
+import { upsertIndexEntries, ensureIndexLoaded, downloadOpenIds } from './serverIndex.mjs';
+import { markThrownFault } from './downloadFault.mjs';
 
 export { openDataDirectory, openMediaDirectory } from './openDirectory.mjs';
 
@@ -85,18 +86,10 @@ export function formatMediaCounts (imagesSaved, videosSaved, audioSaved = 0, mod
   return `${parts.join(', ')} saved`;
 }
 
-export function formatActivity (activity, { itemNoun = 'item' } = {}) {
-  if (!activity) return '';
-  const { phase, index, total } = activity;
-  const of = (index && total) ? ` ${index} of ${total}` : '';
-
-  switch (phase) {
-    case 'checking': return `checking ${itemNoun}${of}`;
-    case 'saving': return `saving ${itemNoun}${of}`;
-    case 'enriching': return `enriching ${itemNoun}${of}`;
-    case 'media': return `image${of}`;
-    default: return '';
-  }
+export function formatActivity (activity) {
+  const phase = activity && activity.phase;
+  if (phase === 'media' || phase === 'input-media') return 'saving';
+  return 'checking';
 }
 
 
@@ -126,6 +119,57 @@ export function listenForEscKeyPress ({ onAbort } = {}) {
   return { signal: abortController.signal, stop };
 }
 
+async function retryOpenGenerations ({ signal, withImages, report, onProgress }) {
+  try {
+    await ensureIndexLoaded();
+  } catch {
+    return;
+  }
+  const open = downloadOpenIds().generations;
+  const saved = [];
+  for (const row of open) {
+    if (signal && signal.aborted) return;
+    if (!row.createdAt) continue;
+    const filepath = generationFilepath({ id: row.id, createdAt: row.createdAt });
+    let doc;
+    try {
+      doc = JSON.parse(await readFile(filepath));
+    } catch {
+      continue;
+    }
+    if (withImages && CONFIG.downloadMedia !== false && report) {
+      const mediaReport = await saveGenerationMedia(doc, { signal, reactions: [] });
+      const wroteMedia = (mediaReport.imagesSaved || 0) + (mediaReport.videosSaved || 0)
+        + (mediaReport.audioSaved || 0) + (mediaReport.model3dSaved || 0) > 0;
+      report.imagesSaved += mediaReport.imagesSaved || 0;
+      report.videosSaved += mediaReport.videosSaved || 0;
+      report.audioSaved += mediaReport.audioSaved || 0;
+      report.model3dSaved += mediaReport.model3dSaved || 0;
+      const stillOpen = mediaReport.incomplete === true;
+      const mediaStopped = mediaReport.aborted === true || mediaReport.fault === 'storage';
+      let wroteJson = false;
+      // Stop and a full disk leave the mark from the file walk.
+      if (!mediaStopped && stillOpen !== (doc.downloadOpen === true)) {
+        if (stillOpen) doc.downloadOpen = true;
+        else delete doc.downloadOpen;
+        if (await saveGenerationData(doc)) {
+          saved.push(doc);
+          wroteJson = true;
+        }
+      } else if (!mediaStopped && !stillOpen && doc.downloadOpen === true) {
+        delete doc.downloadOpen;
+        if (await saveGenerationData(doc)) {
+          saved.push(doc);
+          wroteJson = true;
+        }
+      }
+      if (wroteMedia || wroteJson) report.generationsUpdated += 1;
+      if (onProgress) onProgress({ ...report });
+    }
+  }
+  if (saved.length) await upsertIndexEntries({ generations: saved }).catch(() => {});
+}
+
 export async function fetchGenerations (options = {}) {
   const {
     withImages = true,
@@ -137,7 +181,8 @@ export async function fetchGenerations (options = {}) {
     secretKey = '',
     log = console.log,
     onProgress,
-    signal
+    signal,
+    carry = null
   } = options;
 
   function isAborted () {
@@ -158,12 +203,13 @@ export async function fetchGenerations (options = {}) {
     batchDate: '',
     paginating: false,
     generationsDownloaded: 0,
-    generationsSaved: 0,
-    generationsNew: 0,
-    imagesSaved: 0,
-    videosSaved: 0,
-    audioSaved: 0,
-    model3dSaved: 0,
+    generationsSaved: carry?.generationsSaved || 0,
+    generationsNew: carry?.generationsNew || 0,
+    generationsUpdated: carry?.generationsUpdated || 0,
+    imagesSaved: carry?.imagesSaved || 0,
+    videosSaved: carry?.videosSaved || 0,
+    audioSaved: carry?.audioSaved || 0,
+    model3dSaved: carry?.model3dSaved || 0,
     activity: null,
     currentTag: tags.length ? (DOWNLOAD_TYPES_MOD[tags[0]] || tags[0]) : '',
     cursor,
@@ -178,23 +224,34 @@ export async function fetchGenerations (options = {}) {
   if (tags.length > 1) {
     const aggregateReport = {
       time: report.time, count: 0, fromDate: '', toDate: '',
-      generationsDownloaded: 0, generationsSaved: 0, generationsNew: 0,
+      generationsDownloaded: 0, generationsSaved: 0, generationsNew: 0, generationsUpdated: 0,
       imagesSaved: 0, videosSaved: 0, audioSaved: 0, model3dSaved: 0, errors: [],
       aborted: false, complete: false
     };
 
+    let reactionCarry = null;
     for (const tag of tags) {
-      const tagReport = await fetchGenerations({...options, tags: [ tag ] });
+      const tagReport = await fetchGenerations({ ...options, tags: [ tag ], carry: reactionCarry });
 
       if (tagReport && typeof tagReport === 'object') {
         aggregateReport.count += tagReport.count || 0;
         aggregateReport.generationsDownloaded += tagReport.generationsDownloaded || 0;
-        aggregateReport.generationsSaved += tagReport.generationsSaved || 0;
-        aggregateReport.generationsNew += tagReport.generationsNew || 0;
-        aggregateReport.imagesSaved += tagReport.imagesSaved || 0;
-        aggregateReport.videosSaved += tagReport.videosSaved || 0;
-        aggregateReport.audioSaved += tagReport.audioSaved || 0;
-        aggregateReport.model3dSaved += tagReport.model3dSaved || 0;
+        aggregateReport.generationsSaved = tagReport.generationsSaved || 0;
+        aggregateReport.generationsNew = tagReport.generationsNew || 0;
+        aggregateReport.generationsUpdated = tagReport.generationsUpdated || 0;
+        aggregateReport.imagesSaved = tagReport.imagesSaved || 0;
+        aggregateReport.videosSaved = tagReport.videosSaved || 0;
+        aggregateReport.audioSaved = tagReport.audioSaved || 0;
+        aggregateReport.model3dSaved = tagReport.model3dSaved || 0;
+        reactionCarry = {
+          generationsSaved: aggregateReport.generationsSaved,
+          generationsNew: aggregateReport.generationsNew,
+          generationsUpdated: aggregateReport.generationsUpdated,
+          imagesSaved: aggregateReport.imagesSaved,
+          videosSaved: aggregateReport.videosSaved,
+          audioSaved: aggregateReport.audioSaved,
+          model3dSaved: aggregateReport.model3dSaved
+        };
         if (tagReport.errors?.length) aggregateReport.errors.push(...tagReport.errors);
         if (tagReport.fromDate && (!aggregateReport.fromDate || tagReport.fromDate < aggregateReport.fromDate)) {
           aggregateReport.fromDate = tagReport.fromDate;
@@ -216,6 +273,7 @@ export async function fetchGenerations (options = {}) {
 
   if (latest) {
     cursor = undefined;
+    await retryOpenGenerations({ signal, withImages, report, onProgress });
   }
 
   function reportText ({ esc = true } = {}) {
@@ -224,17 +282,17 @@ export async function fetchGenerations (options = {}) {
     const activityText = formatActivity(report.activity);
 
     const title = chalk.hex('#a5d8ff')(`Downloading ${mode}`);
-    const line1 = activityText
-      ? `${title} ${chalk.dim('·')} ${chalk.dim(activityText)}`
-      : title;
+    const line1 = `${title} ${chalk.dim('·')} ${chalk.dim(activityText)}`;
 
-    const newText = report.generationsNew > 0 ? chalk.green(plural(report.generationsNew, 'new generation')) : '';
+    const newText = report.generationsNew > 0 ? chalk.green(`${report.generationsNew} new`) : '';
+    const updatedText = report.generationsUpdated > 0 ? chalk.green(`${report.generationsUpdated} updated`) : '';
     const mediaText = formatMediaCounts(report.imagesSaved, report.videosSaved, report.audioSaved, report.model3dSaved);
     const batchDateStr = report.batchDate ? formatDate(report.batchDate) : '';
     const arrow = report.paginating && !isAborted() ? ' →' : '';
     const resultParts = [
       batchDateStr ? `${batchDateStr}${arrow}` : '',
       newText,
+      updatedText,
       mediaText,
       `elapsed ${elapsed}`
     ].filter(Boolean);
@@ -295,6 +353,7 @@ export async function fetchGenerations (options = {}) {
 
     const reportBefore = {
       generationsNew: report.generationsNew,
+      generationsUpdated: report.generationsUpdated,
       generationsSaved: report.generationsSaved,
       imagesSaved: report.imagesSaved,
       videosSaved: report.videosSaved,
@@ -304,6 +363,7 @@ export async function fetchGenerations (options = {}) {
 
     function updateReport (currentReport) {
       report.generationsNew = reportBefore.generationsNew + currentReport.generationsNew;
+      report.generationsUpdated = reportBefore.generationsUpdated + (currentReport.generationsUpdated || 0);
       report.generationsSaved = reportBefore.generationsSaved + currentReport.generationsSaved;
       report.imagesSaved = reportBefore.imagesSaved + currentReport.imagesSaved;
       report.videosSaved = reportBefore.videosSaved + currentReport.videosSaved;
@@ -336,6 +396,12 @@ export async function fetchGenerations (options = {}) {
 
     const result = await saveGenerations(data, { overwrite, overwriteIfModified, withImages, reactions: tags, log: logSaveProgress, signal, secretKey });
 
+    if (result.fault === 'storage' || result.aborted) {
+      report.aborted = true;
+      if (result.fault) report.fault = result.fault;
+      return report;
+    }
+
     if (result.error) {
       report.aborted = true;
       const errMsg = result.error.message || 'Unknown error';
@@ -354,7 +420,7 @@ export async function fetchGenerations (options = {}) {
       await upsertIndexEntries({ generations: result.savedItems }).catch(() => {});
     }
 
-    if (report.generationsDownloaded && (result.generationsNew > 0 || result.imagesSaved > 0 || result.videosSaved > 0 || result.audioSaved > 0 || result.model3dSaved > 0 || resume)) {
+    if (report.generationsDownloaded && (result.generationsSaved > 0 || result.imagesSaved > 0 || result.videosSaved > 0 || result.audioSaved > 0 || result.model3dSaved > 0 || resume)) {
       return report;
     }
 
@@ -391,10 +457,24 @@ export async function fetchGenerations (options = {}) {
 
       log(chalk.red(`Error: ${error}\n${reportText()}`));
     
-      return await fetchGenerations({...options, cursor: nextCursor || cursor, attempts  });
+      return await fetchGenerations({
+        ...options,
+        cursor: nextCursor || cursor,
+        attempts,
+        carry: {
+          generationsSaved: report.generationsSaved,
+          generationsNew: report.generationsNew,
+          generationsUpdated: report.generationsUpdated,
+          imagesSaved: report.imagesSaved,
+          videosSaved: report.videosSaved,
+          audioSaved: report.audioSaved,
+          model3dSaved: report.model3dSaved
+        }
+      });
     }
 
     const code = error.code || (error.cause && error.cause.code);
+    markThrownFault(report, error);
 
     if (code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'UND_ERR_SOCKET' || code ==='ECONNRESET') {
       log(chalk.red(`\nDownload failed. Could not connect to the web service. Please try again.`));
@@ -410,7 +490,7 @@ export async function fetchGenerations (options = {}) {
     report.aborted = true;
   }
 
-  const hasData = (report.generationsNew || 0) > 0 || (report.imagesSaved || 0) > 0 || (report.videosSaved || 0) > 0 || (report.audioSaved || 0) > 0 || (report.model3dSaved || 0) > 0;
+  const hasData = (report.generationsNew || 0) > 0 || (report.generationsUpdated || 0) > 0 || (report.imagesSaved || 0) > 0 || (report.videosSaved || 0) > 0 || (report.audioSaved || 0) > 0 || (report.model3dSaved || 0) > 0;
   if (hasData || report.complete) {
     await setConfigParam('lastDownloadGenerations', new Date().toISOString()).catch(() => {});
   }
@@ -423,7 +503,7 @@ export function formatCompletion (report) {
   if (!report || typeof report !== 'object') return '';
 
   const elapsed = formatElapsed(Date.now() - new Date(report.time).getTime());
-  const hasNewData = (report.generationsNew || 0) > 0 || (report.imagesSaved || 0) > 0 || (report.videosSaved || 0) > 0 || (report.audioSaved || 0) > 0 || (report.model3dSaved || 0) > 0;
+  const hasNewData = (report.generationsNew || 0) > 0 || (report.generationsUpdated || 0) > 0 || (report.imagesSaved || 0) > 0 || (report.videosSaved || 0) > 0 || (report.audioSaved || 0) > 0 || (report.model3dSaved || 0) > 0;
 
   if (!hasNewData && !report.aborted && !(report.errors?.length)) {
     return `${chalk.hex('#a5d8ff')('Up to date')} ${chalk.dim('·')} no new generations found.\n`;
@@ -444,9 +524,10 @@ export function formatCompletion (report) {
     return `${label} ${chalk.dim('·')} no data was saved.\n`;
   }
 
-  const newText = (report.generationsNew || 0) > 0 ? chalk.green(plural(report.generationsNew, 'new generation')) : '';
+  const newText = (report.generationsNew || 0) > 0 ? chalk.green(`${report.generationsNew} new`) : '';
+  const updatedText = (report.generationsUpdated || 0) > 0 ? chalk.green(`${report.generationsUpdated} updated`) : '';
   const mediaText = formatMediaCounts(report.imagesSaved || 0, report.videosSaved || 0, report.audioSaved || 0, report.model3dSaved || 0);
-  const contentParts = [newText, mediaText].filter(Boolean);
+  const contentParts = [newText, updatedText, mediaText].filter(Boolean);
   const line1 = `${label} ${chalk.dim('·')} ${contentParts.join(` ${chalk.dim('·')} `)}`;
 
   const dateRange = formatDateRange(report.fromDate, report.toDate);

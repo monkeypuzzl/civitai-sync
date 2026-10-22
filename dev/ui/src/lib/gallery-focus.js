@@ -45,6 +45,7 @@ export function focusPhase ({ focus, itemCount, hasMore, idFound, pending = fals
   const prefixShort = Number.isFinite(index) && count <= index;
   if (prefixShort && (pending || hasMore)) return 'wait';
   if (idFound) return 'place';
+  if (!idFound && (hasMore || pending)) return 'wait';
   return 'drop';
 }
 

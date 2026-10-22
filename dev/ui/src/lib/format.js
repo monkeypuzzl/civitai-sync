@@ -16,16 +16,25 @@ export function reactionMarks (item) {
   return tags.filter(isReactionToken);
 }
 
-// One generation-batch member as a gallery tile. Marks stay this member's:
-// `reactions` is the owner tokens in list order, and an empty list wins, so
-// a hidden-only member shows no icon. The generation's rolled-up tags are
-// not an argument.
+// Owner tokens for one container member. A `reactions` array wins, including
+// `[]`, so a hidden-only member shows no icon. Otherwise the owner tokens in
+// `tags`, in list order. The container's rolled-up tags are not an argument.
+export function memberReactionFields (member) {
+  const row = member && typeof member === 'object' ? member : {};
+  const tags = Array.isArray(row.tags) ? row.tags : [];
+  const reactions = Array.isArray(row.reactions)
+    ? row.reactions.filter(isReactionToken)
+    : tags.filter(isReactionToken);
+  return { tags, reactions };
+}
+
+// One generation-batch member as a gallery tile. Identity stays `mediaId`.
+// Post and comic pages keep their own ids and call `memberReactionFields`.
 export function generationMemberTile (member) {
   const row = member && typeof member === 'object' ? member : {};
   const type = row.type;
   const id = normalizeMediaId(row.mediaId);
-  const tags = Array.isArray(row.tags) ? row.tags : [];
-  const reactions = tags.filter(isReactionToken);
+  const { tags, reactions } = memberReactionFields(row);
   return {
     id,
     type,
@@ -49,6 +58,14 @@ export function tagLabel (tag) {
 export function tagCssClass (tag) {
   const name = typeof tag === 'string' ? tag : tag.name || '';
   return name.replace(/:/g, '-').replace(/\s+/g, '-').toLowerCase();
+}
+
+// Comic project genre. Same split Civitai uses: "SliceOfLife" → "Slice Of Life".
+export function genreLabel (value) {
+  if (typeof value !== 'string') return '';
+  const token = value.trim();
+  if (!token) return '';
+  return token.replace(/([A-Z])/g, ' $1').trim();
 }
 
 // Optimistic client-side projection of a reaction edit onto a media item's

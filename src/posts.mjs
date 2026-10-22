@@ -1,17 +1,23 @@
 /*eslint no-unused-vars: ["error", { "caughtErrors": "all", "caughtErrorsIgnorePattern": "^ignore" }]*/
 
 import fs from 'node:fs';
-import { writeFile, readFile, fileExists, toDateString, listDirectory, isDate, wait, unlink } from './utils.mjs';
+import { writeFile, readFile, fileExists, toDateString, listDirectory, isDate, unlink } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
-import { getCivitaiImageBase, getPost, getImageGenerationData } from './civitaiApi.mjs';
+import { getCivitaiImageBase, getPost, getPostEdit, getImageGenerationData } from './civitaiApi.mjs';
+import { WIRE, browsingLevelOf } from './civitaiWire.mjs';
+import { postedGenerationView } from './checkpointResolution.mjs';
 import { downloadMediaFile } from './mediaDownload.mjs';
+import { applyStorageFault } from './downloadFault.mjs';
+import { flushFetchMiss } from './fetchMiss.mjs';
 import { extractInputDescriptors, saveInputMedia } from './inputMedia.mjs';
 import { joinPostedFileIfHashed } from './contentHashBackfill.mjs';
-import { postsDataDir, POST_DRAFTS_DIR, hasSavedPosts, postsNeedGenerationData } from './postsPresence.mjs';
+import { postsDataDir, POST_DRAFTS_DIR, hasSavedPosts, postsNeedGenerationData, postsNeedImageResources, postsNeedGenerationResponse } from './postsPresence.mjs';
+import { withinLatestWindow } from './latestWindow.mjs';
+import { byteMissKeepsOpen, markContainerOpen, commitOpenContainer } from './downloadOpen.mjs';
+import { sameResourceUrl } from './signedUrl.mjs';
+import { mapPool, API_POOL_WIDTH, MEDIA_POOL_WIDTH } from './requestScheduler.mjs';
 
-export { postsDataDir, POST_DRAFTS_DIR, hasSavedPosts, postsNeedGenerationData };
-
-const DATA_RATE_LIMIT = 100;
+export { postsDataDir, POST_DRAFTS_DIR, hasSavedPosts, postsNeedGenerationData, postsNeedImageResources, postsNeedGenerationResponse };
 
 export function postsMediaDir () { return `${CONFIG.mediaPath}/posts`; }
 
@@ -34,18 +40,8 @@ export function postFilepath ({ id, publishedAt }) {
 // Civitai `post.getInfinite` (`getImagesForPosts`) currently omits `hasMeta`
 // and caps `images[]` at 8 (`POST_GETINFINITE_IMAGES_PER_POST`). Historical
 // files may still carry `hasMeta` / a longer `images[]`. Capture uses
-// `image.getGenerationData` per id. A local `hasMeta: false` stamp means
-// "already checked, nothing to show" for the meta fill. The workflow-source
-// stamp (`workflowSourcesCaptured`) is separate and still fetches.
+// `image.getGenerationData` per id until `generationDataCaptured` is set.
 export const POST_LISTING_IMAGE_CAP = 8;
-
-function imageHasUsableMeta (img) {
-  return !!(img && img.meta && typeof img.meta === 'object' && Object.keys(img.meta).length > 0);
-}
-
-export function imageNeedsGenerationData (img) {
-  return !!(img && img.id != null && img.hasMeta !== false && !imageHasUsableMeta(img));
-}
 
 // Phase 5a (UNVERIFIED forward-compat): audio-in-posts is currently
 // unreachable on Civitai — the post-editor dropzone accepts image+video MIME
@@ -184,6 +180,16 @@ function listingLooksCapped (freshPost, savedImages) {
   return fresh.length === POST_LISTING_IMAGE_CAP && saved.length > fresh.length;
 }
 
+// Saved membership no longer matches the listing count. A capped page whose
+// saved length already equals imageCount is not drift: the tail is stored.
+function membershipDrift (freshPost, saved) {
+  if (!saved || !freshPost) return false;
+  const savedCount = Array.isArray(saved.images) ? saved.images.length : 0;
+  const imageCount = freshPost.imageCount;
+  if (typeof imageCount === 'number') return imageCount !== savedCount;
+  return listingLooksCapped(freshPost, saved.images);
+}
+
 function withPreservedMeta (freshImages, savedImages) {
   const savedById = new Map();
   for (const img of savedImages) {
@@ -204,8 +210,18 @@ function withPreservedMeta (freshImages, savedImages) {
     if (saved.workflowSourcesCaptured === true && img.workflowSourcesCaptured !== true) {
       ensure().workflowSourcesCaptured = true;
     }
+    if (saved.imageResourcesCaptured === true && img.imageResourcesCaptured !== true) {
+      ensure().imageResourcesCaptured = true;
+    }
     if (saved.process != null && img.process == null) ensure().process = saved.process;
     if (saved.techniques != null && img.techniques == null) ensure().techniques = saved.techniques;
+    if (saved.imageResources != null && img.imageResources == null) ensure().imageResources = saved.imageResources;
+    if (saved.generationDataCaptured === true && img.generationDataCaptured !== true) {
+      ensure().generationDataCaptured = true;
+    }
+    if (saved.generationData != null && img.generationData == null) {
+      ensure().generationData = saved.generationData;
+    }
     return next;
   });
 }
@@ -264,12 +280,32 @@ function reconcilePost (savedJson, freshPost) {
   return next;
 }
 
-export async function savePostData (post) {
+const postWriteTail = new Map();
+
+function enqueuePostWrite (filepath, fn) {
+  const prev = postWriteTail.get(filepath) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  postWriteTail.set(filepath, run.then(() => {}, () => {}));
+  return run;
+}
+
+// `releaseOpen` drops the mark. Any other save keeps a mark already on disk,
+// so the generation-data write that overlaps the file walk cannot clear it.
+export async function savePostData (post, { releaseOpen = false } = {}) {
   const { id, publishedAt, createdAt } = post;
   const filepath = postFilepath({ id, publishedAt, createdAt });
 
+  return enqueuePostWrite(filepath, async () => {
   try {
-    await writeFile(filepath, JSON.stringify(withDerivedStatus(post), null, 2));
+    const next = withDerivedStatus(post);
+    if (releaseOpen) delete next.downloadOpen;
+    else if (next.downloadOpen !== true) {
+      try {
+        const prev = JSON.parse(await readFile(filepath));
+        if (prev && prev.downloadOpen === true) next.downloadOpen = true;
+      } catch (ignoreErr) { /* first write, or not JSON yet */ }
+    }
+    await writeFile(filepath, JSON.stringify(next, null, 2));
 
     // Draft → published/scheduled cleanup: once a post has a publishedAt it
     // lives under its date dir, so drop any stale copy left in the drafts
@@ -286,11 +322,11 @@ export async function savePostData (post) {
     console.error(error);
     return '';
   }
+  });
 }
 
 export async function enrichPostDetail (post, { secretKey, signal } = {}) {
   try {
-    await wait(DATA_RATE_LIMIT);
     const data = await getPost({ id: post.id, secretKey, signal });
 
     if ('error' in data) {
@@ -309,10 +345,17 @@ export async function enrichPostDetail (post, { secretKey, signal } = {}) {
       availability: detail.availability ?? null
     };
 
+    const same = JSON.stringify({
+      tags: post.tags ?? [],
+      detail: post.detail ?? null,
+      availability: post.availability ?? null
+    }) === JSON.stringify(enrichedFields);
+    if (same) return { changed: false };
+
     const enrichedPost = { ...post, ...enrichedFields };
     await savePostData(enrichedPost);
 
-    return enrichedFields;
+    return { changed: true, ...enrichedFields };
   }
 
   catch (ignoreErr) {
@@ -320,107 +363,71 @@ export async function enrichPostDetail (post, { secretKey, signal } = {}) {
   }
 }
 
-function mapGenerationDataResources (resources) {
-  if (!Array.isArray(resources) || !resources.length) return [];
-  return resources.map(r => {
-    if (!r || typeof r !== 'object') return null;
-    const typeRaw = r.modelType ?? r.type;
-    const type = typeof typeRaw === 'string' ? typeRaw.toLowerCase() : undefined;
-    const modelVersionId = r.modelVersionId ?? r.versionId;
-    if (modelVersionId == null && !type) return null;
-    return {
-      type,
-      modelVersionId,
-      weight: r.strength ?? r.weight,
-      modelVersionName: r.versionName ?? r.modelVersionName,
-      modelName: r.modelName,
-      modelId: r.modelId,
-      baseModel: r.baseModel
-    };
-  }).filter(Boolean);
-}
-
-function metaFromGenerationData (data) {
-  if (!data || typeof data !== 'object' || data.error) return null;
-  const meta = (data.meta && typeof data.meta === 'object') ? { ...data.meta } : {};
-  const hasCivitai = Array.isArray(meta.civitaiResources) && meta.civitaiResources.length > 0;
-  if (!hasCivitai) {
-    const mapped = mapGenerationDataResources(data.resources);
-    if (mapped.length) meta.civitaiResources = mapped;
+function generationDataFromResponse (data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data) || data.error) return null;
+  const body = { ...data };
+  delete body.canRemix;
+  delete body.onSite;
+  for (const key of Object.keys(body)) {
+    if (body[key] === undefined) delete body[key];
   }
-  return Object.keys(meta).length ? meta : null;
-}
-
-function processFromGenerationData (data) {
-  if (!data || typeof data.process !== 'string' || !data.process) return undefined;
-  return data.process;
-}
-
-function techniquesFromGenerationData (data) {
-  if (!data || !Array.isArray(data.techniques)) return undefined;
-  return data.techniques.filter(t => t && typeof t === 'object').map(t => ({
-    id: t.id,
-    name: t.name,
-    notes: t.notes ?? null
-  }));
+  return Object.keys(body).length ? body : null;
 }
 
 function imageNeedsGenerationCapture (img) {
   if (!img || img.id == null) return false;
-  return imageNeedsGenerationData(img) || img.workflowSourcesCaptured !== true;
+  return img.generationDataCaptured !== true;
 }
 
 function captureFromGenerationData (img, data) {
   const next = { ...img };
-  if (imageNeedsGenerationData(img)) {
-    const meta = metaFromGenerationData(data);
-    if (meta) {
-      next.meta = meta;
-      next.hasMeta = true;
-    } else {
-      next.hasMeta = false;
-    }
-  }
-  const process = processFromGenerationData(data);
-  if (process !== undefined) next.process = process;
-  const techniques = techniquesFromGenerationData(data);
-  if (techniques !== undefined) next.techniques = techniques;
-  next.workflowSourcesCaptured = true;
+  const body = generationDataFromResponse(data);
+  if (body) next.generationData = body;
+  else delete next.generationData;
+  const meta = body && body.meta && typeof body.meta === 'object' && !Array.isArray(body.meta)
+    && Object.keys(body.meta).length
+    ? body.meta
+    : null;
+  next.hasMeta = !!meta;
+  delete next.meta;
+  delete next.process;
+  delete next.techniques;
+  delete next.imageResources;
+  next.generationDataCaptured = true;
   return next;
 }
 
-// One image.getGenerationData per record that still needs meta or a
-// workflow-source stamp. Posts and comics share this walk and its delay.
+// One image.getGenerationData per image that has not stored the body.
+// Posts and comics share this walk. The scheduler admits the calls together.
 // A transport throw or `data.error` leaves that record out of the map.
-export async function collectGenerationSourceUpdates (records, { secretKey, signal } = {}) {
+export async function collectGenerationSourceUpdates (records, { secretKey, signal, force = false } = {}) {
   const updates = new Map();
   if (!Array.isArray(records) || !records.length) return updates;
-  const pending = records.filter(imageNeedsGenerationCapture);
+  const pending = (force ? records : records.filter(imageNeedsGenerationCapture))
+    .filter(img => img && img.id != null);
   if (!pending.length) return updates;
 
-  for (const img of pending) {
-    if (signal && signal.aborted) break;
-    await wait(DATA_RATE_LIMIT);
-    if (signal && signal.aborted) break;
+  await mapPool(pending, API_POOL_WIDTH, async (img) => {
+    if (signal && signal.aborted) return { stop: true };
     let data;
     try {
       data = await getImageGenerationData({ id: img.id, secretKey, signal });
     } catch (ignoreErr) {
-      continue;
+      return null;
     }
-    if (signal && signal.aborted) break;
-    if (!data || data.error) continue;
+    if (signal && signal.aborted) return { stop: true };
+    if (!data || data.error) return null;
     updates.set(img.id, captureFromGenerationData(img, data));
-  }
+    return null;
+  }, { signal });
 
   return updates;
 }
 
 export async function enrichPostImageMeta (post, { secretKey, signal } = {}) {
-  // Site-parity: one image.getGenerationData per image that still needs
-  // meta or a workflow-source stamp. hasMeta false skips the meta fill
-  // only. A sibling that already has meta does not skip the rest.
-  // Comics use the same collector on Ready panel image ids.
+  // Site-parity: one image.getGenerationData per image that lacks
+  // generationDataCaptured. Comics use the same collector on Ready panel
+  // image ids.
   if (!Array.isArray(post.images) || !post.images.length) return false;
 
   try {
@@ -440,8 +447,185 @@ export async function enrichPostImageMeta (post, { secretKey, signal } = {}) {
   }
 }
 
-export async function savePostMedia (post, { signal, secretKey, onProgress } = {}) {
+function stableJson (value) {
+  return JSON.stringify(value ?? null);
+}
+
+function techniquePairs (list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(row => ({
+    id: row && row.id != null ? row.id : null,
+    name: row && typeof row.name === 'string' ? row.name : ''
+  }));
+}
+
+function resourceVersionIds (list) {
+  const ids = [];
+  for (const row of list || []) {
+    const id = row?.modelVersionId ?? row?.versionId;
+    if (typeof id === 'number' && Number.isFinite(id)) ids.push(id);
+  }
+  ids.sort((a, b) => a - b);
+  return ids;
+}
+
+function editCardDiffers (storedBody, editImage) {
+  const storedMeta = storedBody && storedBody.meta ? storedBody.meta : null;
+  const editMeta = editImage?.hideMeta ? null : (editImage?.meta ?? null);
+  if (stableJson(storedMeta) !== stableJson(editMeta)) return true;
+  if (stableJson(techniquePairs(storedBody?.techniques)) !== stableJson(techniquePairs(editImage?.techniques))) {
+    return true;
+  }
+  const storedIds = resourceVersionIds(storedBody?.resources);
+  const editIds = resourceVersionIds(editImage?.resourceHelper);
+  return stableJson(storedIds) !== stableJson(editIds);
+}
+
+function nonEmptyEditMeta (editImage) {
+  if (!editImage || editImage.hideMeta) return null;
+  const meta = editImage.meta;
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null;
+  if (!Object.keys(meta).length) return null;
+  return meta;
+}
+
+function mapEditResources (helperRows, storedResources) {
+  const stored = new Map();
+  for (const row of storedResources || []) {
+    const id = row?.modelVersionId ?? row?.versionId;
+    if (id != null) stored.set(id, row);
+  }
+  const out = [];
+  for (const row of helperRows || []) {
+    const id = row?.modelVersionId;
+    if (typeof id !== 'number' || !Number.isFinite(id)) continue;
+    const prev = stored.get(id);
+    const mapped = { modelVersionId: id };
+    const type = row.modelType || row.type;
+    if (typeof type === 'string' && type) mapped.type = type;
+    if (typeof row.modelName === 'string' && row.modelName) mapped.modelName = row.modelName;
+    const versionName = row.modelVersionName || row.versionName;
+    if (typeof versionName === 'string' && versionName) mapped.modelVersionName = versionName;
+    if (row.modelId != null && row.modelId !== '') mapped.modelId = row.modelId;
+    const strength = prev?.strength ?? prev?.weight;
+    if (typeof strength === 'number' && Number.isFinite(strength)) mapped.strength = strength;
+    out.push(mapped);
+  }
+  return out;
+}
+
+function tagIdsFromEdit (editImage) {
+  if (!Array.isArray(editImage?.tags)) return [];
+  return editImage.tags.map(tag => tag && tag.id).filter(id => typeof id === 'number');
+}
+
+function projectEditImage (editImage, saved, listing) {
+  const next = saved && typeof saved === 'object' ? { ...saved } : { id: editImage.id };
+  next.id = editImage.id;
+  if ('url' in editImage) next.url = editImage.url;
+  if ('name' in editImage) next.name = editImage.name;
+  if ('width' in editImage) next.width = editImage.width;
+  if ('height' in editImage) next.height = editImage.height;
+  if ('type' in editImage) next.type = editImage.type;
+  if ('metadata' in editImage) next.metadata = editImage.metadata;
+  if (browsingLevelOf(editImage) != null) next[WIRE.browsingLevel] = browsingLevelOf(editImage);
+
+  if (listing && Array.isArray(listing.tagIds)) next.tagIds = listing.tagIds;
+  else next.tagIds = tagIdsFromEdit(editImage);
+
+  const meta = nonEmptyEditMeta(editImage);
+  const body = next.generationData && typeof next.generationData === 'object' && !Array.isArray(next.generationData)
+    ? { ...next.generationData }
+    : null;
+
+  if (meta) {
+    next.meta = meta;
+    next.hasMeta = true;
+    if (editImage.hideMeta === true) next.hideMeta = true;
+    else delete next.hideMeta;
+    if (body) body.meta = meta;
+  } else {
+    delete next.meta;
+    next.hasMeta = false;
+    if (editImage.hideMeta === true) next.hideMeta = true;
+    if (body) delete body.meta;
+  }
+
+  const techniques = Array.isArray(editImage.techniques) ? editImage.techniques : [];
+  next.techniques = techniques;
+  if (body) body.techniques = techniques;
+
+  const resources = mapEditResources(editImage.resourceHelper, body?.resources || saved?.imageResources);
+  next.imageResources = resources;
+  if (body) body.resources = resources;
+
+  const hasProcess = (body && typeof body.process === 'string' && body.process)
+    || (typeof next.process === 'string' && next.process);
+  if (!hasProcess && typeof editImage.generationProcess === 'string' && editImage.generationProcess) {
+    next.process = editImage.generationProcess;
+    if (body) body.process = editImage.generationProcess;
+  }
+
+  if (body) next.generationData = body;
+  return next;
+}
+
+// Uncapped owner read. Replaces images[] with the edit order. Listing tag
+// ids win for images the page already carried. Does not call generation data.
+function applyPostEdit (base, edit, listingImages) {
+  const savedImages = Array.isArray(base.images) ? base.images : [];
+  const savedById = new Map();
+  for (const img of savedImages) {
+    if (img && img.id != null) savedById.set(img.id, img);
+  }
+  const listingById = new Map();
+  for (const img of listingImages || []) {
+    if (img && img.id != null) listingById.set(img.id, img);
+  }
+
+  const editImages = Array.isArray(edit?.images) ? [...edit.images] : [];
+  editImages.sort((a, b) => (a?.index ?? 0) - (b?.index ?? 0));
+  const images = editImages
+    .filter(img => img && img.id != null)
+    .map(img => projectEditImage(img, savedById.get(img.id), listingById.get(img.id)));
+
+  const prior = Array.isArray(base.deletedImages) ? base.deletedImages : [];
+  const deletedById = new Map();
+  for (const entry of prior) {
+    if (entry && entry.id != null) deletedById.set(entry.id, entry);
+  }
+  const persistIds = new Set(images.map(img => img.id));
+  const removedAt = new Date().toISOString();
+  for (const img of savedImages) {
+    const id = img && img.id;
+    if (id == null) continue;
+    if (!persistIds.has(id) && !deletedById.has(id)) {
+      deletedById.set(id, { id, removedAt });
+    }
+  }
+
+  const next = {
+    ...base,
+    detail: edit.detail ?? null,
+    tags: edit.tags ?? [],
+    availability: edit.availability ?? null,
+    images
+  };
+  if (deletedById.size) next.deletedImages = [...deletedById.values()];
+  return next;
+}
+
+function urlsById (images) {
+  const map = new Map();
+  for (const img of images || []) {
+    if (img && img.id != null && typeof img.url === 'string') map.set(img.id, img.url);
+  }
+  return map;
+}
+
+export async function savePostMedia (post, { signal, secretKey, onProgress, previousUrls } = {}) {
   const report = { imagesSaved: 0, videosSaved: 0, audioSaved: 0, error: undefined, aborted: false };
+  try {
   const { id: postId, publishedAt, createdAt, images } = post;
 
   if (!Array.isArray(images) || !images.length) {
@@ -450,20 +634,28 @@ export async function savePostMedia (post, { signal, secretKey, onProgress } = {
 
   const cdnBase = await getCivitaiImageBase({ secretKey });
   const totalImages = images.length;
+  let opening = null;
+  const ensureOpen = () => {
+    if (CONFIG.downloadMedia === false) return Promise.resolve();
+    if (!opening) {
+      opening = markContainerOpen(post, (doc) => commitOpenContainer(doc, 'posts', savePostData));
+    }
+    return opening;
+  };
 
-  for (let i = 0; i < totalImages; i++) {
-    if (signal && signal.aborted) {
+  await mapPool(images, MEDIA_POOL_WIDTH, async (image, i, poolSignal) => {
+    const live = poolSignal || signal;
+    if (live && live.aborted) {
       report.aborted = true;
-      return report;
+      return { stop: true };
     }
 
-    const image = images[i];
     const { id: imageId, type } = image;
     const filepath = postImageFilepath({ postId, publishedAt, createdAt, index: i + 1, imageId, type });
+    const previousUrl = previousUrls && imageId != null ? previousUrls.get(imageId) : undefined;
+    const urlChanged = typeof previousUrl === 'string' && !sameResourceUrl(previousUrl, image.url);
 
-    if (await fileExists(filepath)) {
-      continue;
-    }
+    if (!urlChanged && await fileExists(filepath)) return null;
 
     if (onProgress) onProgress({ phase: 'media', index: i + 1, total: totalImages });
 
@@ -472,18 +664,20 @@ export async function savePostMedia (post, { signal, secretKey, onProgress } = {
       imageUrl = buildPostImageUrl(cdnBase, image);
     } catch (ignoreErr) {
       console.log(`Warning: skipping image ${imageId} in post ${postId} — ${ignoreErr.message}`);
-      continue;
+      return null;
     }
 
-    const result = await downloadMediaFile(imageUrl, filepath, { signal });
+    if (CONFIG.downloadMedia !== false) await ensureOpen();
+    const result = await downloadMediaFile(imageUrl, filepath, { signal: live, replace: urlChanged });
 
-    if (result.status === 'aborted') {
+    if (applyStorageFault(report, result) || result.status === 'aborted') {
       report.aborted = true;
-      return report;
+      return { stop: true };
     }
 
     if (result.status !== 'published') {
-      continue;
+      if (byteMissKeepsOpen(result)) report.incomplete = true;
+      return null;
     }
 
     try {
@@ -492,39 +686,104 @@ export async function savePostMedia (post, { signal, secretKey, onProgress } = {
       // Fail-soft: hash/join must not fail the download.
     }
 
-    if (type === 'video') {
-      report.videosSaved++;
-    } else if (type === 'audio') {
-      // Phase 5a: audio-in-posts is currently unreachable on Civitai (see
-      // mediaExtension / buildPostImageUrl below), so this branch is
-      // forward-compatible only — additive, never breaking the existing
-      // image/video counters.
-      report.audioSaved++;
-    } else {
-      report.imagesSaved++;
-    }
-  }
+    if (type === 'video') report.videosSaved++;
+    else if (type === 'audio') report.audioSaved++;
+    else report.imagesSaved++;
+    return null;
+  }, { signal });
 
+  if (signal?.aborted) report.aborted = true;
   return report;
+  } finally {
+    await flushFetchMiss();
+  }
 }
 
-export async function savePosts (apiResponse, { overwrite = false, overwriteIfModified = false, withImages = true, onProgress, signal, secretKey } = {}) {
+async function readPostEdit (id, { secretKey, signal }) {
+  if (signal && signal.aborted) return { aborted: true };
+  let data;
+  try {
+    data = await getPostEdit({ id, secretKey, signal });
+  } catch (ignoreErr) {
+    return { error: { message: 'Could not read the post editor' } };
+  }
+  if (signal && signal.aborted) return { aborted: true };
+  if (!data || data.error) {
+    return { error: data?.error || { message: 'Could not read the post editor' } };
+  }
+  const edit = data.result?.data?.json;
+  if (!edit || !Array.isArray(edit.images)) {
+    return { error: { message: 'Unexpected post editor shape' } };
+  }
+  return { edit };
+}
+
+async function writeRefreshedPost (post, filepath) {
+  const savedFilepath = await savePostData(post);
+  if (!savedFilepath) return null;
+  return JSON.parse(await readFile(filepath));
+}
+
+// Generation-data calls for images that were never captured, and, on a
+// checked run, images whose editor row differs from the stored card.
+async function refreshGenerationCards (post, { secretKey, signal, editById, checkAllMedia: check }) {
+  const images = Array.isArray(post.images) ? post.images : [];
+  const pending = [];
+  for (const img of images) {
+    if (!img || img.id == null) continue;
+    if (img.generationDataCaptured !== true) {
+      pending.push(img);
+      continue;
+    }
+    if (check && editById && editById.has(img.id)) pending.push(img);
+  }
+  if (!pending.length) return { changed: false, incomplete: false };
+  const updates = await collectGenerationSourceUpdates(pending, { secretKey, signal, force: true });
+  const incomplete = updates.size < pending.length;
+  if (!updates.size) return { changed: false, incomplete };
+  post.images = images.map(img => {
+    if (!img || img.id == null || !updates.has(img.id)) return img;
+    return updates.get(img.id);
+  });
+  return { changed: true, incomplete };
+}
+
+export async function savePosts (apiResponse, {
+  overwrite = false,
+  overwriteIfModified = false,
+  refreshSaved = false,
+  checkAllMedia = false,
+  withImages = true,
+  onProgress,
+  signal,
+  secretKey,
+  // Latest frontier. Detail reads are the check set, not every post on the page.
+  latestFrontier = false,
+  coveredNewestSaved = false,
+  forceIds = null
+} = {}) {
   const report = {
     postsNew: 0,
+    postsUpdated: 0,
     postsSaved: 0,
     imagesSaved: 0,
     videosSaved: 0,
     audioSaved: 0,
     activity: null,
     error: null,
+    refreshErrors: [],
     currentPosts: [],
     // Posts that were saved, enriched, or had new media this call. The
     // download orchestrator passes these to upsertIndexEntries() so the
     // server index reflects them without a full filesystem rescan. We push
     // the latest disk JSON (re-read after enrichment) so the index entry
     // includes any tags / image meta that helpers wrote in place.
-    savedItems: []
+    savedItems: [],
+    frontierCrossed: false,
+    coveredNewestSaved: coveredNewestSaved === true,
+    editorIds: []
   };
+  try {
 
   function progress (activity) {
     report.activity = activity;
@@ -561,7 +820,22 @@ export async function savePosts (apiResponse, { overwrite = false, overwriteIfMo
     const { id, publishedAt, createdAt } = post;
     const filepath = postFilepath({ id, publishedAt, createdAt });
     const exists = await fileExists(filepath);
+    const existed = exists;
+    if (latestFrontier && publishedAt && !withinLatestWindow(publishedAt)) {
+      report.frontierCrossed = true;
+    }
+    let newestSaved = false;
+    if (latestFrontier && exists && !report.coveredNewestSaved) {
+      newestSaved = true;
+      report.coveredNewestSaved = true;
+    }
+    const forced = !!(forceIds && forceIds.has(id));
     let postChanged = false;
+    let working = null;
+    let fanOutPromise = null;
+    let previousUrls = new Map();
+    let editById = null;
+    let editFailed = false;
 
     if (!exists || overwrite) {
       progress({ phase: 'saving', index: postNum, total: totalItems });
@@ -582,19 +856,10 @@ export async function savePosts (apiResponse, { overwrite = false, overwriteIfMo
         report.postsNew++;
       }
 
-      if (secretKey && !(signal && signal.aborted)) {
-        progress({ phase: 'enriching', index: postNum, total: totalItems });
-
-        const enriched = await enrichPostDetail(post, { secretKey, signal });
-
-        if (!enriched) {
-          console.log(`Warning: could not enrich detail for post ${id}`);
-        }
-
-        if (!(signal && signal.aborted)) {
-          const latestJson = JSON.parse(await readFile(filepath));
-          await enrichPostImageMeta(latestJson, { secretKey, signal });
-        }
+      try {
+        working = JSON.parse(await readFile(filepath));
+      } catch (ignoreErr) {
+        working = post;
       }
     } else {
       progress({ phase: 'checking', index: postNum, total: totalItems });
@@ -602,7 +867,9 @@ export async function savePosts (apiResponse, { overwrite = false, overwriteIfMo
       currentReportItem.status = 'exists';
 
       try {
-        let savedJson = JSON.parse(await readFile(filepath));
+        const savedJson = JSON.parse(await readFile(filepath));
+        previousUrls = urlsById(savedJson.images);
+        working = savedJson;
 
         // Phase 5c/5d re-save seam. When the freshly-fetched post differs from
         // what is on disk — a status flip, an upstream content change, or an
@@ -619,9 +886,9 @@ export async function savePosts (apiResponse, { overwrite = false, overwriteIfMo
           if (willWrite !== current) {
             progress({ phase: 'saving', index: postNum, total: totalItems });
 
-            const savedFilepath = await savePostData(reconciled);
+            const written = await writeRefreshedPost(reconciled, filepath);
 
-            if (!savedFilepath) {
+            if (!written) {
               currentReportItem.status = 'data-error';
               report.error = { message: 'Could not save post data' };
               return report;
@@ -630,26 +897,7 @@ export async function savePosts (apiResponse, { overwrite = false, overwriteIfMo
             currentReportItem.status = 'data-saved';
             report.postsSaved++;
             postChanged = true;
-            savedJson = JSON.parse(await readFile(filepath));
-          }
-        }
-
-        if (secretKey && !(signal && signal.aborted)) {
-          if (!('tags' in savedJson)) {
-            progress({ phase: 'enriching', index: postNum, total: totalItems });
-
-            const enriched = await enrichPostDetail(savedJson, { secretKey, signal });
-
-            if (!enriched) {
-              console.log(`Warning: could not enrich detail for post ${id}`);
-            } else {
-              postChanged = true;
-            }
-          }
-
-          if (!(signal && signal.aborted)) {
-            const merged = await enrichPostImageMeta(savedJson, { secretKey, signal });
-            if (merged) postChanged = true;
+            working = written;
           }
         }
       }
@@ -659,32 +907,165 @@ export async function savePosts (apiResponse, { overwrite = false, overwriteIfMo
       }
     }
 
-    if (withImages && post.images && post.images.length) {
-      const mediaReport = await savePostMedia(post, {
+    const drift = !!(working && membershipDrift(post, working));
+    const inCheck = !latestFrontier || forced || !exists || withinLatestWindow(publishedAt) || newestSaved || drift;
+
+    const shouldEdit = !!(
+      secretKey && working && !(signal && signal.aborted)
+      && (checkAllMedia || (latestFrontier
+        ? inCheck
+        : (refreshSaved && listingLooksCapped(post, working.images))))
+    );
+
+    if (shouldEdit) {
+      progress({ phase: 'enriching', index: postNum, total: totalItems });
+      const read = await readPostEdit(id, { secretKey, signal });
+
+      if (read.aborted) {
+        currentReportItem.status = 'aborted';
+        return report;
+      }
+
+      if (read.error) {
+        report.refreshErrors.push(read.error);
+        editFailed = true;
+      } else {
+        // Compare against the card that is on disk now. applyPostEdit writes
+        // the edit meta onto that card, so a later compare would always match.
+        const refreshIds = new Set();
+        const savedById = new Map();
+        for (const img of working.images || []) {
+          if (img && img.id != null) savedById.set(img.id, img);
+        }
+        for (const editImg of read.edit.images || []) {
+          if (!editImg || editImg.id == null) continue;
+          const saved = savedById.get(editImg.id);
+          if (!saved || saved.generationDataCaptured !== true || (checkAllMedia && editCardDiffers(saved.generationData, editImg))) {
+            refreshIds.add(editImg.id);
+          }
+        }
+        if (!checkAllMedia) {
+          for (const id of [...refreshIds]) {
+            const saved = savedById.get(id);
+            if (saved && saved.generationDataCaptured === true) refreshIds.delete(id);
+          }
+        }
+        const applied = applyPostEdit(working, read.edit, post.images);
+        const willWrite = JSON.stringify(withDerivedStatus(applied), null, 2);
+        let currentText = '';
+        try {
+          currentText = await readFile(filepath);
+        } catch (ignoreErr) {
+          currentText = '';
+        }
+
+        editById = refreshIds;
+        report.editorIds.push(id);
+        if (willWrite !== currentText) {
+          const written = await writeRefreshedPost(applied, filepath);
+
+          if (!written) {
+            currentReportItem.status = 'data-error';
+            report.error = { message: 'Could not save post data' };
+            return report;
+          }
+
+          working = written;
+          postChanged = true;
+          currentReportItem.status = 'data-saved';
+        }
+      }
+    }
+
+    if (secretKey && working && !(signal && signal.aborted) && (!latestFrontier || inCheck)) {
+      const wantDetail = !editById && (latestFrontier
+        ? (editFailed && inCheck)
+        : (refreshSaved || editFailed || !('tags' in working)));
+
+      if (wantDetail) {
+        progress({ phase: 'enriching', index: postNum, total: totalItems });
+        const enriched = await enrichPostDetail(working, { secretKey, signal });
+
+        if (!enriched) {
+          console.log(`Warning: could not enrich detail for post ${id}`);
+        } else if (enriched.changed) {
+          postChanged = true;
+          try {
+            working = JSON.parse(await readFile(filepath));
+          } catch (ignoreErr) {
+            // Keep the in-memory post; the file write already succeeded.
+          }
+        }
+      }
+
+      const fanOut = !(checkAllMedia && editFailed);
+      if (fanOut && !(signal && signal.aborted)) {
+        fanOutPromise = (async () => {
+          if (checkAllMedia && editById) {
+            const cards = await refreshGenerationCards(working, {
+              secretKey,
+              signal,
+              editById,
+              checkAllMedia: true
+            });
+            if (cards.incomplete) {
+              report.refreshErrors.push({ message: 'Could not refresh every image' });
+            }
+            if (cards.changed) {
+              const savedFilepath = await savePostData(working);
+              if (savedFilepath) postChanged = true;
+            }
+          } else {
+            const merged = await enrichPostImageMeta(working, { secretKey, signal });
+            if (merged) postChanged = true;
+          }
+        })();
+      }
+    }
+
+    const mediaPost = working && Array.isArray(working.images) && working.images.length ? working : post;
+
+    let mediaReport = null;
+    const mediaPromise = (withImages && mediaPost.images && mediaPost.images.length)
+      ? savePostMedia(mediaPost, {
         signal,
         secretKey,
+        previousUrls,
         onProgress: (mediaActivity) => {
           progress(mediaActivity);
         }
-      });
+      })
+      : null;
+
+    if (fanOutPromise) await fanOutPromise;
+
+    if (mediaPromise) {
+      mediaReport = await mediaPromise;
 
       report.imagesSaved += mediaReport.imagesSaved;
       report.videosSaved += mediaReport.videosSaved;
       report.audioSaved += mediaReport.audioSaved;
 
+      if (mediaReport.fault === 'storage') report.fault = 'storage';
       if (mediaReport.aborted) {
         currentReportItem.status = 'aborted';
         return report;
       }
 
       if (withImages && CONFIG.downloadMedia !== false) {
-        for (const image of post.images) {
+        for (const image of mediaPost.images) {
           if (signal && signal.aborted) {
             currentReportItem.status = 'aborted';
             return report;
           }
-          const descriptors = extractInputDescriptors(image.meta || image, 'post-image');
-          await saveInputMedia(descriptors, { signal, onProgress: progress });
+          const descriptors = extractInputDescriptors(postedGenerationView(image).meta || image, 'post-image');
+          const inputs = await saveInputMedia(descriptors, { signal, onProgress: progress, recall: 'download' });
+          if (inputs && inputs.fault === 'storage') {
+            report.fault = 'storage';
+            report.aborted = true;
+            currentReportItem.status = 'aborted';
+            return report;
+          }
         }
 
         if (signal && signal.aborted) {
@@ -702,6 +1083,22 @@ export async function savePosts (apiResponse, { overwrite = false, overwriteIfMo
       }
     }
 
+    const doc = working || post;
+    const membershipOpen = typeof doc.imageCount === 'number'
+      && doc.imageCount > (Array.isArray(doc.images) ? doc.images.length : 0);
+    const mediaOpen = !!(withImages && CONFIG.downloadMedia !== false && mediaReport && mediaReport.incomplete);
+    const shouldOpen = mediaOpen || (inCheck && membershipOpen);
+    if (doc && typeof doc === 'object') {
+      const hadOpen = doc.downloadOpen === true;
+      if (shouldOpen && !hadOpen) {
+        doc.downloadOpen = true;
+        if (await savePostData(doc)) postChanged = true;
+      } else if (!shouldOpen && hadOpen && inCheck) {
+        delete doc.downloadOpen;
+        if (await savePostData(doc, { releaseOpen: true })) postChanged = true;
+      }
+    }
+
     if (postChanged) {
       try {
         const finalJson = JSON.parse(await readFile(filepath));
@@ -713,8 +1110,13 @@ export async function savePosts (apiResponse, { overwrite = false, overwriteIfMo
       }
     }
 
+    if (existed && postChanged) report.postsUpdated++;
+
     progress(null);
   }
 
   return report;
+  } finally {
+    await flushFetchMiss();
+  }
 }

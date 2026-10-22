@@ -3,6 +3,7 @@
 // nav leaf does not render. App does not store the mark.
 
 const NONE = Object.freeze({ kind: 'none', title: '' });
+const WAITING = Object.freeze({ kind: 'waiting', title: 'Auto download on' });
 
 const SPINNERS = Object.freeze({
   generations: Object.freeze({ kind: 'spinner', title: 'Downloading generations' }),
@@ -13,7 +14,7 @@ const SPINNERS = Object.freeze({
 });
 
 const DOWNLOAD_TYPES = new Set(['generations', 'posts', 'comics', 'model3ds']);
-const IGNORED = new Set(['model-cache', 'exports', 'own-models']);
+const IGNORED = new Set(['model-cache', 'exports', 'own-models', 'tag-cache']);
 
 function spinnerFor (type) {
   return SPINNERS[type] || SPINNERS.other;
@@ -27,11 +28,19 @@ export function nextDownloadMark (prev, event) {
   const prior = prev && prev.kind ? prev : NONE;
   if (!event || typeof event !== 'object') return prior;
   if (IGNORED.has(event.type)) return prior;
+  if (event.type === 'auto') {
+    if (event.phase === 'waiting') return unchanged(prior, WAITING);
+    if (prior.kind === 'spinner') return prior;
+    return prior.kind === 'none' ? prior : NONE;
+  }
   if (event.type === 'connected') {
-    if (!event.active) return prior.kind === 'none' ? prior : NONE;
-    return unchanged(prior, spinnerFor(event.downloadType));
+    if (event.active) return unchanged(prior, spinnerFor(event.downloadType));
+    if (event.auto && event.auto.phase === 'waiting') return unchanged(prior, WAITING);
+    return prior.kind === 'none' ? prior : NONE;
   }
   if (event.final && DOWNLOAD_TYPES.has(event.type)) {
+    const pending = event.queue && Array.isArray(event.queue.pending) ? event.queue.pending : [];
+    if (pending.length > 0) return prior;
     return prior.kind === 'none' ? prior : NONE;
   }
   if (event.status === 'downloading' && DOWNLOAD_TYPES.has(event.type)) {

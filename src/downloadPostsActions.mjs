@@ -1,14 +1,119 @@
 import chalk from 'chalk';
-import { getAllPostRequests, formatApiError } from './civitaiApi.mjs';
-import { savePosts } from './posts.mjs';
+import { getAllPostRequests, getImageFeed, getPost, formatApiError } from './civitaiApi.mjs';
+import { savePosts, postFilepath } from './posts.mjs';
 import { setConfigParam } from './config.mjs';
 import { CONFIG } from './cli.mjs';
-import { upsertIndexEntries } from './serverIndex.mjs';
+import { upsertIndexEntries, ensureIndexLoaded, downloadOpenIds, getMediaItemById, getIndex } from './serverIndex.mjs';
+import { readFile, fileExists } from './utils.mjs';
+import { markThrownFault } from './downloadFault.mjs';
 import { listenForEscKeyPress, plural, formatElapsed, formatMediaCounts, formatDate, formatDateRange, formatActivity } from './downloadActions.mjs';
 
 export { listenForEscKeyPress };
 
 const MAX_FETCH_ATTEMPTS = 10;
+const IMAGE_FEED_PAGE_CAP = 20;
+
+function postPage (post) {
+  return { result: { data: { json: { items: [post] } } } };
+}
+
+async function loadSavedPost (row) {
+  const filepath = postFilepath({ id: row.id, publishedAt: row.publishedAt });
+  if (!(await fileExists(filepath))) return null;
+  try {
+    return JSON.parse(await readFile(filepath));
+  } catch {
+    return null;
+  }
+}
+
+function addPostSave (report, result) {
+  if (!result) return;
+  report.postsNew += result.postsNew || 0;
+  report.postsUpdated += result.postsUpdated || 0;
+  report.postsSaved += result.postsSaved || 0;
+  report.imagesSaved += result.imagesSaved || 0;
+  report.videosSaved += result.videosSaved || 0;
+  report.audioSaved += result.audioSaved || 0;
+}
+
+async function refreshOpenPosts ({ secretKey, signal, withImages, report, onProgress }) {
+  try {
+    await ensureIndexLoaded();
+  } catch {
+    return;
+  }
+  const open = downloadOpenIds().posts;
+  for (const row of open) {
+    if (signal && signal.aborted) return;
+    const saved = await loadSavedPost(row);
+    if (!saved) continue;
+    const result = await savePosts(postPage(saved), {
+      overwriteIfModified: true,
+      latestFrontier: true,
+      forceIds: new Set([saved.id]),
+      withImages,
+      secretKey,
+      signal
+    });
+    addPostSave(report, result);
+    if (onProgress) onProgress({ ...report });
+    if (result.savedItems && result.savedItems.length) {
+      await upsertIndexEntries({ posts: result.savedItems }).catch(() => {});
+    }
+  }
+}
+
+async function followNewImages ({ username, secretKey, signal, withImages, seenIds, report, onProgress }) {
+  let cursor;
+  const seen = seenIds || new Set();
+  for (let guard = 0; guard < IMAGE_FEED_PAGE_CAP; guard++) {
+    if (signal && signal.aborted) return;
+    const page = await getImageFeed({ username, cursor, secretKey, signal });
+    if (!page || page.error) return;
+    const body = page.result?.data?.json;
+    const items = Array.isArray(body?.items) ? body.items : [];
+    if (!items.length) return;
+    let novel = 0;
+    const postIds = new Set();
+    for (const img of items) {
+      if (!img || img.id == null) continue;
+      if (getMediaItemById(img.id)) continue;
+      novel += 1;
+      if (img.postId != null && !seen.has(img.postId)) postIds.add(img.postId);
+    }
+    for (const postId of postIds) {
+      if (signal && signal.aborted) return;
+      let base = null;
+      const entry = (getIndex().posts || []).find(row => String(row.id) === String(postId));
+      if (entry) base = await loadSavedPost(entry);
+      if (!base) {
+        const detail = await getPost({ id: postId, secretKey, signal });
+        const meta = detail?.result?.data?.json;
+        if (!meta || meta.id == null) continue;
+        base = { ...meta, id: meta.id, images: Array.isArray(meta.images) ? meta.images : [] };
+      }
+      seen.add(postId);
+      const result = await savePosts(postPage(base), {
+        overwriteIfModified: true,
+        latestFrontier: true,
+        forceIds: new Set([base.id]),
+        withImages,
+        secretKey,
+        signal
+      });
+      addPostSave(report, result);
+      if (onProgress) onProgress({ ...report });
+      if (result.savedItems && result.savedItems.length) {
+        await upsertIndexEntries({ posts: result.savedItems }).catch(() => {});
+      }
+    }
+    if (novel === 0) return;
+    const next = body.nextCursor;
+    if (next == null || next === cursor) return;
+    cursor = next;
+  }
+}
 
 export async function fetchPosts (options = {}) {
   const {
@@ -21,6 +126,11 @@ export async function fetchPosts (options = {}) {
     // Mirrors fetchGenerations' default (downloadActions.mjs). Per-post; does
     // not alter the v5.1.0 resumed-run cursor walk.
     overwriteIfModified = true,
+    // Latest and All both re-read detail for posts this page already fetched.
+    // Latest still stops once a page shows nothing newer.
+    refreshSaved = true,
+    // Item pass. Ignored when latest is true, even if the caller sent it.
+    checkAllMedia = false,
     // Phase 5c: when true, post.getInfinite returns the user's drafts only.
     // The end-to-end draft download is a maintainer real-corpus step (no draft
     // fixture exists); the param threading and the re-save are fixture-tested.
@@ -30,20 +140,26 @@ export async function fetchPosts (options = {}) {
     scheduled = false,
     log = console.log,
     onProgress,
-    signal
+    signal,
+    carry = null
   } = options;
 
   let { cursor, attempts = 0 } = options;
+  let coveredNewestSaved = false;
+  const editorIds = new Set();
+  const frontier = latest === true && draftOnly !== true;
 
   const report = {
     time: (new Date()).toISOString(),
     count: 0,
     postsDownloaded: 0,
-    postsNew: 0,
-    postsSaved: 0,
-    imagesSaved: 0,
-    videosSaved: 0,
-    audioSaved: 0,
+    postsNew: carry?.postsNew || 0,
+    postsUpdated: carry?.postsUpdated || 0,
+    postsSaved: carry?.postsSaved || 0,
+    imagesSaved: carry?.imagesSaved || 0,
+    videosSaved: carry?.videosSaved || 0,
+    audioSaved: carry?.audioSaved || 0,
+    cumulative: !!carry,
     fromDate: '',
     toDate: '',
     batchDate: '',
@@ -60,21 +176,21 @@ export async function fetchPosts (options = {}) {
 
   function reportText ({ esc = true } = {}) {
     const elapsed = formatElapsed(Date.now() - new Date(report.time).getTime());
-    const activityText = formatActivity(report.activity, { itemNoun: 'post' });
+    const activityText = formatActivity(report.activity);
 
     const title = chalk.hex('#a5d8ff')('Downloading posts');
-    const line1 = activityText
-      ? `${title} ${chalk.dim('·')} ${chalk.dim(activityText)}`
-      : title;
+    const line1 = `${title} ${chalk.dim('·')} ${chalk.dim(activityText)}`;
 
     const mediaText = formatMediaCounts(report.imagesSaved, report.videosSaved, report.audioSaved);
-    const newPostsText = report.postsNew > 0 ? chalk.green(plural(report.postsNew, 'new post')) : '';
+    const newPostsText = report.postsNew > 0 ? chalk.green(`${report.postsNew} new`) : '';
+    const updatedText = report.postsUpdated > 0 ? chalk.green(`${report.postsUpdated} updated`) : '';
     const batchDateStr = report.batchDate ? formatDate(report.batchDate) : '';
     const arrow = report.paginating && !isAborted() ? ' →' : '';
     const resultParts = [
       batchDateStr ? `${batchDateStr}${arrow}` : '',
-      mediaText,
       newPostsText,
+      updatedText,
+      mediaText,
       `elapsed ${elapsed}`
     ].filter(Boolean);
     const line2 = chalk.dim(`  ${resultParts.join(' · ')}`);
@@ -127,10 +243,15 @@ export async function fetchPosts (options = {}) {
     const prevVideosSaved = report.videosSaved;
     const prevAudioSaved = report.audioSaved;
     const prevPostsNew = report.postsNew;
+    const prevPostsUpdated = report.postsUpdated;
 
     const result = await savePosts(data, {
       withImages,
       overwriteIfModified,
+      refreshSaved,
+      checkAllMedia: latest !== true && checkAllMedia === true,
+      latestFrontier: frontier,
+      coveredNewestSaved,
       signal,
       secretKey,
       onProgress: (saveReport) => {
@@ -138,6 +259,7 @@ export async function fetchPosts (options = {}) {
         report.videosSaved = prevVideosSaved + saveReport.videosSaved;
         report.audioSaved = prevAudioSaved + saveReport.audioSaved;
         report.postsNew = prevPostsNew + saveReport.postsNew;
+        report.postsUpdated = prevPostsUpdated + (saveReport.postsUpdated || 0);
         report.activity = saveReport.activity;
         log(reportText());
         if (onProgress) onProgress({ ...report });
@@ -145,11 +267,23 @@ export async function fetchPosts (options = {}) {
     });
 
     report.postsNew = prevPostsNew + result.postsNew;
+    report.postsUpdated = prevPostsUpdated + (result.postsUpdated || 0);
     report.postsSaved += result.postsSaved;
     report.imagesSaved = prevImagesSaved + result.imagesSaved;
     report.videosSaved = prevVideosSaved + result.videosSaved;
     report.audioSaved = prevAudioSaved + result.audioSaved;
     report.activity = null;
+
+    if (Array.isArray(result.refreshErrors) && result.refreshErrors.length) {
+      report.errors.push(...result.refreshErrors);
+    }
+
+    if (result.fault) report.fault = result.fault;
+    if (result.aborted || result.fault === 'storage') {
+      report.aborted = true;
+      if (onProgress) onProgress({ ...report });
+      return report;
+    }
 
     if (result.error) {
       report.errors.push(result.error);
@@ -177,11 +311,21 @@ export async function fetchPosts (options = {}) {
       return false;
     }
 
-    // In latest mode, stop when a full page has nothing new (posts or media).
-    // In "all" mode, always follow nextCursor — otherwise a restart whose
-    // newest page is already fully saved would exit before reaching any
-    // older unsaved posts.
-    if (latest && result.postsNew === 0 && result.imagesSaved === 0 && result.videosSaved === 0 && result.audioSaved === 0) {
+    if (result.coveredNewestSaved) coveredNewestSaved = true;
+    if (Array.isArray(result.editorIds)) {
+      for (const id of result.editorIds) editorIds.add(id);
+    }
+    // Latest stops once a page has gone past 30 days. A write inside the
+    // window does not, by itself, request another page, and it does not
+    // extend the walk past the window. All always follows nextCursor.
+    if (frontier && result.frontierCrossed) {
+      return false;
+    }
+    const pageChanged = (result.savedItems && result.savedItems.length > 0)
+      || (result.imagesSaved || 0) > 0
+      || (result.videosSaved || 0) > 0
+      || (result.audioSaved || 0) > 0;
+    if (latest && !frontier && !pageChanged) {
       return false;
     }
 
@@ -191,6 +335,9 @@ export async function fetchPosts (options = {}) {
   const tick = setInterval(() => log(reportText()), 1000);
 
   try {
+    if (frontier) {
+      await refreshOpenPosts({ secretKey, signal, withImages, report, onProgress });
+    }
     let result;
 
     try {
@@ -219,10 +366,23 @@ export async function fetchPosts (options = {}) {
       if (attempts < MAX_FETCH_ATTEMPTS) {
         attempts++;
         log(chalk.red(`Error: ${error}\n${formatPostCompletion(report)}`));
-        return await fetchPosts({ ...options, cursor, attempts });
+        return await fetchPosts({
+          ...options,
+          cursor,
+          attempts,
+          carry: {
+            postsNew: report.postsNew,
+            postsUpdated: report.postsUpdated,
+            postsSaved: report.postsSaved,
+            imagesSaved: report.imagesSaved,
+            videosSaved: report.videosSaved,
+            audioSaved: report.audioSaved
+          }
+        });
       }
 
       const code = error.code || (error.cause && error.cause.code);
+      markThrownFault(report, error);
 
       if (code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'UND_ERR_SOCKET' || code === 'ECONNRESET') {
         log(chalk.red('\nDownload failed. Could not connect to the web service. Please try again.'));
@@ -235,7 +395,16 @@ export async function fetchPosts (options = {}) {
       report.aborted = true;
     }
 
-    const hasData = (report.postsNew || 0) > 0 || (report.imagesSaved || 0) > 0 || (report.videosSaved || 0) > 0 || (report.audioSaved || 0) > 0;
+    if (frontier && !report.aborted && !(signal && signal.aborted)) {
+      try {
+        await ensureIndexLoaded();
+        await followNewImages({ username, secretKey, signal, withImages, seenIds: editorIds, report, onProgress });
+      } catch {
+        // The image feed is a backstop. A failure here leaves the post walk's result.
+      }
+    }
+
+    const hasData = (report.postsNew || 0) > 0 || (report.postsUpdated || 0) > 0 || (report.imagesSaved || 0) > 0 || (report.videosSaved || 0) > 0 || (report.audioSaved || 0) > 0;
     if (hasData || report.complete) {
       await setConfigParam('lastDownloadPosts', new Date().toISOString()).catch(() => {});
     }
@@ -261,11 +430,12 @@ function mergePostReports (a, b) {
     time: a.time,
     count: (a.count || 0) + (b.count || 0),
     postsDownloaded: (a.postsDownloaded || 0) + (b.postsDownloaded || 0),
-    postsNew: (a.postsNew || 0) + (b.postsNew || 0),
-    postsSaved: (a.postsSaved || 0) + (b.postsSaved || 0),
-    imagesSaved: (a.imagesSaved || 0) + (b.imagesSaved || 0),
-    videosSaved: (a.videosSaved || 0) + (b.videosSaved || 0),
-    audioSaved: (a.audioSaved || 0) + (b.audioSaved || 0),
+    postsNew: b.cumulative ? (b.postsNew || 0) : (a.postsNew || 0) + (b.postsNew || 0),
+    postsUpdated: b.cumulative ? (b.postsUpdated || 0) : (a.postsUpdated || 0) + (b.postsUpdated || 0),
+    postsSaved: b.cumulative ? (b.postsSaved || 0) : (a.postsSaved || 0) + (b.postsSaved || 0),
+    imagesSaved: b.cumulative ? (b.imagesSaved || 0) : (a.imagesSaved || 0) + (b.imagesSaved || 0),
+    videosSaved: b.cumulative ? (b.videosSaved || 0) : (a.videosSaved || 0) + (b.videosSaved || 0),
+    audioSaved: b.cumulative ? (b.audioSaved || 0) : (a.audioSaved || 0) + (b.audioSaved || 0),
     fromDate: minDate(a.fromDate, b.fromDate),
     toDate: maxDate(a.toDate, b.toDate),
     batchDate: b.batchDate || a.batchDate,
@@ -287,9 +457,8 @@ function mergePostReports (a, b) {
 //     `overwriteIfModified` re-save handles in-place changes.
 //
 // Pass 2 is skipped when pass 1 aborted or hit an auth failure, so a bad key
-// does not double-prompt. The merged report drives the completion line and the
-// final SSE, so its totals are correct even though each pass keeps its own
-// live running counter (which restarts at 0 for pass 2 — accepted, cosmetic).
+// does not double-prompt. Pass 2 starts from pass 1's totals, so the live
+// line does not drop. The merged report keeps those cumulative counts.
 export async function fetchPostsAllKinds (options = {}) {
   const published = await fetchPosts(options);
 
@@ -298,13 +467,30 @@ export async function fetchPostsAllKinds (options = {}) {
     return published;
   }
 
-  const extra = await fetchPosts({ ...options, draftOnly: true, scheduled: true, latest: false });
+  const extra = await fetchPosts({
+    ...options,
+    draftOnly: true,
+    scheduled: true,
+    latest: false,
+    refreshSaved: true,
+    checkAllMedia: options.checkAllMedia === true,
+    carry: {
+      postsNew: published.postsNew,
+      postsUpdated: published.postsUpdated,
+      postsSaved: published.postsSaved,
+      imagesSaved: published.imagesSaved,
+      videosSaved: published.videosSaved,
+      audioSaved: published.audioSaved
+    }
+  });
 
   const merged = mergePostReports(published, extra);
   // Latest must not dismiss the Settings / CLI All prompt. Only a completed
   // All walk fills older posts (and stamps hasMeta on current listings).
   if (options.latest !== true && !merged.aborted && merged.complete) {
     await setConfigParam('postsGenerationDataFilled', true).catch(() => {});
+    await setConfigParam('postsImageResourcesFilled', true).catch(() => {});
+    await setConfigParam('postsGenerationResponseFilled', true).catch(() => {});
     if (CONFIG.mediaHealOnce !== true) {
       try {
         const { healMedia } = await import('./mediaHeal.mjs');
@@ -329,7 +515,7 @@ export function formatPostCompletion (report) {
   if (!report || typeof report !== 'object') return '';
 
   const elapsed = formatElapsed(Date.now() - new Date(report.time).getTime());
-  const hasNewData = (report.postsNew || 0) > 0 || (report.imagesSaved || 0) > 0 || (report.videosSaved || 0) > 0 || (report.audioSaved || 0) > 0;
+  const hasNewData = (report.postsNew || 0) > 0 || (report.postsUpdated || 0) > 0 || (report.imagesSaved || 0) > 0 || (report.videosSaved || 0) > 0 || (report.audioSaved || 0) > 0;
 
   if (!hasNewData && !report.aborted && !(report.errors?.length)) {
     const head = `${chalk.hex('#a5d8ff')('Up to date')} ${chalk.dim('·')} no new posts found.`;
@@ -354,8 +540,9 @@ export function formatPostCompletion (report) {
   }
 
   const mediaText = formatMediaCounts(report.imagesSaved || 0, report.videosSaved || 0, report.audioSaved || 0);
-  const newPostsText = (report.postsNew || 0) > 0 ? chalk.green(plural(report.postsNew, 'new post')) : '';
-  const contentParts = [mediaText, newPostsText].filter(Boolean);
+  const newPostsText = (report.postsNew || 0) > 0 ? chalk.green(`${report.postsNew} new`) : '';
+  const updatedText = (report.postsUpdated || 0) > 0 ? chalk.green(`${report.postsUpdated} updated`) : '';
+  const contentParts = [newPostsText, updatedText, mediaText].filter(Boolean);
   const line1 = `${label} ${chalk.dim('·')} ${contentParts.join(` ${chalk.dim('·')} `)}`;
 
   const dateRange = formatDateRange(report.fromDate, report.toDate);

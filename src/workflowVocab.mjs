@@ -20,6 +20,8 @@
 //   getWorkflowModeAbbreviation('txt2music');          // → 'T2A'
 //   getWorkflowAbbreviationExpansion('txt2music');     // → 'Text to Audio'
 //   getWorkflowDisplayLabel('img2img');                // → 'Image Variations'
+//   getWorkflowDisplayLabel('img2img:edit');           // → 'Image Edit'
+//   getWorkflowDisplayLabel('txt2img');                // → 'Create Image'
 //   getWorkflowCategory('vid2vid');                    // → 'video' (shared by vid2vid:*)
 //   getWorkflowCategory('txt2img');                    // → 'image'
 //   formatWorkflowQueryLabel('img2img:upscale');       // → 'I2I · Upscale'
@@ -37,6 +39,7 @@
 // synthesise a phrase, abbreviation, expansion, or display label.
 
 import { CIVITAI_WORKFLOWS, WORKFLOW_MEDIA_TOKENS, WORKFLOW_MODE_LABELS, WORKFLOW_MODE_ABBREVIATIONS, WORKFLOW_ABBREVIATION_EXPANSIONS, WORKFLOW_DISPLAY_LABELS } from './vendor/civitai-workflows.mjs';
+import { WORKFLOW_RESIDUALS } from './vendor/civitai-residuals.mjs';
 
 export {
   WORKFLOW_MEDIA_TOKENS,
@@ -54,7 +57,7 @@ export {
  */
 export function getWorkflowVocab (id) {
   if (!id || typeof id !== 'string') return null;
-  return CIVITAI_WORKFLOWS[id] || null;
+  return CIVITAI_WORKFLOWS[id] || WORKFLOW_RESIDUALS[id] || null;
 }
 
 /**
@@ -83,7 +86,7 @@ export function getWorkflowIdentifiers () {
  */
 export function getWorkflowLabel (id) {
   if (!id || typeof id !== 'string') return '';
-  return CIVITAI_WORKFLOWS[id]?.label || id;
+  return getWorkflowVocab(id)?.label || id;
 }
 
 function modeKeyOf (id) {
@@ -154,7 +157,10 @@ export function getWorkflowAbbreviationExpansion (id) {
  */
 export function getWorkflowDisplayLabel (id) {
   if (!id || typeof id !== 'string') return '';
-  return WORKFLOW_DISPLAY_LABELS[id] || '';
+  if (Object.prototype.hasOwnProperty.call(WORKFLOW_DISPLAY_LABELS, id)) {
+    return WORKFLOW_DISPLAY_LABELS[id] || '';
+  }
+  return WORKFLOW_RESIDUALS[id]?.label || '';
 }
 
 /**
@@ -193,7 +199,11 @@ const TYPE_QUERY_LABELS = Object.freeze({
 
 const COLLIDING_DISPLAY_LABELS = (() => {
   const counts = new Map();
-  for (const label of Object.values(WORKFLOW_DISPLAY_LABELS)) {
+  const labels = [
+    ...Object.values(WORKFLOW_DISPLAY_LABELS),
+    ...Object.values(WORKFLOW_RESIDUALS).map(row => row?.label)
+  ];
+  for (const label of labels) {
     if (!label) continue;
     counts.set(label, (counts.get(label) || 0) + 1);
   }
@@ -250,7 +260,7 @@ function formatModeQueryLabel (token, remainderCount) {
  */
 export function describeTypeWorkflowQuery (query = {}) {
   const parts = [];
-  const types = queryTokens(query.type);
+  const types = queryTokens(query.mediaType);
   if (types.length) {
     parts.push(types.map(t => TYPE_QUERY_LABELS[t] || t).join(', '));
   }

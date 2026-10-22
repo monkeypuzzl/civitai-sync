@@ -8,7 +8,10 @@ import { CORPUS_CHANGE_EVENT } from './lib/nav-tabs.js';
 import { routeTitleSpec, useDocumentTitle } from './lib/page-title.js';
 import { bumpOwnModelsRevision } from './lib/own-models-rev.js';
 import { exportsBadgeKind } from './lib/export-status.js';
-import { noteDownloadEvent } from './lib/download-mark.js';
+import { getDownloadMark, noteDownloadEvent } from './lib/download-mark.js';
+import { noteSettleFrame, subscribeIndexEpoch } from './lib/index-settle.js';
+import { invalidateDetailCache } from './lib/detail-ready.js';
+import { noteLibraryPreparation } from './lib/library-preparation.js';
 import { viewWaitsForStickyPrefs } from './lib/view-ready.js';
 
 // One module per route kind. Models and media stay one component so a new
@@ -182,6 +185,8 @@ function useCorpusStats (view) {
     const disconnect = connectProgress((event) => {
       if (cancelled) return;
       noteDownloadEvent(event);
+      noteSettleFrame(event);
+      noteLibraryPreparation(event, getDownloadMark().kind);
       if (event.type === 'own-models' && event.status === 'ready') {
         bumpOwnModelsRevision();
       }
@@ -221,6 +226,8 @@ function App () {
     const update = () => setRoute(getRoute());
     return subscribe(update);
   }, []);
+
+  useEffect(() => subscribeIndexEpoch(() => { invalidateDetailCache(); }), []);
 
   useEffect(() => {
     if (route.view !== 'media') {

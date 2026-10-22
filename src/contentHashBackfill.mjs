@@ -31,10 +31,12 @@ import {
   resolveCanonicalId,
   canonicalHasContentKey,
   contentKey,
+  contentKeyEpoch,
   imageKey,
   hashFileSha256
 } from './mediaIdentity.mjs';
-import { waitForExplorerIdle } from './explorerIdle.mjs';
+import { waitForExplorerIdle, parkIfExplorerBusy } from './explorerIdle.mjs';
+import { loadPrepMarks, prepMarks, savePrepMarks } from './prepMarks.mjs';
 
 function diskPathFromThumbnail (thumbnailPath) {
   const mediaPath = CONFIG?.mediaPath;
@@ -82,11 +84,29 @@ function hasUsableImageId (imageId) {
   return typeof imageId === 'number' || (typeof imageId === 'string' && imageId !== '');
 }
 
+function postedImageJoined (imageId) {
+  if (!hasUsableImageId(imageId)) return true;
+  return Boolean(resolveCanonicalId([imageKey(imageId)]));
+}
+
+function countPostedImages (entries) {
+  let count = 0;
+  for (const entry of entries || []) {
+    if (!Array.isArray(entry.media)) continue;
+    for (const m of entry.media) {
+      if (m && hasUsableImageId(m.imageId)) count++;
+    }
+  }
+  return count;
+}
+
 // Hash one posted file. On a content: hit, record image:<id> and remap
 // overrides onto the canonical blob id. Never unlinks. Returns true when
-// an alias was recorded (caller persists).
+// an alias was recorded (caller persists). An image id that already resolves
+// is the join; hashing it again cannot change which item wins.
 async function joinPostedFileOnContentHit (filepath, imageId) {
   if (!hasUsableImageId(imageId)) return false;
+  if (postedImageJoined(imageId)) return false;
   if (!filepath || !(await fileExists(filepath))) return false;
   const hex = await hashFileSha256(filepath);
   const canonical = resolveCanonicalId([contentKey(hex)]);
@@ -98,21 +118,24 @@ async function joinPostedFileOnContentHit (filepath, imageId) {
 
 async function walkPostedMedia (entries, { skipCoverHero = false } = {}) {
   let dirty = false;
+  let incomplete = false;
   for (const entry of entries || []) {
     if (!Array.isArray(entry.media)) continue;
     for (const m of entry.media) {
-      await waitForExplorerIdle();
       try {
         if (!m) continue;
         if (skipCoverHero && (m.role === 'cover' || m.role === 'hero')) continue;
+        if (postedImageJoined(m.imageId)) continue;
+        await waitForExplorerIdle();
         const filepath = diskPathFromThumbnail(m.thumbnailPath);
         if (await joinPostedFileOnContentHit(filepath, m.imageId)) dirty = true;
       } catch (ignoreErr) {
+        incomplete = true;
         // Fail-soft per file. Never unlink the posted file.
       }
     }
   }
-  return dirty;
+  return { dirty, incomplete };
 }
 
 // Live savePostMedia / panel saveComicMedia: hash the new file and join
@@ -128,11 +151,24 @@ export async function joinPostedFileIfHashed (filepath, imageId) {
   }
 }
 
-export async function backfillContentHashes ({ generations, posts, comics } = {}) {
+function occurrenceFresh (thumbnailPath, st, force) {
+  if (force) return false;
+  const prev = prepMarks().occurrence?.[thumbnailPath];
+  if (!Array.isArray(prev)) return false;
+  return prev[0] === st.size && prev[1] === st.mtimeMs;
+}
+
+function rememberOccurrence (thumbnailPath, st) {
+  if (!thumbnailPath || !st) return;
+  prepMarks().occurrence[thumbnailPath] = [st.size, st.mtimeMs];
+}
+
+export async function backfillContentHashes ({ generations, posts, comics, force = false } = {}) {
   await waitForExplorerIdle();
   await loadAliasStore();
+  await loadPrepMarks();
   // Factory tests (createIndexStore, no CONFIG) have no media root — skip.
-  if (!CONFIG?.mediaPath) return;
+  if (!CONFIG?.mediaPath) return { wrote: false };
 
   let gens = generations;
   let postEntries = posts;
@@ -154,16 +190,22 @@ export async function backfillContentHashes ({ generations, posts, comics } = {}
   for (const gen of gens || []) {
     if (!Array.isArray(gen.media)) continue;
     for (const m of gen.media) {
-      await waitForExplorerIdle();
       try {
         const mediaId = normalizeMediaId(m.mediaId);
         if (!mediaId) continue;
         // One job, already keyed: skip the file read. Several jobs, same
-        // output id: hash every thumbnail (files may differ).
-        if ((occurrenceCount.get(mediaId) || 0) <= 1 && canonicalHasContentKey(mediaId)) continue;
+        // output id: hash when the file's size or mtime changed.
+        const multi = (occurrenceCount.get(mediaId) || 0) > 1;
+        if (!multi && canonicalHasContentKey(mediaId)) continue;
         const filepath = diskPathFromThumbnail(m.thumbnailPath);
         if (!filepath || !(await fileExists(filepath))) continue;
+        const st = await stat(filepath);
+        const gate = parkIfExplorerBusy();
+        if (gate) await gate;
+        if (multi && occurrenceFresh(m.thumbnailPath, st, force)) continue;
+        await waitForExplorerIdle();
         const hex = await hashFileSha256(filepath);
+        if (multi) rememberOccurrence(m.thumbnailPath, st);
         if (resolveCanonicalId([contentKey(hex)])) continue;
         await recordAlias(mediaId, contentKey(hex), { persist: false });
         dirty = true;
@@ -173,17 +215,37 @@ export async function backfillContentHashes ({ generations, posts, comics } = {}
     }
   }
 
-  if (await walkPostedMedia(postEntries)) dirty = true;
-  if (await walkPostedMedia(comicEntries, { skipCoverHero: true })) dirty = true;
+  const epoch = contentKeyEpoch();
+  const postedCount = countPostedImages(postEntries) + countPostedImages(comicEntries);
+  const postedMark = prepMarks().posted;
+  const postedCovered = !force && postedMark.epoch === epoch && postedMark.count === postedCount;
+  if (!postedCovered) {
+    const postsResult = await walkPostedMedia(postEntries);
+    const comicsResult = await walkPostedMedia(comicEntries, { skipCoverHero: true });
+    if (postsResult.dirty || comicsResult.dirty) dirty = true;
+    if (!postsResult.incomplete && !comicsResult.incomplete) {
+      prepMarks().posted = { epoch: contentKeyEpoch(), count: postedCount };
+    }
+  }
 
   const inputsDir = inputsMediaDir();
   const names = await listFiles(inputsDir);
+  const inputEpoch = contentKeyEpoch();
+  const inputMark = prepMarks().inputs;
+  const nextFiles = {};
   for (const name of names) {
-    await waitForExplorerIdle();
     const filepath = path.join(inputsDir, name);
     try {
       const st = await stat(filepath);
       if (!st.isFile()) continue;
+      const prev = inputMark.files?.[name];
+      const fresh = !force && inputMark.epoch === inputEpoch &&
+        Array.isArray(prev) && prev[0] === st.size && prev[1] === st.mtimeMs;
+      nextFiles[name] = [st.size, st.mtimeMs];
+      if (fresh) continue;
+      const gate = parkIfExplorerBusy();
+      if (gate) await gate;
+      await waitForExplorerIdle();
       const hex = await hashFileSha256(filepath);
       const canonical = resolveCanonicalId([contentKey(hex)]);
       if (!canonical) continue;
@@ -193,10 +255,14 @@ export async function backfillContentHashes ({ generations, posts, comics } = {}
         dirty = true;
       }
       await unlink(filepath);
+      delete nextFiles[name];
     } catch (ignoreErr) {
       // Fail-soft per file. Never unlink generations/ from this walk.
     }
   }
+  prepMarks().inputs = { epoch: contentKeyEpoch(), files: nextFiles };
 
   if (dirty) await persistAliasStore();
+  await savePrepMarks();
+  return { wrote: dirty };
 }

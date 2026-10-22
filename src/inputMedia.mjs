@@ -12,10 +12,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { mkdirp } from 'mkdirp';
-import { fileExists, unlink } from './utils.mjs';
+import { fileExists, listDirectory, rename, unlink } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
 import { MEDIA_FILE_EXTS, normalizeMediaId } from './mediaId.mjs';
+import { portableFileSegment } from './portableFileSegment.mjs';
 import { downloadMediaFile } from './mediaDownload.mjs';
+import { mapPool, MEDIA_POOL_WIDTH } from './requestScheduler.mjs';
+import { applyStorageFault } from './downloadFault.mjs';
 import { isAceAudioParams } from './aceAudioParams.mjs';
 import {
   loadAliasStore,
@@ -95,9 +98,17 @@ export function blobIdFromUrl (url) {
   }
 }
 
+function portableExt (ext) {
+  const raw = String(ext || '').replace(/^\./, '').toLowerCase();
+  if (!raw) return 'jpeg';
+  if (!/^[a-z0-9]{1,8}$/.test(raw)) return 'bin';
+  return raw;
+}
+
 export function inputMediaFilepath (id, ext) {
-  const safeExt = String(ext || 'jpeg').replace(/^\./, '');
-  return `${CONFIG.mediaPath}/inputs/${normalizeMediaId(id)}.${safeExt}`;
+  const safeExt = portableExt(ext);
+  const segment = portableFileSegment(normalizeMediaId(id));
+  return `${CONFIG.mediaPath}/inputs/${segment}.${safeExt}`;
 }
 
 export function inputsMediaDir () {
@@ -114,7 +125,47 @@ export function existingInputFilepath (id) {
     const filepath = inputMediaFilepath(norm, ext);
     if (fs.existsSync(filepath)) return filepath;
   }
+  if (portableFileSegment(norm) === norm) return null;
+  for (const ext of INPUT_PROBE_EXTS) {
+    const filepath = `${CONFIG.mediaPath}/inputs/${norm}.${ext}`;
+    if (fs.existsSync(filepath)) return filepath;
+  }
   return null;
+}
+
+async function adoptLegacyInputFilename (dir, name) {
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  if (portableFileSegment(stem) === stem) return;
+  const destName = `${portableFileSegment(stem)}${ext}`;
+  if (destName === name) return;
+  const dest = path.join(dir, destName);
+  if (fs.existsSync(dest)) return;
+  await rename(path.join(dir, name), dest);
+}
+
+export async function adoptLegacyInputFile (id) {
+  const norm = normalizeMediaId(id);
+  if (!norm || portableFileSegment(norm) === norm) return;
+  if (!CONFIG?.mediaPath) return;
+  const dir = inputsMediaDir();
+  if (!dir) return;
+  const names = await listDirectory(dir);
+  const prefix = `${norm}.`;
+  for (const name of names) {
+    if (name.startsWith(prefix)) await adoptLegacyInputFilename(dir, name);
+  }
+}
+
+export async function adoptLegacyInputNames () {
+  if (!CONFIG?.mediaPath) return;
+  const dir = inputsMediaDir();
+  if (!dir) return;
+  const names = await listDirectory(dir);
+  for (const name of names) {
+    await adoptLegacyInputFilename(dir, name);
+  }
 }
 
 function roleHint (record, params) {
@@ -347,6 +398,7 @@ export async function resolveInputSource (descriptor) {
 
   const id = blobIdFromUrl(url);
   const ext = extFromUrl(url) || 'jpeg';
+  await adoptLegacyInputFile(id);
 
   try {
     const { ensureIndexLoaded, getMediaItemById } = await import('./serverIndex.mjs');
@@ -409,7 +461,7 @@ async function joinWrittenInputIfDuplicate (resolved, filepath) {
   }
 }
 
-export async function saveInputMedia (descriptors, { signal, onProgress } = {}) {
+export async function saveInputMedia (descriptors, { signal, onProgress, recall = 'download' } = {}) {
   const report = { saved: 0, reused: 0, skipped: 0 };
   if (!Array.isArray(descriptors) || descriptors.length === 0) return report;
 
@@ -419,43 +471,44 @@ export async function saveInputMedia (descriptors, { signal, onProgress } = {}) 
   }
 
   const total = descriptors.length;
-  for (let i = 0; i < total; i++) {
-    if (signal?.aborted) break;
+  await mapPool(descriptors, MEDIA_POOL_WIDTH, async (descriptor, i, poolSignal) => {
+    const live = poolSignal || signal;
+    if (live?.aborted) return { stop: true };
 
     let resolved;
     try {
-      resolved = await resolveInputSource(descriptors[i]);
+      resolved = await resolveInputSource(descriptor);
     } catch (ignoreErr) {
       report.skipped++;
-      continue;
+      return null;
     }
 
     if (!resolved) {
       report.skipped++;
-      continue;
+      return null;
     }
 
     if (resolved.reused) {
       report.reused++;
-      continue;
+      return null;
     }
 
     if (onProgress) onProgress({ phase: 'input-media', index: i + 1, total });
 
-    const { filepath } = resolved;
-    const result = await downloadMediaFile(descriptors[i].url, filepath, { signal });
+    const result = await downloadMediaFile(descriptor.url, resolved.filepath, { signal: live, recall });
 
-    if (result.status === 'aborted') break;
+    if (applyStorageFault(report, result) || result.status === 'aborted') return { stop: true };
 
     if (result.status !== 'published') {
       report.skipped++;
-      continue;
+      return null;
     }
 
-    const joined = await joinWrittenInputIfDuplicate(resolved, filepath);
+    const joined = await joinWrittenInputIfDuplicate(resolved, resolved.filepath);
     if (joined) report.reused++;
     else report.saved++;
-  }
+    return null;
+  }, { signal });
 
   return report;
 }

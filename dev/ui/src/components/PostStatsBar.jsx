@@ -1,18 +1,16 @@
 import { TimeText } from './TimeText.jsx';
 
 export function PostStatsBar ({ stats, postTotal, totalLabel = 'posts' }) {
-  if (!stats) return null;
-
-  const imgCount = stats.postImages ?? stats.totalImages;
-  const vidCount = stats.postVideos ?? stats.totalVideos;
-  const audCount = stats.postAudio ?? stats.totalAudio;
+  const imgCount = stats ? (stats.postImages ?? stats.totalImages) : null;
+  const vidCount = stats ? (stats.postVideos ?? stats.totalVideos) : null;
+  const audCount = stats ? (stats.postAudio ?? stats.totalAudio) : null;
 
   const items = [
     postTotal != null && { label: totalLabel, value: postTotal },
     imgCount != null && { label: 'images', value: imgCount },
     vidCount > 0 && { label: 'videos', value: vidCount },
     audCount > 0 && { label: 'audio', value: audCount },
-    stats.postDateRange?.from && {
+    stats?.postDateRange?.from && {
       label: '',
       from: stats.postDateRange.from,
       to: stats.postDateRange.to
@@ -20,7 +18,7 @@ export function PostStatsBar ({ stats, postTotal, totalLabel = 'posts' }) {
   ].filter(Boolean);
 
   return (
-    <ul class="stats-bar">
+    <ul class="stats-bar" aria-hidden={items.length ? undefined : 'true'}>
       {items.flatMap((item, i) => {
         const cell = (
           <li key={`item-${i}`} class="stat-item">

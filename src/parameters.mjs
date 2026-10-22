@@ -1,13 +1,18 @@
 // Parameters subsystem. One gather for image, video, audio, and 3D.
 //
 // Membership is the queue Additional Details filter: drop arrays and objects,
-// the key `priority`, an empty string, the placeholder token `undefined`, and
-// any other falsy value. A surviving boolean is the word `true`. Labels are
+// an empty string, the placeholder token `undefined`, and any other falsy
+// value. A surviving boolean is the word `true`. Labels are
 // titleCase(splitUppercase(key)), which lowercases the tail.
+//
+// PARAMETER_OMISSIONS is append-only. A name stays after Civitai stops
+// sending it. Rationale and how to add a name:
+// docs/guides/civitai-sync/internal/parameter-omission.md
 //
 // Header chips are the facts that define the medium. A key that became a
 // header chip is claimed and leaves the rows. Pure: no I/O.
 
+import { WIRE } from './civitaiWire.mjs';
 import { normalizeMediaId } from './mediaId.mjs';
 
 const ALWAYS_OMIT = new Set([
@@ -27,6 +32,59 @@ const ALWAYS_OMIT = new Set([
   'Size',
   'upscaleWidth',
   'upscaleHeight'
+]);
+
+// Exact keys. `Created Date` does not match `createdDate`; both are members.
+// Sorted the way `[...set].sort()` orders them, so a diff of a new name is obvious.
+export const PARAMETER_OMISSIONS = new Set([
+  'Created Date',
+  'air',
+  WIRE.allowContent,
+  'animaVariant',
+  'animationActionId',
+  'batchSize',
+  'booguMode',
+  'civitaiTip',
+  'comfy',
+  'createdAt',
+  'createdDate',
+  'creatorTip',
+  'disablePoi',
+  'ernieVariant',
+  'experimental',
+  'flux2KleinMode',
+  'flux2Mode',
+  'fluxMode',
+  'fluxUltraAspectRatio',
+  'generateCover',
+  'hiDreamO1Variant',
+  'hiDreamVariant',
+  'hunyuanPrompt',
+  'image',
+  'input',
+  'klingVersion',
+  'krea2Variant',
+  'lensVariant',
+  'ltxVersion',
+  'mageFlowVariant',
+  'minimaxVariant',
+  'nanoBananaMode',
+  WIRE.modelFlag,
+  'openaiVariant',
+  'operation',
+  'output',
+  'outputFormat',
+  'priority',
+  'quantity',
+  'remixOfId',
+  'sourceImage',
+  'sourceImageUrl',
+  'wanImageVersion',
+  'wanVersion',
+  'whatIf',
+  'workflowKind',
+  'yue2Abc',
+  'zImageMode'
 ]);
 
 const TEXT_LIMIT = 80;
@@ -322,6 +380,19 @@ function titleLine (snapshot) {
   return String(title).trim();
 }
 
+function fillText (snapshot, key) {
+  if (!isPlainObject(snapshot)) return '';
+  const value = snapshot[key];
+  if (!shownKey(value)) return '';
+  return String(value).trim();
+}
+
+function digitsOnlyResolution (value) {
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'string') return false;
+  return /^\d+$/.test(value.trim());
+}
+
 /**
  * Header chips and parameter rows for one detail page.
  * `snapshot` null uses `fallback` for rows and `audio` for tempo and key.
@@ -333,7 +404,9 @@ function titleLine (snapshot) {
  *   title: string,
  *   texts: { label: string, value: string }[],
  *   chips: string[],
- *   rows: { kind: 'chip'|'text', label: string, value: string, text: string }[]
+ *   rows: { kind: 'chip'|'text', label: string, value: string, text: string }[],
+ *   promptText: string,
+ *   lyricsText: string
  * }}
  */
 export function detailFacts (input = {}) {
@@ -370,13 +443,13 @@ export function detailFacts (input = {}) {
         pushSeed();
         continue;
       }
-      if (ALWAYS_OMIT.has(key)) continue;
+      if (ALWAYS_OMIT.has(key) || PARAMETER_OMISSIONS.has(key)) continue;
       if (key.toLowerCase().includes('hash')) continue;
       if (input.omitModelIdentity === true && MODEL_IDENTITY.has(key)) continue;
-      if (input.omitQuantity === true && key === 'quantity') continue;
       if (input.omitWorkflowAliases === true && (key === 'process' || key === 'type')) continue;
       if (claimed.has(key)) continue;
-      if (key === 'priority' || droppedValue(value)) continue;
+      if (droppedValue(value)) continue;
+      if (key === 'resolution' && digitsOnlyResolution(value)) continue;
       const label = paramLabel(key);
       const shown = displayValue(value);
       if (shown.length > TEXT_LIMIT || shown.includes('\n')) pushText(label, shown);
@@ -392,6 +465,8 @@ export function detailFacts (input = {}) {
     title: titleLine(snapshot),
     texts,
     chips,
-    rows
+    rows,
+    promptText: fillText(snapshot, 'hunyuanPrompt'),
+    lyricsText: fillText(snapshot, 'yue2Abc')
   };
 }

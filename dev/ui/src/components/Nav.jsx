@@ -3,6 +3,7 @@ import { navigate, pushState } from '../lib/router.js';
 import { visibleNavTabs, navTabActive, navTabHref } from '../lib/nav-tabs.js';
 import { activateOriginTab } from '../lib/nav-activate.js';
 import { getDownloadMark, subscribeDownloadMark } from '../lib/download-mark.js';
+import { getLibraryPreparationText, subscribeLibraryPreparation } from '../lib/library-preparation.js';
 
 const ORIGIN_TABS = new Set(['generations', 'posts', 'comics', 'models']);
 
@@ -39,6 +40,7 @@ export function Nav ({
 }) {
   const r = asRoute(route);
   const hist = historyBag();
+  const downloadMark = useDownloadMarkState();
   const tabs = visibleNavTabs({ stats, status: statsStatus, route: r, mediaScope });
   const tabOpts = { modelReturn, mediaScope };
 
@@ -77,40 +79,58 @@ export function Nav ({
         <span class="civit">civit</span><span class="ai">ai</span>
         <span class="sync">-sync</span>
       </div>
-      <div class="nav-tabs">
-        {tabs.map(tab => {
-          const active = navTabActive(tab.id, r, tabOpts);
-          return (
-          <a
-            key={tab.id}
-            class="nav-tab"
-            href={navTabHref(tab.id, r, tabOpts)}
-            aria-current={active ? 'page' : undefined}
-            onClick={e => go(e, tab.id)}
-          >
-            {tab.label}
-            {tab.id === 'download' && <DownloadTabMark />}
-            {tab.id === 'exports' && exportsBadge === 'spinner' && (
-              <span class="nav-badge nav-badge-spinner" title="Sync in progress" />
-            )}
-            {tab.id === 'exports' && exportsBadge === 'dot' && (
-              <span class="nav-badge nav-badge-dot" title="An export needs attention" />
-            )}
-          </a>
-          );
-        })}
+      <div class="nav-cluster">
+        <div class="nav-tabs">
+          {tabs.map(tab => {
+            const active = navTabActive(tab.id, r, tabOpts);
+            return (
+            <a
+              key={tab.id}
+              class="nav-tab"
+              href={navTabHref(tab.id, r, tabOpts)}
+              aria-current={active ? 'page' : undefined}
+              title={tab.id === 'download' && downloadMark.kind === 'waiting' ? downloadMark.title : undefined}
+              onClick={e => go(e, tab.id)}
+            >
+              {tab.label}
+              {tab.id === 'download' && <DownloadTabMark mark={downloadMark} />}
+              {tab.id === 'exports' && exportsBadge === 'spinner' && (
+                <span class="nav-badge nav-badge-spinner" title="Sync in progress" />
+              )}
+              {tab.id === 'exports' && exportsBadge === 'dot' && (
+                <span class="nav-badge nav-badge-dot" title="An export needs attention" />
+              )}
+            </a>
+            );
+          })}
+        </div>
+        <LibraryPreparationLine />
       </div>
       {username && <div class="nav-username">{username}</div>}
     </nav>
   );
 }
 
-function DownloadTabMark () {
+function LibraryPreparationLine () {
+  const [text, setText] = useState(getLibraryPreparationText);
+  useEffect(() => {
+    setText(getLibraryPreparationText());
+    return subscribeLibraryPreparation(setText);
+  }, []);
+  if (!text) return null;
+  return <p class="library-prep" aria-live="polite">{text}</p>;
+}
+
+function useDownloadMarkState () {
   const [mark, setMark] = useState(getDownloadMark);
   useEffect(() => {
     setMark(getDownloadMark());
     return subscribeDownloadMark(setMark);
   }, []);
-  if (mark.kind !== 'spinner') return null;
+  return mark;
+}
+
+function DownloadTabMark ({ mark }) {
+  if (!mark || mark.kind !== 'spinner') return null;
   return <span class="nav-badge nav-badge-spinner" title={mark.title} />;
 }

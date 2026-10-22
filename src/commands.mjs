@@ -30,6 +30,14 @@ let options, secretKey;
 switch (command) {
   case 'auto-fetch':
   secretKey = await getSecretKey();
+  {
+    const { requireLibraryAccount } = await import('./accountIdentity.mjs');
+    const gate = await requireLibraryAccount(secretKey);
+    if (!gate.ok) {
+      console.log(gate.message);
+      break;
+    }
+  }
 
   options = {
     interval: 60, // seconds
@@ -44,6 +52,15 @@ switch (command) {
   break;
 
   case 'sync-deleted':
+  {
+    const { getAvailableSecretKey } = await import('./keyActions.mjs');
+    const { requireLibraryAccount } = await import('./accountIdentity.mjs');
+    const gate = await requireLibraryAccount(getAvailableSecretKey());
+    if (!gate.ok) {
+      console.log(gate.message);
+      break;
+    }
+  }
   await deleteAllDeletedMedia();
   break;
 

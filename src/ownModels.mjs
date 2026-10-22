@@ -6,6 +6,7 @@ import { readFile, writeFile } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
 import { waitForExplorerIdle } from './explorerIdle.mjs';
 import { getModelsByUsernamePage } from './civitaiApi.mjs';
+import { runAsBackground } from './requestScheduler.mjs';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const OWN_MODELS_DUE_MS = DAY_MS;
@@ -54,8 +55,23 @@ function normalizeModel (raw) {
   return model;
 }
 
-function recordIsComplete (record, username) {
-  if (!record || record.username !== username) return false;
+function positiveId (value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
+// A record that stores an account id matches that id. A record from before
+// account ids matches the username, which is how this file used to work.
+function recordMatchesAccount (record, username, accountId) {
+  if (!record) return false;
+  const recordId = positiveId(record.accountId);
+  const configId = positiveId(accountId);
+  if (recordId && configId) return recordId === configId;
+  return record.username === username;
+}
+
+function recordIsComplete (record, username, accountId) {
+  if (!recordMatchesAccount(record, username, accountId)) return false;
   const listed = record.listed;
   return Array.isArray(listed) && listed.includes('open') && listed.includes('private');
 }
@@ -109,8 +125,8 @@ function unionModels (openItems, privateItems) {
   return [...byId.values()];
 }
 
-function interpret (record, username) {
-  if (!record || typeof record !== 'object' || !username || record.username !== username) {
+function interpret (record, username, accountId = CONFIG.accountId) {
+  if (!record || typeof record !== 'object' || !recordMatchesAccount(record, username, accountId)) {
     return { known: false, username: username || '', checkedAt: null, models: [], ids: null };
   }
   const models = Array.isArray(record.models) ? record.models : [];
@@ -136,6 +152,10 @@ export async function readOwnModelsRecord (dataPath = CONFIG.dataPath) {
 
 function remember (record) {
   memory = record;
+}
+
+export function forgetOwnModels () {
+  memory = null;
 }
 
 /** Sync snapshot for request handlers. A file for another username is unknown. */
@@ -179,7 +199,21 @@ export async function refreshOwnModels ({
   if (!username) return { skipped: 'no-username' };
 
   const existing = await readOwnModelsRecord(dataPath);
-  const complete = recordIsComplete(existing, username);
+  const accountId = positiveId(CONFIG.accountId);
+  const recordId = positiveId(existing && existing.accountId);
+  if (accountId && recordId && accountId !== recordId) return { skipped: 'other-account' };
+
+  const complete = recordIsComplete(existing, username, accountId);
+  if (accountId && recordId === accountId && existing && existing.username !== username && complete && !force) {
+    const age = existing.checkedAt ? clock - new Date(existing.checkedAt).getTime() : Infinity;
+    if (Number.isFinite(age) && age >= 0 && age < OWN_MODELS_DUE_MS) {
+      const renamed = { ...existing, username };
+      await writeFile(filePath(dataPath), renamed);
+      if (dataPath === CONFIG.dataPath) remember(renamed);
+      return { skipped: 'fresh' };
+    }
+  }
+
   if (!force && complete && onlyIfMissing) return { skipped: 'present' };
   if (!force && complete && existing.checkedAt) {
     const age = clock - new Date(existing.checkedAt).getTime();
@@ -193,10 +227,10 @@ export async function refreshOwnModels ({
   let openItems;
   let privateItems;
   try {
-    openItems = await walkPass(fetchPage, { username, secretKey, signal });
-    privateItems = await walkPass(fetchPage, {
+    openItems = await runAsBackground(() => walkPass(fetchPage, { username, secretKey, signal }));
+    privateItems = await runAsBackground(() => walkPass(fetchPage, {
       username, secretKey, signal, availability: 'Private'
-    });
+    }));
   } catch (err) {
     if (signal?.aborted || err?.name === 'AbortError') return { skipped: 'aborted' };
     return { skipped: 'error' };
@@ -209,6 +243,7 @@ export async function refreshOwnModels ({
     listed: [...LISTED],
     models
   };
+  if (accountId) record.accountId = accountId;
   const dir = `${dataPath}/model-cache`;
   if (!fs.existsSync(dir)) await fs.promises.mkdir(dir, { recursive: true });
   await writeFile(filePath(dataPath), record);

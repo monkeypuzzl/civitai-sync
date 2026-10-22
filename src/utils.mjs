@@ -132,6 +132,8 @@ export async function readFile (filepath) {
   return await fs.readFile(filepath, 'utf-8');
 }
 
+let tmpSeq = 0;
+
 export async function writeFile (filepath, contents, options = {}) {
   const { mkdir = true } = options;
 
@@ -144,7 +146,13 @@ export async function writeFile (filepath, contents, options = {}) {
   }
 
   const data = typeof contents === 'string' ? contents : JSON.stringify(contents, null, 2);
-  const tmpPath = `${filepath}.tmp`;
-  await fs.writeFile(tmpPath, data);
-  await rename(tmpPath, filepath);
+  const pid = globalThis.process ? globalThis.process.pid : 0;
+  const tmpPath = `${filepath}.${pid}.${++tmpSeq}.tmp`;
+  try {
+    await fs.writeFile(tmpPath, data);
+    await rename(tmpPath, filepath);
+  } catch (error) {
+    try { await unlink(tmpPath); } catch (ignoreErr) { /* temp already moved */ }
+    throw error;
+  }
 }

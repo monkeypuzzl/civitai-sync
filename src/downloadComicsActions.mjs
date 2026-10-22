@@ -1,15 +1,21 @@
 import chalk from 'chalk';
 import { getMyProjects, getProjectShell, getChapter, formatApiError } from './civitaiApi.mjs';
-import { mergeComic, saveComic } from './comics.mjs';
+import { readFile, fileExists } from './utils.mjs';
+import {
+  mergeComic,
+  saveComic,
+  saveComicData,
+  comicFilepath,
+  comicNeedsChapters,
+  applyComicShell,
+  saveChangedComicChrome
+} from './comics.mjs';
 import { setConfigParam } from './config.mjs';
 import { upsertIndexEntries } from './serverIndex.mjs';
 import { listenForEscKeyPress, plural, formatElapsed, formatActivity } from './downloadActions.mjs';
-import { wait } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
 
 export { listenForEscKeyPress };
-
-const DATA_RATE_LIMIT = 100;
 
 function isAborted (signal) {
   return signal ? signal.aborted : false;
@@ -19,6 +25,8 @@ export async function fetchComics (options = {}) {
   const {
     withImages = CONFIG.downloadMedia !== false,
     overwriteIfModified = true,
+    checkAllMedia = false,
+    latest = false,
     secretKey = '',
     log = console.log,
     onProgress,
@@ -29,6 +37,7 @@ export async function fetchComics (options = {}) {
     time: (new Date()).toISOString(),
     comicsDownloaded: 0,
     comicsNew: 0,
+    comicsUpdated: 0,
     comicsSaved: 0,
     imagesSaved: 0,
     activity: null,
@@ -46,14 +55,13 @@ export async function fetchComics (options = {}) {
 
   function reportText ({ esc = true } = {}) {
     const elapsed = formatElapsed(Date.now() - new Date(report.time).getTime());
-    const activityText = formatActivity(report.activity, { itemNoun: 'comic' });
+    const activityText = formatActivity(report.activity);
     const title = chalk.hex('#a5d8ff')('Downloading comics');
-    const line1 = activityText
-      ? `${title} ${chalk.dim('·')} ${chalk.dim(activityText)}`
-      : title;
-    const newText = report.comicsNew > 0 ? chalk.green(plural(report.comicsNew, 'new comic')) : '';
+    const line1 = `${title} ${chalk.dim('·')} ${chalk.dim(activityText)}`;
+    const newText = report.comicsNew > 0 ? chalk.green(`${report.comicsNew} new`) : '';
+    const updatedText = report.comicsUpdated > 0 ? chalk.green(`${report.comicsUpdated} updated`) : '';
     const imagesText = report.imagesSaved > 0 ? plural(report.imagesSaved, 'image') : '';
-    const resultParts = [imagesText, newText, `elapsed ${elapsed}`].filter(Boolean);
+    const resultParts = [newText, updatedText, imagesText, `elapsed ${elapsed}`].filter(Boolean);
     const line2 = chalk.dim(`  ${resultParts.join(' · ')}`);
     let line3;
     if (isAborted(signal)) {
@@ -98,7 +106,6 @@ export async function fetchComics (options = {}) {
       const projectId = listed?.id;
       if (projectId == null) continue;
 
-      await wait(DATA_RATE_LIMIT);
       if (isAborted(signal)) {
         report.aborted = true;
         break;
@@ -120,6 +127,41 @@ export async function fetchComics (options = {}) {
         continue;
       }
 
+      let saved = null;
+      const existingPath = comicFilepath({ id: shell.id, createdAt: shell.createdAt });
+      if (existingPath && await fileExists(existingPath)) {
+        try {
+          saved = JSON.parse(await readFile(existingPath));
+        } catch {
+          saved = null;
+        }
+      }
+
+      if (latest === true && !comicNeedsChapters(shell, saved) && saved?.downloadOpen !== true) {
+        const next = applyComicShell(saved, shell);
+        const willWrite = JSON.stringify(next, null, 2);
+        const current = JSON.stringify(saved, null, 2);
+        if (willWrite !== current) {
+          const written = await saveComicData(next);
+          if (!written) {
+            report.errors.push({ message: 'Could not save comic data' });
+            continue;
+          }
+          report.comicsSaved += 1;
+          report.comicsUpdated += 1;
+          if (withImages && CONFIG.downloadMedia !== false) {
+            const chrome = await saveChangedComicChrome(next, saved, { signal, secretKey, onProgress: progress });
+            report.imagesSaved += chrome.imagesSaved || 0;
+            if (chrome.aborted) {
+              report.aborted = true;
+              break;
+            }
+          }
+          report.savedItems.push(next);
+        }
+        continue;
+      }
+
       const chapterSummaries = Array.isArray(shell.chapters) ? shell.chapters : [];
       const chapters = [];
 
@@ -131,7 +173,6 @@ export async function fetchComics (options = {}) {
         const chapterPosition = summary?.position;
         if (chapterPosition == null) continue;
 
-        await wait(DATA_RATE_LIMIT);
         if (isAborted(signal)) {
           report.aborted = true;
           break;
@@ -153,6 +194,7 @@ export async function fetchComics (options = {}) {
       const saveReport = await saveComic(merged, {
         overwriteIfModified,
         withImages,
+        checkAllMedia: checkAllMedia === true,
         signal,
         secretKey,
         onProgress: (activity) => progress(activity)
@@ -161,7 +203,11 @@ export async function fetchComics (options = {}) {
       report.comicsNew += saveReport.comicNew || 0;
       report.comicsSaved += saveReport.comicSaved || 0;
       report.imagesSaved += saveReport.imagesSaved || 0;
+      if (!(saveReport.comicNew > 0) && ((saveReport.comicSaved || 0) > 0 || (saveReport.imagesSaved || 0) > 0)) {
+        report.comicsUpdated += 1;
+      }
 
+      if (saveReport.fault) report.fault = saveReport.fault;
       if (saveReport.aborted) {
         report.aborted = true;
         break;
@@ -186,7 +232,7 @@ export async function fetchComics (options = {}) {
       await upsertIndexEntries({ comics: report.savedItems }).catch(() => {});
     }
 
-    const hasData = (report.comicsNew || 0) > 0 || (report.imagesSaved || 0) > 0;
+    const hasData = (report.comicsNew || 0) > 0 || (report.comicsUpdated || 0) > 0 || (report.imagesSaved || 0) > 0;
     if (hasData || report.complete) {
       await setConfigParam('lastDownloadComics', new Date().toISOString()).catch(() => {});
     }
@@ -202,7 +248,7 @@ export function formatComicCompletion (report) {
   if (!report || typeof report !== 'object') return '';
 
   const elapsed = formatElapsed(Date.now() - new Date(report.time).getTime());
-  const hasNewData = (report.comicsNew || 0) > 0 || (report.imagesSaved || 0) > 0;
+  const hasNewData = (report.comicsNew || 0) > 0 || (report.comicsUpdated || 0) > 0 || (report.imagesSaved || 0) > 0;
 
   if (!hasNewData && !report.aborted && !(report.errors?.length)) {
     return `${chalk.hex('#a5d8ff')('Up to date')} ${chalk.dim('·')} no new comics found.\n`;
@@ -224,8 +270,9 @@ export function formatComicCompletion (report) {
   }
 
   const imagesText = (report.imagesSaved || 0) > 0 ? plural(report.imagesSaved, 'image') : '';
-  const newComicsText = (report.comicsNew || 0) > 0 ? chalk.green(plural(report.comicsNew, 'new comic')) : '';
-  const contentParts = [imagesText, newComicsText].filter(Boolean);
+  const newComicsText = (report.comicsNew || 0) > 0 ? chalk.green(`${report.comicsNew} new`) : '';
+  const updatedText = (report.comicsUpdated || 0) > 0 ? chalk.green(`${report.comicsUpdated} updated`) : '';
+  const contentParts = [newComicsText, updatedText, imagesText].filter(Boolean);
   const line1 = contentParts.length
     ? `${label} ${chalk.dim('·')} ${contentParts.join(` ${chalk.dim('·')} `)}`
     : label;

@@ -4,13 +4,17 @@ import { dirname } from 'node:path';
 import { stat as fsStat, lstat as fsLstat, link as fsLink } from 'node:fs/promises';
 import { setConfigParam, removeConfigParam, setConfig, DEFAULT_CONFIG } from './config.mjs';
 import { normalizeGenerationReactions } from './downloadTypes.mjs';
-import { generationsMediaDir, getGenerationDates, getGenerationIdsByDate, getGeneration, mediaFilepath } from './generations.mjs';
+import { generationsMediaDir, generationFilepath, getGenerationDates, getGenerationIdsByDate, getGeneration, mediaFilepath } from './generations.mjs';
 import { getPostDates, postsDataDir, POST_DRAFTS_DIR } from './posts.mjs';
 import { extractInputDescriptors, saveInputMedia } from './inputMedia.mjs';
+import { postedGenerationView } from './checkpointResolution.mjs';
 import { CONFIG, CURRENT_VERSION } from './cli.mjs';
 import { fileExists, listDirectory, listDirectories, isDate, rename, unlink, copyFile, removeDirectoryIfEmpty, writeFile, readFile } from './utils.mjs';
 import { backfillContentHashes } from './contentHashBackfill.mjs';
-import { waitForExplorerIdle } from './explorerIdle.mjs';
+import { waitForExplorerIdle, parkIfExplorerBusy } from './explorerIdle.mjs';
+import { loadPrepMarks, prepMarks, savePrepMarks, liveMarkKey } from './prepMarks.mjs';
+import { migrateStoredExportQueries } from './exports.mjs';
+import { flushFetchMiss } from './fetchMiss.mjs';
 
 // Frozen historical tag-directory names. `migrateDirectoryLayout` (the v4→v5
 // layout move) used to read these from `generations.mjs`'s live
@@ -527,13 +531,31 @@ function addInputReport (report, result) {
 // Idempotent: saveInputMedia reuses an existing inputs/ file and does not
 // re-fetch. Additive: never unlinks. Fail-soft 404s via saveInputMedia.
 // `now` is injectable so tests can pin the window without wall-clock flake.
+async function liveFileFresh (filepath) {
+  let st;
+  try { st = await fsStat(filepath); } catch { return { fresh: false, mtimeMs: null }; }
+  const gate = parkIfExplorerBusy();
+  if (gate) await gate;
+  const key = liveMarkKey(filepath);
+  const prev = key ? prepMarks().live[key] : undefined;
+  if (prev != null && prev === st.mtimeMs) return { fresh: true, mtimeMs: st.mtimeMs, key };
+  return { fresh: false, mtimeMs: st.mtimeMs, key };
+}
+
+function rememberLive (key, mtimeMs) {
+  if (!key || mtimeMs == null) return;
+  prepMarks().live[key] = mtimeMs;
+}
+
 export async function migrateCaptureLiveInputs ({ now = () => new Date() } = {}) {
   const report = { saved: 0, reused: 0, skipped: 0 };
+  try {
 
   if (CONFIG.excludeImages === true || CONFIG.downloadMedia === false) {
     return report;
   }
 
+  await loadPrepMarks();
   const nowMs = now().getTime();
   const windowStartDay = new Date(nowMs - LIVE_INPUT_WINDOW_MS).toISOString().slice(0, 10);
 
@@ -544,12 +566,19 @@ export async function migrateCaptureLiveInputs ({ now = () => new Date() } = {})
     if (date < windowStartDay) continue;
     const ids = await getGenerationIdsByDate(date);
     for (const id of ids) {
+      const filepath = generationFilepath({ id, createdAt: `${date}T12:00:00.000Z` });
+      const seen = await liveFileFresh(filepath);
+      if (seen.fresh) continue;
       await waitForExplorerIdle();
       const generation = await getGeneration(date, id);
       if (!generation) continue;
-      if (!createdAtInLiveWindow(generation.createdAt, nowMs)) continue;
+      if (!createdAtInLiveWindow(generation.createdAt, nowMs)) {
+        rememberLive(seen.key, seen.mtimeMs);
+        continue;
+      }
       const descriptors = extractInputDescriptors(generation, 'generation');
-      addInputReport(report, await saveInputMedia(descriptors));
+      addInputReport(report, await saveInputMedia(descriptors, { recall: 'auto' }));
+      rememberLive(seen.key, seen.mtimeMs);
     }
   }
 
@@ -558,19 +587,23 @@ export async function migrateCaptureLiveInputs ({ now = () => new Date() } = {})
     const files = await listDirectory(dir);
     const jsonFiles = files.filter(f => f.endsWith('.json'));
     for (const file of jsonFiles) {
+      const filepath = `${dir}/${file}`;
+      const seen = await liveFileFresh(filepath);
+      if (seen.fresh) continue;
       await waitForExplorerIdle();
       let post;
       try {
-        post = JSON.parse(await readFile(`${dir}/${file}`));
+        post = JSON.parse(await readFile(filepath));
       } catch {
         continue;
       }
       const images = Array.isArray(post?.images) ? post.images : [];
       for (const image of images) {
         if (!createdAtInLiveWindow(image?.createdAt, nowMs)) continue;
-        const descriptors = extractInputDescriptors(image.meta || image, 'post-image');
-        addInputReport(report, await saveInputMedia(descriptors));
+        const descriptors = extractInputDescriptors(postedGenerationView(image).meta || image, 'post-image');
+        addInputReport(report, await saveInputMedia(descriptors, { recall: 'auto' }));
       }
+      rememberLive(seen.key, seen.mtimeMs);
     }
   }
 
@@ -585,7 +618,11 @@ export async function migrateCaptureLiveInputs ({ now = () => new Date() } = {})
   // Comics: if data/comics is absent this is a no-op. Do not invent a
   // comics reader — Phase 5b walks references through extractInputDescriptors.
 
+  await savePrepMarks();
   return report;
+  } finally {
+    await flushFetchMiss();
+  }
 }
 
 const OLD_DOWNLOAD_KEYS = ['excludeImages', 'generationMediaTypes', 'generationDataTypes'];
@@ -642,7 +679,8 @@ export async function migrate () {
     // the stamp below; re-running on a later bump re-attempts the then-current
     // 30-day window. Additive, never unlinks.
     await migrateCaptureLiveInputs();
-    await backfillContentHashes();
+    await backfillContentHashes({ force: true });
+    await migrateStoredExportQueries();
   }
 
   // Also when the version stamp already matches. The early return above

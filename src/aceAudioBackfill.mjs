@@ -16,10 +16,14 @@ import {
   sidecarFilePath,
   readSidecarSync,
   id3TagByteLength,
-  readAceAudioFromMp3
+  readAceAudioFromMp3,
+  upsertAceAudioSidecar
 } from './aceAudioId3.mjs';
 import { fetchAceSongIntoSidecar } from './aceAudioWorkflow.mjs';
+import { runAsBackground } from './requestScheduler.mjs';
 import { waitForExplorerIdle } from './explorerIdle.mjs';
+import { workflowFetchUrl } from './civitaiApi.mjs';
+import { recordFetchMiss, flushFetchMiss } from './fetchMiss.mjs';
 
 function diskPathFromThumbnail (thumbnailPath, mediaPath) {
   if (!mediaPath) return null;
@@ -66,18 +70,27 @@ export async function backfillAceAudio ({
   mediaPath = CONFIG?.mediaPath,
   secretKey
 } = {}) {
+  try {
   await waitForExplorerIdle();
-  if (!dataPath || !mediaPath) return;
+  if (!dataPath || !mediaPath) return { wrote: false };
 
   const items = mediaItems == null ? await mediaItemsFromIndex() : mediaItems;
   const sidecar = readSidecarSync(dataPath);
   let dirty = false;
-
+  const id3Holes = [];
   for (const item of items || []) {
+    if (item?.type !== 'audio') continue;
+    if (item.audio?.musicDescription) continue;
+    const id = normalizeMediaId(item?.id);
+    if (!id) continue;
+    const filepath = diskPathFromThumbnail(item.thumbnailPath, mediaPath);
+    if (!filepath || path.extname(filepath).toLowerCase() !== '.mp3') continue;
+    id3Holes.push(item);
+  }
+
+  for (const item of id3Holes) {
     await waitForExplorerIdle();
     try {
-      if (item?.type !== 'audio') continue;
-      if (item.audio?.musicDescription) continue;
       const id = normalizeMediaId(item?.id);
       if (!id) continue;
       const filepath = diskPathFromThumbnail(item.thumbnailPath, mediaPath);
@@ -116,25 +129,44 @@ export async function backfillAceAudio ({
 
   if (secretKey) {
     const afterId3 = dirty ? readSidecarSync(dataPath) : sidecar;
+    const workflowHoles = [];
     for (const item of items || []) {
+      if (item?.type !== 'audio') continue;
+      if (item.audio?.mode !== 'simple') continue;
+      if (item.audio?.musicDescription) continue;
+      const id = normalizeMediaId(item?.id);
+      if (!id) continue;
+      workflowHoles.push(item);
+    }
+    for (const item of workflowHoles) {
       await waitForExplorerIdle();
       try {
-        if (item?.type !== 'audio') continue;
-        if (item.audio?.mode !== 'simple') continue;
-        if (item.audio?.musicDescription) continue;
         const id = normalizeMediaId(item?.id);
         if (!id) continue;
         const prev = afterId3[id];
         if (prev?.musicDescription) continue;
-        if (prev?.workflowMiss && !prev.musicDescription) continue;
+        if (prev?.workflowMiss && !prev.musicDescription) {
+          if (prev.workflowId) {
+            await recordFetchMiss(workflowFetchUrl(prev.workflowId), {
+              outcome: 'terminal',
+              httpStatus: 404,
+              message: '',
+              cause: ''
+            });
+            afterId3[id] = { ...prev, workflowMiss: false };
+            await upsertAceAudioSidecar(dataPath, { [id]: { workflowMiss: false } });
+          }
+          continue;
+        }
         const workflowId = item.containers?.generation?.id;
         if (!workflowId) continue;
-        const result = await fetchAceSongIntoSidecar({
+        const result = await runAsBackground(() => fetchAceSongIntoSidecar({
           workflowId,
           audioIds: [id],
           secretKey,
-          dataPath
-        });
+          dataPath,
+          recall: 'auto'
+        }));
         if (result?.ok || result?.miss) {
           afterId3[id] = {
             ...(afterId3[id] || {}),
@@ -149,5 +181,9 @@ export async function backfillAceAudio ({
 
   await waitForExplorerIdle();
   const { migrateCaptureLiveInputs } = await import('./migrate.mjs');
-  await migrateCaptureLiveInputs();
+  const live = await migrateCaptureLiveInputs();
+  return { wrote: dirty || (live?.saved > 0) };
+  } finally {
+    await flushFetchMiss();
+  }
 }

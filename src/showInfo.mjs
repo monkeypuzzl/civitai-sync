@@ -15,7 +15,7 @@ ${chalk.bold('Discussion page')} for ideas, issues, comments:
 ${civitaiUrl('/articles/5676')}
 
 ${chalk.bold('Create API key')}:
-${civitaiUrl('/user/account')}
+${civitaiUrl('/user/account/security')}
 
 ${chalk.bold('Download')}: save your Generations, Posts, and Comics.
 ${chalk.bold('Explore')}: open the "Explorer" for a website library of your creations.

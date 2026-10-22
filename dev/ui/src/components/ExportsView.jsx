@@ -1,14 +1,14 @@
 import { useState, useEffect, useCallback, useRef, useId } from 'preact/hooks';
 import {
-  listExports, createExport, updateExport, deleteExport, planExport,
-  syncExport, cancelExportSync, connectExportSync, getModelHierarchy
+  listExports, createExport, updateExport, deleteExport, removalFileCount,
+  syncExport, cancelExportSync, connectExportSync, planExportDraft, getModelHierarchy
 } from '../api.js';
 import { OpenFolderButton } from './OpenFolderButton.jsx';
 import { FacetBar } from './FacetBar.jsx';
 import { PUBLICATION_FACET, USED_AS_INPUT_FACET } from '../lib/publication.js';
 import { describeQuery, scopeNamesFromTree, scopeNeedsNames } from '../lib/query-label.js';
 import { useDocumentTitle } from '../lib/page-title.js';
-import { exportPendingCopy, exportRowKind, REMOVAL_BUSY_MS, removalBusyLabel, removalFailureCopy } from '../lib/export-status.js';
+import { exportPendingCopy, exportRowKind, syncAllSlugs, REMOVAL_BUSY_MS, removalBusyLabel, removalFailureCopy } from '../lib/export-status.js';
 
 // The export query editor reuses the Phase 3 FacetBar for membership only
 // (facets + search). Arrangement (`sortFields` / `groupAxes` / Arrange) is
@@ -20,10 +20,10 @@ import { exportPendingCopy, exportRowKind, REMOVAL_BUSY_MS, removalBusyLabel, re
 // is a post-entry field with no meaning over a bare media-item.
 const EXPORT_FACETS = [
   { key: 'reaction', kind: 'chips', source: 'reaction', valuesSource: 'reactionTags', options: ['favorite', 'feedback:liked', 'feedback:disliked'] },
-  { key: 'type', kind: 'nested-tree', tree: 'type-workflow', label: 'Media Type' },
+  { key: 'mediaType', kind: 'nested-tree', tree: 'type-workflow', label: 'Media Type' },
   { key: 'aspect', kind: 'nested-tree', tree: 'aspect', label: 'Aspect Ratio', alwaysShowRoots: true },
-  { key: 'scope', kind: 'tree', label: 'Models' },
-  { key: 'dateFrom', key2: 'dateTo', kind: 'date-range', label: 'When' },
+  { key: 'models', kind: 'tree', label: 'Models' },
+  { key: 'dateFrom', key2: 'dateTo', kind: 'date-range', label: 'Date' },
   { key: 'cfgMin', key2: 'cfgMax', kind: 'number-range', label: 'CFG' },
   { key: 'stepsMin', key2: 'stepsMax', kind: 'number-range', label: 'Steps' },
   PUBLICATION_FACET,
@@ -32,9 +32,9 @@ const EXPORT_FACETS = [
 
 const EMPTY_EXPORT_FACET_PARAMS = {};
 
-const CSV_KEYS = ['tag', 'reaction', 'type', 'aspect', 'publication', 'workflow', 'workflowMode'];
-const STR_KEYS = ['dateFrom', 'dateTo', 'scope'];
-const FLAG_KEYS = ['mine'];
+const CSV_KEYS = ['tag', 'reaction', 'mediaType', 'aspect', 'publication', 'workflow', 'workflowMode'];
+const STR_KEYS = ['dateFrom', 'dateTo', 'models'];
+const FLAG_KEYS = [];
 const NUM_KEYS = ['cfgMin', 'cfgMax', 'stepsMin', 'stepsMax'];
 
 // --- Query <-> form-state conversion --------------------------------------
@@ -173,7 +173,7 @@ function StatusCell ({ rec, job, busyLabel, onSyncNow, onRetry, onCancel }) {
         {copy.kind === 'failure'
           ? <FailureHint copy={copy} />
           : <span class="export-status-label">{copy.text}</span>}
-        <button type="button" class="text-btn" onClick={onSyncNow}>Sync now</button>
+        <button type="button" class="action-btn" onClick={onSyncNow}>Sync</button>
       </div>
     );
   }
@@ -195,14 +195,15 @@ function StatusCell ({ rec, job, busyLabel, onSyncNow, onRetry, onCancel }) {
 
 // --- One export row -------------------------------------------------------
 
-function ExportRow ({ rec, job, removing, removalPending, busyLabel, removalError, scopeNames, onEdit, onAskRemove, onConfirmRemove, onCancelRemove, onSyncNow, onCancel }) {
+function ExportRow ({ rec, job, removing, removalPending, busyLabel, removalError, scopeNames, scopeTree, onEdit, onAskRemove, onConfirmRemove, onCancelRemove, onSyncNow, onCancel }) {
   const dest = rec.path || `media/exports/${rec.slug}`;
+  const sentence = describeQuery(rec.query, scopeNames, scopeTree);
   return (
     <div class="export-row">
       <div class="export-row-main">
         <div class="export-row-name">{rec.name}</div>
         <div class="export-row-dest mono">{dest}</div>
-        <div class="export-row-query">{describeQuery(rec.query, scopeNames)}</div>
+        <div class="export-row-query" title={sentence}>{sentence}</div>
       </div>
       <div class="export-row-status">
         <StatusCell
@@ -240,14 +241,12 @@ function ExportRow ({ rec, job, removing, removalPending, busyLabel, removalErro
 
 // --- Create / edit form ---------------------------------------------------
 
-// Save commits the export definition; the dry-run plan (C1d) then gates the
-// *sync* (the file operations). On submit the view persists the def and fetches
-// an exact plan: a `confirm` verdict (copy-with-bytes / >200 ops / any
-// deletion) is handed back as `confirmPlan` and the form shows the precise
-// preview before the user applies; an `auto` verdict syncs silently and the
-// view closes the form. While the preview is shown the fields are locked so the
+// Save plans the unsaved form first. A `confirm` verdict (a copy above its
+// byte or file ceiling) is handed back as `confirmPlan` and is not written
+// until Confirm & sync. An `auto` verdict writes and syncs, and the view
+// closes the form. While the preview is shown the fields are locked so the
 // plan can't go stale under an edit — Back returns to the editable form.
-function ExportForm ({ initial, confirmPlan, scopeNames, ensureScopeNames, onSave, onConfirm, onBack, onCancel, saving, error }) {
+function ExportForm ({ initial, confirmPlan, scopeNames, scopeTree, ensureScopeNames, onSave, onConfirm, onBack, onCancel, saving, error }) {
   const isEdit = !!initial;
   const [name, setName] = useState(initial?.name || '');
   const [destPath, setDestPath] = useState(initial?.path || '');
@@ -263,7 +262,7 @@ function ExportForm ({ initial, confirmPlan, scopeNames, ensureScopeNames, onSav
   const updateQuery = useCallback((partial) => setQuery(prev => ({ ...prev, ...partial })), []);
 
   useEffect(() => {
-    if (scopeNeedsNames(stateToQuery(query, q).scope)) ensureScopeNames();
+    if (scopeNeedsNames(stateToQuery(query, q).models)) ensureScopeNames();
   }, [query, q, ensureScopeNames]);
 
   function submit (e) {
@@ -333,13 +332,15 @@ function ExportForm ({ initial, confirmPlan, scopeNames, ensureScopeNames, onSav
       </fieldset>
 
       <div class="property">
-        <label class="checkbox-label">
+        <label class="switch">
           <input
             type="checkbox"
+            role="switch"
             checked={includeInputMedia}
             disabled={locked}
             onChange={e => setIncludeInputMedia(e.target.checked)}
           />
+          <span class="switch-track" aria-hidden="true" />
           Include input media
         </label>
         <div class="export-field-help">
@@ -357,7 +358,7 @@ function ExportForm ({ initial, confirmPlan, scopeNames, ensureScopeNames, onSav
           onSearchInput={(v) => setQ(v)}
           facetParams={EMPTY_EXPORT_FACET_PARAMS}
         />
-        <div class="export-query-summary">{describeQuery(stateToQuery(query, q), scopeNames)}</div>
+        <div class="export-query-summary">{describeQuery(stateToQuery(query, q), scopeNames, scopeTree)}</div>
       </div>
 
       {error && <div class="property-error">{error}</div>}
@@ -402,23 +403,31 @@ export function ExportsView () {
   const [removalBusy, setRemovalBusy] = useState(null);
   const [removalErrors, setRemovalErrors] = useState({});
   const [scopeNames, setScopeNames] = useState(null);
+  const [scopeTree, setScopeTree] = useState(null);
 
-  const jobMeta = useRef({});                      // slug -> { jobId, disconnect }
+  const jobMeta = useRef({});                      // slug -> { jobId, disconnect, resolveDone }
   const namesState = useRef('idle');
   const viewAlive = useRef(true);
   const removalTimer = useRef(null);
+  const removalCheck = useRef(null);
+  const queueRunning = useRef(false);
+  const [queueBusy, setQueueBusy] = useState(false);
 
   const ensureScopeNames = useCallback(() => {
     if (namesState.current !== 'idle') return;
     namesState.current = 'loading';
     getModelHierarchy({})
-      .then(tree => { if (viewAlive.current) setScopeNames(scopeNamesFromTree(tree)); })
+      .then(tree => {
+        if (!viewAlive.current) return;
+        setScopeTree(tree);
+        setScopeNames(scopeNamesFromTree(tree));
+      })
       .catch(() => { if (viewAlive.current) setScopeNames(null); })
       .finally(() => { if (viewAlive.current) namesState.current = 'done'; });
   }, []);
 
   useEffect(() => {
-    if (exports.some(rec => scopeNeedsNames(rec.query?.scope))) ensureScopeNames();
+    if (exports.some(rec => scopeNeedsNames(rec.query?.models || rec.query?.scope))) ensureScopeNames();
   }, [exports, ensureScopeNames]);
 
   const reload = useCallback(async () => {
@@ -447,6 +456,7 @@ export function ExportsView () {
     viewAlive.current = false;
     clearTimeout(removalTimer.current);
     for (const meta of Object.values(jobMeta.current)) {
+      if (meta?.resolveDone) meta.resolveDone({ status: 'unmount', final: true });
       if (meta?.disconnect) meta.disconnect();
     }
     jobMeta.current = {};
@@ -455,6 +465,8 @@ export function ExportsView () {
   const startSync = useCallback(async (slug) => {
     const resp = await syncExport(slug).catch(() => null);
     if (resp && resp.jobId) {
+      let resolveDone;
+      const done = new Promise((resolve) => { resolveDone = resolve; });
       setJobs(prev => ({
         ...prev,
         [slug]: { filesDone: 0, filesTotal: (resp.add || 0) + (resp.remove || 0), status: 'running', mode: resp.linkMode }
@@ -467,22 +479,45 @@ export function ExportsView () {
         if (ev.final) {
           const meta = jobMeta.current[slug];
           if (meta?.disconnect) meta.disconnect();
+          if (meta?.resolveDone) meta.resolveDone(ev);
           delete jobMeta.current[slug];
           setJobs(prev => { const n = { ...prev }; delete n[slug]; return n; });
           reload();
           notifyChange();
         }
       });
-      jobMeta.current[slug] = { jobId: resp.jobId, disconnect };
+      jobMeta.current[slug] = { jobId: resp.jobId, disconnect, resolveDone };
       notifyChange();
-    } else {
-      // pending (offline destination) / insufficient-space / not-found — the
-      // server already recorded the status; refresh to surface it.
-      await reload();
-      notifyChange();
+      return { ...resp, done };
     }
+    // pending (offline destination) / insufficient-space / not-found — the
+    // server already recorded the status; refresh to surface it.
+    await reload();
+    notifyChange();
     return resp;
   }, [reload]);
+
+  const syncAll = useCallback(async () => {
+    if (queueRunning.current) return;
+    const slugs = syncAllSlugs(exports, jobs);
+    if (!slugs.length) return;
+    queueRunning.current = true;
+    setQueueBusy(true);
+    try {
+      for (const slug of slugs) {
+        if (!viewAlive.current) return;
+        const resp = await startSync(slug);
+        if (!viewAlive.current) return;
+        if (!resp?.jobId) continue;
+        const terminal = await resp.done;
+        if (!viewAlive.current) return;
+        if (terminal?.status === 'cancelled' || terminal?.status === 'unmount') return;
+      }
+    } finally {
+      queueRunning.current = false;
+      if (viewAlive.current) setQueueBusy(false);
+    }
+  }, [exports, jobs, startSync]);
 
   const cancelSync = useCallback(async (slug) => {
     const meta = jobMeta.current[slug];
@@ -497,59 +532,69 @@ export function ExportsView () {
     setSaveError(null);
   }, []);
 
-  // Save commits the definition, then the dry-run plan gates the sync: an
-  // `auto` plan applies silently and closes the form; a `confirm` plan is held
-  // in pendingPlan so the form shows the exact preview and awaits an explicit
-  // Confirm & sync. A pending/undeterminable plan (offline destination) just
-  // closes the form — the def is saved and the server already marked it Pending.
-  const handleSave = useCallback(async (body) => {
-    setSaving(true);
-    setSaveError(null);
-    const isEdit = !!form?.initial;
+  // The draft plan is the gate. A confirm plan is not written until
+  // Confirm & sync. An auto plan is written and then synced. A destination
+  // that cannot be read leaves the saved export unchanged.
+  const writeExport = useCallback(async (body, { isEdit, slug } = {}) => {
     const rec = isEdit
-      ? await updateExport(form.initial.slug, body).catch(() => null)
+      ? await updateExport(slug, body).catch(() => null)
       : await createExport(body).catch(() => null);
     if (!rec || rec.error || !rec.slug) {
       setSaveError(rec?.error
         ? removalFailureCopy(rec.error, { pathEdit: true })
         : 'Could not save the export.');
+      return null;
+    }
+    return rec;
+  }, []);
+
+  const handleSave = useCallback(async (body) => {
+    setSaving(true);
+    setSaveError(null);
+    const isEdit = !!form?.initial;
+    const slug = form?.initial?.slug;
+    const plan = await planExportDraft({ ...body, slug }).catch(() => null);
+    if (!plan || plan.error || plan.pending) {
+      setSaveError(plan?.pending
+        ? 'The destination folder can\'t be read, so the export was not changed.'
+        : 'Could not save the export.');
       setSaving(false);
       return;
     }
-    notifyChange();
 
-    const plan = await planExport(rec.slug).catch(() => null);
+    if (plan.mode === 'confirm') {
+      setPendingPlan({
+        isEdit,
+        slug,
+        body,
+        plan,
+        dest: plan.path || `media/exports/${plan.slug || slug || ''}`
+      });
+      setSaving(false);
+      return;
+    }
+
+    const rec = await writeExport(body, { isEdit, slug });
     setSaving(false);
-
-    if (plan && plan.mode === 'confirm') {
-      const dest = rec.path || `media/exports/${rec.slug}`;
-      // Re-bind the (possibly just-created) form to the persisted record so a
-      // Back → re-Save updates it rather than creating a duplicate; the slug is
-      // stable across edits, and the form keeps the user's typed field values.
-      setForm({ initial: rec });
-      setPendingPlan({ slug: rec.slug, plan, dest });
-      await reload();
-      return; // keep the form open showing the exact preview
-    }
-
+    if (!rec) return;
     finishForm();
+    notifyChange();
     await reload();
-    if (plan && !plan.pending && !plan.error) {
-      // `auto` plan (or a zero-op no-op): apply silently.
-      await startSync(rec.slug);
-    } else {
-      // offline / undeterminable: the def is saved and recorded Pending.
-      notifyChange();
-    }
-  }, [form, reload, startSync, finishForm]);
+    await startSync(rec.slug);
+  }, [form, reload, startSync, finishForm, writeExport]);
 
   const handleConfirmSync = useCallback(async () => {
-    if (!pendingPlan) return;
-    const { slug } = pendingPlan;
+    if (!pendingPlan?.body) return;
+    setSaving(true);
+    setSaveError(null);
+    const rec = await writeExport(pendingPlan.body, pendingPlan);
+    setSaving(false);
+    if (!rec) return;
     finishForm();
+    notifyChange();
     await reload();
-    await startSync(slug);
-  }, [pendingPlan, reload, startSync, finishForm]);
+    await startSync(rec.slug);
+  }, [pendingPlan, reload, startSync, finishForm, writeExport]);
 
   const handleBackToEdit = useCallback(() => setPendingPlan(null), []);
 
@@ -592,11 +637,18 @@ export function ExportsView () {
     <main class="main-content exports-view">
       <div class="exports-header">
         <h1 class="exports-title">Exports</h1>
-        {!form && (
-          <button type="button" class="action-btn" onClick={() => { setSaveError(null); setPendingPlan(null); setForm({ initial: null }); }}>
-            New export
-          </button>
-        )}
+        <div class="exports-header-actions">
+          {syncAllSlugs(exports, jobs).length > 0 && (
+            <button type="button" class="action-btn" disabled={queueBusy} onClick={syncAll}>
+              Sync
+            </button>
+          )}
+          {!form && (
+            <button type="button" class="action-btn" onClick={() => { setSaveError(null); setPendingPlan(null); setForm({ initial: null }); }}>
+              New export
+            </button>
+          )}
+        </div>
       </div>
 
       <p class="exports-intro">
@@ -610,6 +662,7 @@ export function ExportsView () {
           initial={form.initial}
           confirmPlan={pendingPlan ? { ...pendingPlan.plan, dest: pendingPlan.dest } : null}
           scopeNames={scopeNames}
+          scopeTree={scopeTree}
           ensureScopeNames={ensureScopeNames}
           onSave={handleSave}
           onConfirm={handleConfirmSync}
@@ -640,14 +693,28 @@ export function ExportsView () {
                 : null}
               removalError={removalErrors[rec.slug]}
               scopeNames={scopeNames}
+              scopeTree={scopeTree}
               onEdit={(r) => { setSaveError(null); setPendingPlan(null); setForm({ initial: r }); setRemoving(null); }}
-              onAskRemove={(slug) => {
+              onAskRemove={async (slug) => {
+                if (removalCheck.current) return;
+                removalCheck.current = slug;
                 setRemovalErrors(prev => {
                   if (!prev[slug]) return prev;
                   const next = { ...prev };
                   delete next[slug];
                   return next;
                 });
+                let files = null;
+                try {
+                  const body = await removalFileCount(slug);
+                  if (body && Number.isFinite(body.files)) files = body.files;
+                } catch { /* a failed read keeps the note */ }
+                removalCheck.current = null;
+                if (!viewAlive.current) return;
+                if (files === 0) {
+                  handleRemove(slug, { deleteFiles: false });
+                  return;
+                }
                 setRemoving(slug);
               }}
               onConfirmRemove={handleRemove}

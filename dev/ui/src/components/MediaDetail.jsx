@@ -12,7 +12,7 @@ import {
   viewableMeshFiles
 } from '../lib/param-display.js';
 import { detailFacts, snapshotFromRaw } from '../../../../src/parameters.mjs';
-import { browsingLevelLabel, tagsWithoutRating } from '../lib/browsing-level.js';
+import { browsingLevelLabel } from '../lib/browsing-level.js';
 import {
   downloadTitle,
   mediaFileCopy,
@@ -40,10 +40,12 @@ import { OriginSiblingNav } from './OriginSiblingNav.jsx';
 import { memberMediaHref, openOriginNode, openStepperSibling, readHistoryAnchorSlot, relatedOriginHref, usedInConsumerHref } from '../lib/open-origin-node.js';
 import { readHistoryBag } from '../lib/origin-page.js';
 import { useGalleryData } from '../hooks/useGalleryData.js';
-import { canonicalMediaRouteId, containerResetQuery, originFetchQuery } from '../lib/media-href.js';
+import { canonicalMediaRouteId, membershipContainerHref, originFetchQuery } from '../lib/media-href.js';
 import { memberCursor, comicReadingIds, mapMemberIdsToCanonical } from '../lib/container-member.js';
 import { useDocumentTitle } from '../lib/page-title.js';
 import { useOwnModelsRevision } from '../lib/own-models-rev.js';
+import { useIndexEpoch } from '../lib/index-settle.js';
+import { quietSlotPatch } from '../lib/origin-page.js';
 import { useMagicEscape } from '../hooks/useMagicEscape.js';
 import {
   createFullscreenSession,
@@ -84,19 +86,8 @@ function uniqueById (list) {
   return [...seen.values()];
 }
 
-function containerHref (kind, id) {
-  if (id == null || id === '') return '';
-  const view = kind === 'generation' ? 'generations'
-    : kind === 'post' ? 'posts'
-      : kind === 'comic' ? 'comics'
-        : null;
-  if (!view) return '';
-  return formatUrl({
-    view,
-    entityId: String(id),
-    modelTrail: null,
-    params: containerResetQuery(kind)
-  });
+function containerHref (kind, id, params, origin) {
+  return membershipContainerHref(kind, id, params, origin);
 }
 
 const MEMBER_NAV_LABEL = {
@@ -356,7 +347,7 @@ function ContainerMemberNav ({ kind, item, mediaId, params, cacheRef, origin }) 
 function ContainerEdgeList ({ kind, items, textFor, mediaId, params, pageFiles, cacheRef, origin, originKind }) {
   const heading = containerEdgeHeading(kind, items.length);
   if (!heading) return null;
-  const soleHref = items.length === 1 ? containerHref(kind, items[0].id) : '';
+  const soleHref = items.length === 1 ? containerHref(kind, items[0].id, params, origin) : '';
   const sectionClass = originKind === kind ? 'meta-section meta-section-origin' : 'meta-section';
   const memberNav = (item) => (pageFiles
     ? (
@@ -391,7 +382,7 @@ function ContainerEdgeList ({ kind, items, textFor, mediaId, params, pageFiles, 
       <h2 class="meta-label">{heading}</h2>
       <div class="meta-edge-list">
         {items.map(item => {
-          const href = containerHref(kind, item.id);
+          const href = containerHref(kind, item.id, params, origin);
           return (
             <div key={String(item.id)} class="meta-edge-item">
               <a
@@ -594,7 +585,6 @@ export function MediaDetail ({
   const simplePrompt = String(audio?.simplePrompt || audio?.songConcept || '').trim();
   const musicDescription = String(audio?.musicDescription || '').trim();
   const showSimplePrompt = Boolean(simplePrompt && simplePrompt !== musicDescription);
-  const lyrics = String(audio?.lyrics || '').trim();
   const facts = index
     ? detailFacts({
       type: cur.type,
@@ -608,10 +598,11 @@ export function MediaDetail ({
       seed: cur.seed,
       showSeed: true,
       omitModelIdentity: Boolean(modelBlock),
-      omitQuantity: true,
       omitWorkflowAliases: Boolean(workflowLine)
     })
     : null;
+  const prompt = String(index?.prompt || '').trim() || (facts && facts.promptText) || '';
+  const lyrics = String(audio?.lyrics || '').trim() || (facts && facts.lyricsText) || '';
 
   const inputRefs = Array.isArray(index?.inputs)
     ? index.inputs.filter(inp => inp && inp.id && inp.thumbnailPath)
@@ -637,7 +628,7 @@ export function MediaDetail ({
   const ratingLabel = (ratingLevel != null && Number(ratingLevel) > 0)
     ? browsingLevelLabel(ratingLevel)
     : '';
-  const displayTags = tagsWithoutRating(tags);
+  const contentTags = Array.isArray(index?.contentTags) ? index.contentTags : [];
   const stageRecord = index || fallback;
   const stageStyle = mediaStageStyle(stageRecord);
   const poster = coverStillPath(stageRecord);
@@ -856,14 +847,14 @@ export function MediaDetail ({
           </div>
         )}
 
-        {!isAudio && index?.prompt && (
+        {!isAudio && prompt && (
           <div class="meta-section">
             <h2 class="meta-label">Prompt</h2>
-            <p class="meta-prompt"><HighlightText text={index.prompt} search={search} /></p>
+            <p class="meta-prompt"><HighlightText text={prompt} search={search} /></p>
             <div class="meta-actions">
               <button
                 class={`meta-action${copiedLabel === 'prompt' ? ' copied' : ''}`}
-                onClick={() => doCopy(index.prompt, 'prompt')}
+                onClick={() => doCopy(prompt, 'prompt')}
               >
                 {copiedLabel === 'prompt' ? 'Copied' : 'Copy prompt'}
               </button>
@@ -950,12 +941,12 @@ export function MediaDetail ({
           </div>
         )}
 
-        {displayTags.length > 0 && (
+        {contentTags.length > 0 && (
           <div class="meta-section">
-            <h2 class="meta-label">Tags</h2>
+            <h2 class="meta-label">Content Tags</h2>
             <ul class="meta-tags">
-              {displayTags.map(tag => (
-                <li key={typeof tag === 'string' ? tag : tag.id} class={`meta-tag ${tagCssClass(tag)}`}>
+              {contentTags.map(tag => (
+                <li key={tag} class={`meta-tag ${tagCssClass(tag)}`}>
                   {tagLabel(tag)}
                 </li>
               ))}
@@ -1232,15 +1223,38 @@ export function MediaDetailView ({ entityId, occurrenceGenerationId, params, onO
   const fileOrigin = fileOriginFrom(params);
   const anchorSlot = readHistoryAnchorSlot();
   const ownRev = useOwnModelsRevision();
+  const indexEpoch = useIndexEpoch();
+  const [playing, setPlaying] = useState(false);
+  const [heldEpoch, setHeldEpoch] = useState(indexEpoch);
+  useEffect(() => {
+    if (!playing) setHeldEpoch(indexEpoch);
+  }, [playing, indexEpoch]);
   const cacheKey = detailCacheKey({
     view: 'media',
     id: entityId,
     params,
     anchor: anchorSlot
-  }) + `:own${ownRev}`;
+  }) + `:own${ownRev}:ix${heldEpoch}`;
   const held = useHeldDetail(cacheKey, () => loadMediaDetail(entityId, params, anchorSlot));
   const data = held.displayed;
   const onRoute = held.shownKey === cacheKey && !!data?.index;
+  useEffect(() => {
+    if (!onRoute) return undefined;
+    const root = document.querySelector('.media-detail-page');
+    if (!root) return undefined;
+    const sync = () => {
+      const live = [...root.querySelectorAll('video, audio')].some(el => !el.paused && !el.ended);
+      setPlaying(live);
+    };
+    root.addEventListener('play', sync, true);
+    root.addEventListener('pause', sync, true);
+    root.addEventListener('ended', sync, true);
+    return () => {
+      root.removeEventListener('play', sync, true);
+      root.removeEventListener('pause', sync, true);
+      root.removeEventListener('ended', sync, true);
+    };
+  }, [onRoute, entityId, fullscreen]);
 
   const fsSession = useRef(createFullscreenSession());
   const fsAlive = useRef(true);
@@ -1421,8 +1435,10 @@ export function MediaDetailView ({ entityId, occurrenceGenerationId, params, onO
       delete nextParams.from;
       changed = true;
     }
-    if (!origin.slotInUrl && nextParams.slot) {
-      delete nextParams.slot;
+    const slotPatch = quietSlotPatch({ urlSlot: nextParams.slot, origin });
+    if (slotPatch) {
+      if (slotPatch.slot) nextParams.slot = slotPatch.slot;
+      else delete nextParams.slot;
       changed = true;
     }
     if (nextParams.usedIn != null && nextParams.usedIn !== '1') {

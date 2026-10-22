@@ -49,13 +49,45 @@ export function browsingLevelLabel (value) {
   return '?';
 }
 
-// Scanner ladder names stored as content tags. The media page prints the
-// image's browsing-level label in Rating and omits these from tag chips.
-// The tag filter still lists them.
-const RATING_TAG_NAMES = new Set(['pg', 'pg-13', 'r', 'x', 'xxx']);
+// Scanner ladder names stored as content tags. Mildest first. The media
+// page omits these from tag chips and prints the browsing-level label in
+// Rating. The Tags picker lists the same names in a Rating block, using
+// these labels. Blocked is a browsing-level label, not a ladder name.
+const RATING_TAG_LADDER = [
+  ['pg', 'PG'],
+  ['pg-13', 'PG-13'],
+  ['r', 'R'],
+  ['x', 'X'],
+  ['xxx', 'XXX']
+];
+
+const RATING_TAG_NAMES = new Set(RATING_TAG_LADDER.map(([name]) => name));
+const RATING_TAG_LABEL_BY_NAME = new Map(RATING_TAG_LADDER);
+const RATING_TAG_RANK_BY_NAME = new Map(RATING_TAG_LADDER.map(([name], index) => [name, index]));
+
+function ratingTagKey (name) {
+  return String(name ?? '').trim().toLowerCase();
+}
 
 export function isRatingTagName (name) {
-  return RATING_TAG_NAMES.has(String(name ?? '').trim().toLowerCase());
+  return RATING_TAG_NAMES.has(ratingTagKey(name));
+}
+
+export function ratingTagLabel (name) {
+  return RATING_TAG_LABEL_BY_NAME.get(ratingTagKey(name)) ?? null;
+}
+
+export function ratingTagRank (name) {
+  const rank = RATING_TAG_RANK_BY_NAME.get(ratingTagKey(name));
+  return rank == null ? null : rank;
+}
+
+const RATING_TOKEN_BY_LABEL = new Map(RATING_TAG_LADDER.map(([token, label]) => [label, token]));
+
+// Ladder token for a browsing-level bit, using the same label as the media
+// page. Unrated and Blocked are not tokens.
+export function ratingTokenForLevel (value) {
+  return RATING_TOKEN_BY_LABEL.get(browsingLevelLabel(value)) ?? null;
 }
 
 export function tagsWithoutRating (tags) {

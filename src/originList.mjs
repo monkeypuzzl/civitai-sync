@@ -18,7 +18,9 @@ import {
   isValidGroupAxis,
   derivePostStatus,
   deriveComicStatus,
-  resolveMemberMedia
+  resolveMemberMedia,
+  itemReactionTags,
+  toTile
 } from './explorerQuery.mjs';
 import { normalizeMediaId } from './mediaId.mjs';
 
@@ -39,26 +41,57 @@ export function originListCacheEpoch () {
   return originEpoch;
 }
 
-const ORIGIN_QUERY_KEYS = Object.freeze([
-  'tag', 'type', 'scope', 'ecosystem', 'model', 'version', 'versionId',
-  'resourceType', 'resource', 'aspect', 'cfgMin', 'cfgMax', 'stepsMin',
-  'stepsMax', 'workflow', 'workflowMode', 'usedAsInput', 'publication', 'dateFrom', 'dateTo',
-  'status', 'inPost', 'reaction',
-  'sort', 'groupBy', 'groupSort', 'q', 'title'
-]);
-
 const VALID_SCOPES = new Set(['generations', 'posts', 'comics', 'models', 'imports']);
 
-const MEDIA_FACET_KEYS = [
-  'tag', 'reaction', 'type', 'scope', 'ecosystem', 'model', 'version', 'versionId',
-  'resourceType', 'resource', 'aspect', 'cfgMin', 'cfgMax', 'stepsMin',
-  'stepsMax', 'workflow', 'workflowMode', 'usedAsInput', 'publication', 'dateFrom', 'dateTo',
-  'status', 'inPost'
+// One row per origin-query key. `matchesFacets` is the gallery and the
+// container/media walk. `media` keys also hide media items inside a container
+// that already matched. `container` keys choose the container and leave
+// every media item. `order` keys sort the walk. `scopes` overrides `role` per
+// origin; a missing scope means the key does not apply there.
+const SPLIT_SCOPES = Object.freeze({
+  posts: 'container',
+  comics: 'container',
+  generations: 'media',
+  models: 'media',
+  imports: 'media'
+});
+
+const MEDIA_KEYS = [
+  'tag', 'rating', 'reaction', 'mediaType', 'models', 'aspect',
+  'cfgMin', 'cfgMax', 'stepsMin', 'stepsMax',
+  'workflow', 'workflowMode', 'usedAsInput', 'q'
 ];
 
-const CONTAINER_FACET_KEYS = [
-  'publication', 'dateFrom', 'dateTo', 'status', 'inPost'
-];
+const SPLIT_KEYS = ['publication', 'dateFrom', 'dateTo', 'status', 'inPost'];
+
+function membershipRow (key, role, scopes) {
+  return scopes
+    ? Object.freeze({ key, role, scopes })
+    : Object.freeze({ key, role });
+}
+
+export const ORIGIN_MEMBERSHIP = Object.freeze([
+  ...MEDIA_KEYS.map(key => membershipRow(key, 'media')),
+  ...SPLIT_KEYS.map(key => membershipRow(key, 'container', SPLIT_SCOPES)),
+  membershipRow('title', 'container', Object.freeze({ posts: 'container', comics: 'container' })),
+  membershipRow('postTag', 'container', Object.freeze({ posts: 'container' })),
+  ...['sort', 'groupBy', 'groupSort'].map(key => membershipRow(key, 'order'))
+]);
+
+const ORIGIN_QUERY_KEYS = Object.freeze(ORIGIN_MEMBERSHIP.map(row => row.key));
+
+function roleOnScope (row, scope) {
+  if (!row.scopes) return row.role;
+  return Object.prototype.hasOwnProperty.call(row.scopes, scope) ? row.scopes[scope] : null;
+}
+
+function keysWithRole (scope, role) {
+  const out = [];
+  for (const row of ORIGIN_MEMBERSHIP) {
+    if (roleOnScope(row, scope) === role) out.push(row.key);
+  }
+  return out;
+}
 
 function isInputOnly (mi) {
   if (!mi?.containers) return true;
@@ -95,123 +128,74 @@ function pick (params, keys) {
   return out;
 }
 
-function hasAny (params, keys) {
-  return keys.some(k => params[k] != null && params[k] !== '');
-}
-
-function mediaFacetParams (query, scope) {
-  const keys = MEDIA_FACET_KEYS.filter(k => {
-    if (k === 'publication' || k === 'dateFrom' || k === 'dateTo' || k === 'status' || k === 'inPost') {
-      return scope === 'generations' || scope === 'models' || scope === 'imports';
-    }
-    return true;
-  });
-  return pick(query || {}, keys);
-}
-
-function containerFacetParams (query, scope) {
-  const keys = CONTAINER_FACET_KEYS.filter(k => {
-    if (k === 'publication' || k === 'dateFrom' || k === 'dateTo' || k === 'status' || k === 'inPost') {
-      return scope === 'posts' || scope === 'comics';
-    }
-    return false;
-  });
-  return pick(query || {}, keys);
-}
-
 function hasMediaPredicates (query, scope) {
   const q = query || {};
-  if (q.q) return true;
-  return hasAny(q, Object.keys(mediaFacetParams(q, scope)));
+  return keysWithRole(scope, 'media').some(key => q[key] != null && q[key] !== '');
 }
 
-/** Prompt-only: item.prompt and resolved member prompts. Never negativePrompt / title / name. */
-function matchesPrompt (item, q, ctx) {
-  if (!q) return true;
-  const needle = String(q).toLowerCase();
-  const hay = new Set();
-  const add = (v) => {
-    if (typeof v === 'string' && v) hay.add(v.toLowerCase());
-  };
-  add(item.prompt);
-  if (Array.isArray(item.media)) {
-    for (const m of item.media) {
-      const mi = resolveMemberMedia(m, ctx);
-      if (mi) add(mi.prompt);
-    }
-  }
-  for (const text of hay) {
-    if (text.includes(needle)) return true;
-  }
-  return false;
+function reactionTokens (query) {
+  const raw = query?.reaction;
+  if (raw == null || raw === '') return [];
+  return String(raw).split(',').map(part => part.trim()).filter(Boolean);
 }
 
-/** Title substring: post title or comic name. Generations ignores title. */
-function matchesTitle (item, title, scope) {
-  if (!title) return true;
-  if (scope === 'generations' || scope === 'models' || scope === 'imports') return true;
-  const needle = String(title).toLowerCase();
-  if (item.type === 'post') {
-    return String(item.title || '').toLowerCase().includes(needle);
-  }
-  if (item.type === 'comic') {
-    return String(item.name || '').toLowerCase().includes(needle);
-  }
-  // Media item: any containing post title / comic name.
-  if (Array.isArray(item.containers?.posts)) {
-    for (const ref of item.containers.posts) {
-      if (String(ref?.title || '').toLowerCase().includes(needle)) return true;
-    }
-  }
-  if (Array.isArray(item.containers?.comics)) {
-    for (const ref of item.containers.comics) {
-      if (String(ref?.name || '').toLowerCase().includes(needle)) return true;
-    }
-  }
-  return false;
+/** Media keys for this scope, except reaction (the grid uses any selected mark). */
+function mediaQuery (query, scope) {
+  const keys = keysWithRole(scope, 'media').filter(key => key !== 'reaction');
+  return pick(query || {}, keys);
 }
 
-function matchesMediaItem (mi, query, scope, ctx) {
+function matchesMediaItem (mi, query, ctx) {
+  return matchesFacets(mediaItemToFilterable(mi), query || {}, null, ctx);
+}
+
+/**
+ * Container grid and card preview. Media keys use the gallery matcher.
+ * Reaction keeps a media item that carries any selected mark, so a post whose
+ * media items split Favorite and Liked still shows both.
+ */
+function memberMatchesMedia (mi, query, scope, ctx) {
   const adapted = mediaItemToFilterable(mi);
-  const facets = mediaFacetParams(query, scope);
-  // Title on posts/comics media grain is a container predicate applied to the
-  // member via containing-container titles — not via matchesFacets.
-  if (!matchesFacets(adapted, facets, null, ctx)) return false;
-  if (!matchesPrompt(adapted, query?.q, ctx)) return false;
-  if (scope === 'posts' || scope === 'comics') {
-    if (!matchesTitle(mi, query?.title, scope)) return false;
-  }
-  return true;
+  if (!matchesFacets(adapted, mediaQuery(query, scope), null, ctx)) return false;
+  const marks = reactionTokens(query);
+  if (!marks.length) return true;
+  const have = new Set(itemReactionTags(mi));
+  return marks.some(token => have.has(token));
 }
 
-function matchesContainer (container, query, scope, ctx, { requireMediaMember = true } = {}) {
-  const cFacets = containerFacetParams(query, scope);
-  if (!matchesFacets(container, cFacets, null, ctx)) return false;
-  if (scope !== 'generations' && !matchesTitle(container, query?.title, scope)) return false;
-
-  if (!requireMediaMember) return true;
-  if (!hasMediaPredicates(query, scope)) return true;
-
-  // Any member must satisfy media predicates. Identity is the gallery hop
-  // (canonical id, including a joined post/comic image id).
-  if (!Array.isArray(container.media) || !container.media.length) return false;
-  for (const m of container.media) {
-    if (isChromeRole(m)) continue;
-    const mi = resolveMemberMedia(m, ctx);
-    if (mi && matchesMediaItem(mi, query, scope, ctx)) return true;
-  }
-  // Generation entries also carry union tags / prompt at entry level.
-  if (container.type === 'generation') {
-    const mFacets = mediaFacetParams(query, scope);
-    if (matchesFacets(container, mFacets, null, ctx) && matchesPrompt(container, query?.q, ctx)) {
-      return true;
-    }
-  }
-  return false;
+function matchesContainer (container, query, ctx) {
+  return matchesFacets(container, query || {}, null, ctx);
 }
 
 function isChromeRole (m) {
   return m?.role === 'cover' || m?.role === 'hero';
+}
+
+/**
+ * Gallery tile for one container-grain row. `preview` is the first stored
+ * member the container page would show under this query (chrome skipped,
+ * one member must match every media predicate). Omitted when that member
+ * is already `media[0]`, when none match, or when the query has no media
+ * predicate. Does not reorder `media[]` and does not walk the origin list.
+ */
+export function containerListTile (entry, params, scope, ctx = {}) {
+  let previewMember = null;
+  if (hasMediaPredicates(params, scope) && Array.isArray(entry?.media) && entry.media.length) {
+    for (const m of entry.media) {
+      if (isChromeRole(m)) continue;
+      const mi = resolveMemberMedia(m, ctx);
+      if (!mi || !memberMatchesMedia(mi, params, scope, ctx)) continue;
+      if (m !== entry.media[0]) previewMember = m;
+      break;
+    }
+  }
+  return toTile(entry, {
+    q: params?.q,
+    mediaById: ctx.mediaById,
+    normalizeId: ctx.normalizeId,
+    getMediaItemById: ctx.getMediaItemById,
+    ...(previewMember ? { previewMember } : {})
+  });
 }
 
 /** Canonical media-item id for a container member, or '' when unresolved. */
@@ -357,7 +341,7 @@ function buildMediaSlots ({ scope, grain, query, entries, ctx }) {
 
   if (grain === 'container') {
     const containers = orderContainers(
-      scopeContainers(entries, scope).filter(c => matchesContainer(c, q, scope, ctx)),
+      scopeContainers(entries, scope).filter(c => matchesContainer(c, q, ctx)),
       q,
       ctx
     );
@@ -369,7 +353,7 @@ function buildMediaSlots ({ scope, grain, query, entries, ctx }) {
         if (isChromeRole(m)) continue;
         const mi = resolveMemberMedia(m, ctx);
         if (!mi) continue;
-        if (mediaPreds && !matchesMediaItem(mi, q, scope, ctx)) continue;
+        if (mediaPreds && !memberMatchesMedia(mi, q, scope, ctx)) continue;
         raw.push({ id: normalizeMediaId(mi.id), key: String(c.id) });
       }
     }
@@ -377,7 +361,7 @@ function buildMediaSlots ({ scope, grain, query, entries, ctx }) {
   }
 
   // Media grain
-  let items = scopeMediaItems(entries, scope).filter(mi => matchesMediaItem(mi, q, scope, ctx));
+  let items = scopeMediaItems(entries, scope).filter(mi => matchesMediaItem(mi, q, ctx));
   const adapted = items.map(mi => {
     const a = mediaItemToFilterable(mi);
     a._source = mi;
@@ -411,7 +395,7 @@ function buildMediaSlots ({ scope, grain, query, entries, ctx }) {
 function buildContainerSlots ({ scope, query, entries, ctx }) {
   const q = query || {};
   const containers = orderContainers(
-    scopeContainers(entries, scope).filter(c => matchesContainer(c, q, scope, ctx)),
+    scopeContainers(entries, scope).filter(c => matchesContainer(c, q, ctx)),
     q,
     ctx
   );
@@ -463,6 +447,15 @@ function readTimeEntries (entries, now) {
   return { ...entries, posts: nextPosts, comics: nextComics };
 }
 
+function ownModelsKey (ctx) {
+  const own = ctx?.ownModels;
+  if (!own || typeof own !== 'object') return '';
+  const ids = own.ids && typeof own.ids[Symbol.iterator] === 'function'
+    ? [...own.ids].map(String).sort().join(',')
+    : '';
+  return `${own.known === true ? 1 : 0}|${ids}`;
+}
+
 function cachedWalkSlots ({ scope, grain, query, entries, ctx }) {
   const effectiveGrain = (scope === 'imports' || scope === 'models') ? 'media' : grain;
   const items = Array.isArray(entries?.mediaItems) ? entries.mediaItems : EMPTY_MEDIA_ITEMS;
@@ -472,7 +465,7 @@ function cachedWalkSlots ({ scope, grain, query, entries, ctx }) {
     originSlotCache.set(items, byKey);
   }
   const now = ctx?.now ?? Date.now();
-  const key = `${originEpoch}\0${scope}\0${effectiveGrain}\0${canonicalOriginQuery(query)}\0${publicationCacheKey(entries, now)}`;
+  const key = `${originEpoch}\0${scope}\0${effectiveGrain}\0${canonicalOriginQuery(query)}\0${publicationCacheKey(entries, now)}\0${ownModelsKey(ctx)}`;
   let hit = byKey.get(key);
   if (!hit) {
     const stamped = readTimeEntries(entries, now);

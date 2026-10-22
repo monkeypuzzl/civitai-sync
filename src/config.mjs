@@ -17,7 +17,8 @@ export const DEFAULT_CONFIG = {
   downloadMedia: true,
   // `favorite` and/or `feedback:liked`, in that order, or []. Never `all`
   // or `feedback:disliked`. Remembered runs (`generationDownload`,
-  // `postDownload`) are written by a download start, not defaulted here.
+  // `postDownload`, `comicDownload`, `model3dDownload`) are written by a
+  // download start, not defaulted here. A clean All portion writes `latest`.
   generationReactions: [],
   keyEncrypt: false,
   secretKey: '',
@@ -92,8 +93,17 @@ export async function loadConfig (configPath) {
   }
 }
 
+function configFolderPair (configPath) {
+  const base = path.basename(configPath || '');
+  const stem = base.endsWith('.json') ? base.slice(0, -'.json'.length) : base;
+  if (!stem || stem === '.' || stem === '..' || base === 'default.json') {
+    return { dataPath: 'data', mediaPath: 'media' };
+  }
+  return { dataPath: `data-${stem}`, mediaPath: `media-${stem}` };
+}
+
 export async function createConfig (configPath) {
-  const config = {...DEFAULT_CONFIG};
+  const config = { ...DEFAULT_CONFIG, ...configFolderPair(configPath) };
   await writeFile(configPath, JSON.stringify(config, null, 2));
 
   return config;
@@ -135,12 +145,30 @@ export async function getConfig (configPath) {
 
 /////
 
+// One config writer at a time. A rejected write does not stall the next.
+export function createWriteQueue () {
+  let tail = Promise.resolve();
+  return function enqueue (work) {
+    const run = tail.then(() => work());
+    tail = run.then(() => {}, () => {});
+    return run;
+  };
+}
+
+const enqueueConfigWrite = createWriteQueue();
+
+function snapshotConfigWrite () {
+  const path = currentConfigPath;
+  const json = JSON.stringify(currentConfig, null, 2);
+  return enqueueConfigWrite(() => writeFile(path, json));
+}
+
 // Set loaded config
 export async function setConfig (newParams) {
   const config = await getCurrentConfig();
 
   merge(config, newParams);
-  await writeFile(currentConfigPath, JSON.stringify(currentConfig, null, 2));
+  await snapshotConfigWrite();
 
   return config;
 }
@@ -150,6 +178,7 @@ export async function setConfigParam (param, value) {
 }
 
 export async function removeConfigParam (param) {
+  await getCurrentConfig();
   delete currentConfig[param];
-  await writeFile(currentConfigPath, JSON.stringify(currentConfig, null, 2));
+  await snapshotConfigWrite();
 }

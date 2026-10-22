@@ -17,7 +17,7 @@ import { useInfiniteScroll } from './useInfiniteScroll.js';
 // MINUS session-only keys like `select` so opening the lightbox never
 // refetches). The hook keys reset/refetch on a stable stringification of
 // `query`.
-export function useGalleryData ({ fetcher, query, onPage }) {
+export function useGalleryData ({ fetcher, query, onPage, reloadEpoch = 0 }) {
   const [items, setItems] = useState([]);
   const [groupsMeta, setGroupsMeta] = useState(null);
   const [page, setPage] = useState(1);
@@ -26,6 +26,8 @@ export function useGalleryData ({ fetcher, query, onPage }) {
   const [total, setTotal] = useState(null);
   const [loading, setLoading] = useState(true);
   const fetchId = useRef(0);
+  const epochRef = useRef(reloadEpoch);
+  const suppressPageFetch = useRef(false);
 
   const queryKey = JSON.stringify(query);
 
@@ -44,6 +46,12 @@ export function useGalleryData ({ fetcher, query, onPage }) {
   }, [queryKey]);
 
   useEffect(() => {
+    if (suppressPageFetch.current) {
+      suppressPageFetch.current = false;
+      setAppliedPage(page);
+      setLoading(false);
+      return;
+    }
     const id = ++fetchId.current;
     setLoading(true);
     fetcher({ ...queryRef.current, page })
@@ -66,6 +74,42 @@ export function useGalleryData ({ fetcher, query, onPage }) {
       })
       .finally(() => { if (id === fetchId.current) setLoading(false); });
   }, [queryKey, page, fetcher]);
+
+  useEffect(() => {
+    if (epochRef.current === reloadEpoch) return undefined;
+    epochRef.current = reloadEpoch;
+    const id = ++fetchId.current;
+    const target = Math.max(1, page);
+    let cancelled = false;
+    (async () => {
+      const collected = [];
+      let pages = 1;
+      let totalValue = null;
+      let groups = null;
+      let loaded = 1;
+      for (let p = 1; p <= target; p += 1) {
+        const data = await fetcher({ ...queryRef.current, page: p });
+        if (cancelled || id !== fetchId.current) return;
+        pages = data.totalPages || 1;
+        totalValue = typeof data.total === 'number' ? data.total : null;
+        if (data.grouped || Array.isArray(data.groups)) groups = data.groups || [];
+        collected.push(...(data.items || []));
+        loaded = p;
+        if (p >= pages) break;
+      }
+      if (cancelled || id !== fetchId.current) return;
+      const nextPage = Math.min(loaded, pages);
+      if (nextPage !== page) suppressPageFetch.current = true;
+      setItems(collected);
+      setTotalPages(pages);
+      setTotal(totalValue);
+      setGroupsMeta(groups);
+      setPage(nextPage);
+      setAppliedPage(nextPage);
+      setLoading(false);
+    })().catch(() => {});
+    return () => { cancelled = true; };
+  }, [reloadEpoch, fetcher, page]);
 
   const loadMore = useCallback(() => {
     const next = nextGalleryPage(page, { loading, totalPages, appliedPage });

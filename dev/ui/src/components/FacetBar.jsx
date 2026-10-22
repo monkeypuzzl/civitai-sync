@@ -1,11 +1,13 @@
 import { useState, useRef, useEffect, useId } from 'preact/hooks';
 import { useOwnModelsRevision } from '../lib/own-models-rev.js';
+import { useIndexEpoch } from '../lib/index-settle.js';
 import { tagLabel } from '../lib/format.js';
 import { TimeText } from './TimeText.jsx';
-import { formatWhenRange } from '../lib/when-label.js';
+import { formatDateRange } from '../lib/date-label.js';
 import { getFacetValues, getModelHierarchy, getListOffer, getTypeWorkflowTree } from '../api.js';
 import { modelTypeLabel } from '../lib/modelTypeDisplay.js';
 import { RangePicker } from './RangePicker.jsx';
+import { ChipOverflow } from './ChipOverflow.jsx';
 import {
   explicitPathsFromState,
   paramsToTypeWorkflowSelection,
@@ -13,18 +15,26 @@ import {
   selectionToTypeWorkflowParams,
   toggleCheckedPaths
 } from '../../../../src/nestedTree.mjs';
-import { formatWorkflowQueryLabel } from '../../../../src/workflowVocab.mjs';
+import { filterExtraParts, typeWorkflowRowParts } from '../lib/type-workflow-label.js';
+import { arrangeTagOptions } from '../lib/tag-picker.js';
+import { parseModels, serializeModels, stringLiftQuery } from '../../../../src/modelsQuery.mjs';
 import {
-  parseScope,
-  serializeScopeTerms,
-  termCoversNode,
-  asCsvList,
   hasFlatTaxonomy,
   clearedFlatTaxonomy,
   scopeNodeKey as nodeKey,
   ancestorExpandKeys,
   narrowOwnSelection
 } from '../lib/scope.js';
+import {
+  compactModelSelection,
+  modelDisplayRoots,
+  modelRowMatches,
+  modelRowState,
+  modelStructuralState,
+  modelTermForOwnUncheck,
+  toggleModelRow
+} from '../lib/model-tree-fold.js';
+import { dropModelGroup, modelChipGroups } from '../lib/model-chip-groups.js';
 
 // Schema-driven FacetBar. Membership chrome (facets + More + Search) is the
 // default. Arrangement chrome (the Arrange cluster: group-by / group-order /
@@ -32,9 +42,9 @@ import {
 // `sortFields` and/or `groupAxes`. Galleries (Generations / Posts / Comics)
 // opt in. Export hosts must not — an export is a membership set, not a
 // sorted gallery page. Each facet is one of: chip group (inline, or a
-// labelled compact picker matching TreePicker / When chrome), multi-select,
+// labelled compact picker matching TreePicker / Date chrome), multi-select,
 // hierarchical tree (Models), nested disclosure tree (Media Type and
-// Aspect Ratio), When (date), number range,
+// Aspect Ratio), Date (date range), number range,
 // boolean toggle, segmented tristate.
 // Gallery writes go through the view's single `useUrlState` `update`.
 //
@@ -61,16 +71,19 @@ function facetListKey (facet) {
   return `${facet.kind}:${facet.source || facet.valuesSource || facet.key}`;
 }
 
-function useOutsideClose (open, setOpen, panelRef, btnRef) {
+function useOutsideClose (open, setOpen, panelRef, btnRef, extraRef) {
   useEffect(() => {
-    if (!open) return;
+    if (!open) return undefined;
     function onDown (e) {
-      if (panelRef.current && !panelRef.current.contains(e.target) &&
-          btnRef.current && !btnRef.current.contains(e.target)) setOpen(false);
+      const target = e.target;
+      if (panelRef.current && panelRef.current.contains(target)) return;
+      if (btnRef.current && btnRef.current.contains(target)) return;
+      if (extraRef && extraRef.current && extraRef.current.contains(target)) return;
+      setOpen(false);
     }
     document.addEventListener('mousedown', onDown);
     return () => document.removeEventListener('mousedown', onDown);
-  }, [open, setOpen, panelRef, btnRef]);
+  }, [open, setOpen, panelRef, btnRef, extraRef]);
 }
 
 function isoToday () {
@@ -115,7 +128,7 @@ function monthsBetween (minIso, maxIso) {
 
 // --- Chip group (small enum / pre-canned set) ------------------------------
 // Unlabelled: inline chips. Labelled: the same button+panel chrome as
-// Models & resources / When — a labelled compact picker matching TreePicker / When chrome.
+// Models & resources / Date — a labelled compact picker matching TreePicker / Date chrome.
 // Option presence comes from the list offer (intersected with declared options).
 
 function ChipGroup ({ facet, active, update, offerValues }) {
@@ -191,64 +204,161 @@ function ChipGroup ({ facet, active, update, offerValues }) {
 
 // --- Multi-select panel (large / open-ended enum) --------------------------
 
-function MultiSelect ({ facet, active, update, facetParams, offerShow }) {
+function ratingParamKey (params) {
+  const rating = params && params.rating;
+  if (Array.isArray(rating)) return rating.join(',');
+  return rating == null ? '' : String(rating);
+}
+
+function offeredRows (rows, total) {
+  return (rows || []).filter(o => {
+    if (typeof o.count !== 'number') return true;
+    if (o.count <= 0) return false;
+    if (total != null && o.count === total) return false;
+    return true;
+  });
+}
+
+function MultiSelect ({ facet, active, ratingActive, postTagActive, update, facetParams, offerShow }) {
   const fullActive = active || [];
+  const fullRating = ratingActive || [];
+  const fullPost = postTagActive || [];
   const displayActive = fullActive;
+  const isTags = facet.key === 'tag';
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
+  const [section, setSection] = useState('content');
   const [loaded, setLoaded] = useState(facet.options ? facet.options.map(v => ({ value: v, label: optionLabel(facet, v) })) : null);
   const [tagTotal, setTagTotal] = useState(null);
+  const [ratingRows, setRatingRows] = useState(null);
+  const [ratingTotal, setRatingTotal] = useState(null);
+  const [postRows, setPostRows] = useState(null);
+  const [postTotal, setPostTotal] = useState(null);
   const panelRef = useRef(null);
   const btnRef = useRef(null);
+  const activeRef = useRef(fullActive);
+  const postRef = useRef(fullPost);
+  const updateRef = useRef(update);
+  const seenRating = useRef(null);
+  activeRef.current = fullActive;
+  postRef.current = fullPost;
+  updateRef.current = update;
+  const paramsKey = JSON.stringify(facetParams || {});
+  const ratingKey = ratingParamKey(facetParams);
   useOutsideClose(open, setOpen, panelRef, btnRef);
 
   useEffect(() => {
-    if (!open || loaded != null || !facet.source) return;
+    if (!open || !facet.source) return undefined;
     let cancelled = false;
+    const requestedRating = ratingKey;
     getFacetValues(facet.source, facetParams)
       .then(data => {
         if (cancelled) return;
-        setTagTotal(typeof data.total === 'number' ? data.total : null);
-        setLoaded((data.values || []).map(v => ({
+        const values = (data.values || []).map(v => ({
           value: v.value,
           label: v.label || v.value,
           count: v.count
-        })));
+        }));
+        setTagTotal(typeof data.total === 'number' ? data.total : null);
+        setLoaded(values);
+        if (isTags) {
+          setRatingTotal(typeof data.ratingTotal === 'number' ? data.ratingTotal : null);
+          setRatingRows((data.ratings || []).map(v => ({
+            value: v.value,
+            label: v.label || v.value,
+            count: v.count
+          })));
+          setPostTotal(typeof data.postTotal === 'number' ? data.postTotal : null);
+          setPostRows((data.postTags || []).map(v => ({
+            value: v.value,
+            label: v.label || v.value,
+            count: v.count
+          })));
+          const previous = seenRating.current;
+          seenRating.current = requestedRating;
+          if (previous != null && previous !== requestedRating) {
+            const offered = new Set(values.map(v => v.value));
+            const current = activeRef.current;
+            const next = current.filter(v => offered.has(v));
+            const postOffered = new Set((data.postTags || []).map(v => v.value));
+            const currentPost = postRef.current;
+            const nextPost = currentPost.filter(v => postOffered.has(v));
+            const patch = {};
+            if (next.length !== current.length) patch[facet.key] = next;
+            if (nextPost.length !== currentPost.length) patch.postTag = nextPost;
+            if (Object.keys(patch).length) updateRef.current(patch);
+          }
+        }
       })
       .catch(() => { if (!cancelled) setLoaded([]); });
     return () => { cancelled = true; };
-  }, [open, facet.source, loaded, facetParams]);
+  }, [open, facet.source, paramsKey, ratingKey, isTags, facet.key]);
 
   if (offerShow == null) return null;
-  if (!offerShow && displayActive.length === 0) return null;
+  if (!offerShow && displayActive.length === 0 && fullRating.length === 0) return null;
 
   const options = loaded == null
     ? null
     : (() => {
-      const filtered = loaded.filter(o => {
-        if (typeof o.count !== 'number') return true;
-        if (o.count <= 0) return false;
-        if (tagTotal != null && o.count === tagTotal) return false;
-        return true;
-      });
+      const filtered = offeredRows(loaded, tagTotal);
       const have = new Set(filtered.map(o => o.value));
       const extras = displayActive.filter(v => !have.has(v)).map(v => ({ value: v, label: optionLabel(facet, v) }));
       return extras.length ? [...extras, ...filtered] : filtered;
     })();
+  const ratingOptions = !isTags || ratingRows == null
+    ? null
+    : (() => {
+      const filtered = offeredRows(ratingRows, ratingTotal);
+      const have = new Set(filtered.map(o => o.value));
+      const extras = fullRating.filter(v => !have.has(v)).map(v => ({ value: v, label: optionLabel(facet, v) }));
+      return extras.length ? [...extras, ...filtered] : filtered;
+    })();
 
-  const visible = (options || []).filter(o =>
-    !search || o.label.toLowerCase().includes(search.toLowerCase()) || o.value.toLowerCase().includes(search.toLowerCase()));
+  const postOptions = !isTags || postRows == null
+    ? null
+    : (() => {
+      const filtered = offeredRows(postRows, postTotal);
+      const have = new Set(filtered.map(o => o.value));
+      const extras = fullPost.filter(v => !have.has(v)).map(v => ({ value: v, label: optionLabel(facet, v) }));
+      return extras.length ? [...extras, ...filtered] : filtered;
+    })();
+  const arranged = options == null
+    ? null
+    : arrangeTagOptions(
+      options,
+      search,
+      isTags ? (ratingOptions || []) : undefined,
+      isTags ? (postOptions || []) : undefined,
+      section
+    );
+  const showNoMatches = arranged != null && section === 'content' && arranged.general.length === 0
+    && (search !== '' || arranged.ratings.length === 0);
+  const showPostEmpty = arranged != null && section === 'posts' && (arranged.posts || []).length === 0 && search !== '';
+  const selectedCount = displayActive.length + (isTags ? fullRating.length + fullPost.length : 0);
+  const showPosts = isTags && ((postOptions && postOptions.length > 0) || fullPost.length > 0);
+
+  const tagChip = (list, keyName) => (o) => (
+    <button
+      key={o.value}
+      type="button"
+      class={`tag-chip${list.includes(o.value) ? ' active' : ''}`}
+      onClick={() => update({ [keyName]: toggleMember(list, o.value) })}
+      title={o.value}
+    >
+      {o.label}
+    </button>
+  );
 
   return (
     <div class="tag-picker-wrap">
       <button
         ref={btnRef}
         type="button"
-        class={`quiet-btn tag-picker-btn${displayActive.length > 0 ? ' has-active' : ''}${open ? ' open' : ''}`}
+        class={`quiet-btn tag-picker-btn${selectedCount > 0 ? ' has-active' : ''}${open ? ' open' : ''}`}
         aria-expanded={open}
         onClick={() => setOpen(o => !o)}
       >
-        {facet.label}{displayActive.length > 0 ? ` (${displayActive.length})` : ''} {open ? '\u25B4' : '\u25BE'}
+        {facet.label}{selectedCount > 0 ? ` (${selectedCount})` : ''} {open ? '\u25B4' : '\u25BE'}
       </button>
 
       {open && (
@@ -261,20 +371,54 @@ function MultiSelect ({ facet, active, update, facetParams, offerShow }) {
             onInput={e => setSearch(e.target.value)}
             autoFocus
           />
+          {arranged == null && <span class="tag-picker-empty">Loading…</span>}
+          {arranged != null && arranged.ratings.length > 0 && (
+            <div class="tag-picker-section tag-picker-rating">
+              <div class="tag-picker-section-label">Rating</div>
+              <div class="tag-picker-chips">
+                {arranged.ratings.map(tagChip(fullRating, 'rating'))}
+              </div>
+            </div>
+          )}
           <div class="tag-picker-list">
-            {options == null && <span class="tag-picker-empty">Loading…</span>}
-            {options != null && visible.length === 0 && <span class="tag-picker-empty">No matches</span>}
-            {visible.map(o => (
-              <button
-                key={o.value}
-                type="button"
-                class={`tag-chip${displayActive.includes(o.value) ? ' active' : ''}`}
-                onClick={() => update({ [facet.key]: toggleMember(fullActive, o.value) })}
-                title={o.value}
-              >
-                {o.label}
-              </button>
-            ))}
+            {showPosts && (
+              <div class="tag-picker-section">
+                <button
+                  type="button"
+                  class="tag-picker-section-label tag-picker-disclosure"
+                  aria-expanded={section === 'posts'}
+                  onClick={() => setSection(current => current === 'posts' ? 'content' : 'posts')}
+                >
+                  Posts {section === 'posts' ? '\u25BE' : '\u25B8'}
+                </button>
+                {section === 'posts'
+                  ? (showPostEmpty
+                    ? <span class="tag-picker-empty">No matches</span>
+                    : <div class="tag-picker-scroll"><div class="tag-picker-chips">{(arranged.posts || []).map(tagChip(fullPost, 'postTag'))}</div></div>)
+                  : (fullPost.length > 0 && (
+                    <div class="tag-picker-chips">{fullPost.map(value => tagChip(fullPost, 'postTag')({ value, label: optionLabel(facet, value) }))}</div>
+                  ))}
+              </div>
+            )}
+            {arranged != null && (arranged.general.length > 0 || showNoMatches || displayActive.length > 0) && (
+              <div class="tag-picker-section">
+                <button
+                  type="button"
+                  class="tag-picker-section-label tag-picker-disclosure"
+                  aria-expanded={section === 'content'}
+                  onClick={() => setSection('content')}
+                >
+                  Content {section === 'content' ? '\u25BE' : '\u25B8'}
+                </button>
+                {section === 'content'
+                  ? (arranged.general.length === 0
+                    ? <span class="tag-picker-empty">No matches</span>
+                    : <div class="tag-picker-scroll"><div class="tag-picker-chips">{arranged.general.map(tagChip(displayActive, facet.key))}</div></div>)
+                  : (displayActive.length > 0 && (
+                    <div class="tag-picker-chips">{displayActive.map(value => tagChip(displayActive, facet.key)({ value, label: optionLabel(facet, value) }))}</div>
+                  ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -282,336 +426,25 @@ function MultiSelect ({ facet, active, update, facetParams, offerShow }) {
   );
 }
 
-// --- Hierarchical tree picker (`kind: 'tree'`, `scope=` grammar) -----------
+// --- Hierarchical tree picker (`kind: 'tree'`, `models=` grammar) ---------
 
-function familyRootTerms (tree) {
-  const terms = [];
-  for (const sec of tree?.familySections || []) {
-    const fams = sec.families || [];
-    if (fams.length === 1) terms.push({ familyId: fams[0].key });
-    else if (fams.length > 1) terms.push({ familyOutput: sec.outputType });
-  }
-  return terms;
-}
-
-function childTerms (tree, parent) {
-  if (!tree) return [];
-  if (parent?.familyOutput && !parent.familyId) {
-    const sec = (tree.familySections || []).find(s => s.outputType === parent.familyOutput);
-    return (sec?.families || []).map(f => ({ familyOutput: sec.outputType, familyId: f.key }));
-  }
-  if (parent?.familyId) return [];
-  if (!parent.type) return (tree.types || []).map(t => ({ type: t.key }));
-  const type = (tree.types || []).find(t => t.key === parent.type);
-  if (!type) return [];
-  if (!parent.baseModel && !parent.ecosystem) {
-    return (type.baseModels || []).map(b => ({ ...parent, baseModel: b.key }));
-  }
-  if (parent.ecosystem && !parent.baseModel) return [];
-  const base = (type.baseModels || []).find(b => b.key === parent.baseModel);
-  if (!base) return [];
-  if (!parent.modelId && !parent.modelName) {
-    return (base.models || []).map(m => (
-      m.idKind === 'name'
-        ? { ...parent, modelName: m.key }
-        : { ...parent, modelId: m.key }
-    ));
-  }
-  const model = (base.models || []).find(m =>
-    (parent.modelId && m.idKind !== 'name' && String(m.key) === String(parent.modelId)) ||
-    (parent.modelName && m.idKind === 'name' && m.key === parent.modelName)
-  );
-  if (!model || parent.versionId) return [];
-  return (model.versions || []).map(v => ({ ...parent, versionId: v.key }));
-}
-
-function findNode (tree, term) {
-  if (!tree) return null;
-  if (term?.familyId || term?.familyOutput) {
-    for (const sec of tree.familySections || []) {
-      if (!term.familyId) {
-        if (sec.outputType === term.familyOutput) {
-          return { key: sec.outputType, label: sec.label, count: sec.count };
-        }
-        continue;
-      }
-      const fam = (sec.families || []).find(f => f.key === term.familyId);
-      if (fam) return fam;
-    }
-    return null;
-  }
-  if (!term?.type) return null;
-  const type = (tree.types || []).find(t => t.key === term.type);
-  if (!type) return null;
-  if (!term.baseModel) return type;
-  const base = (type.baseModels || []).find(b => b.key === term.baseModel);
-  if (!base) return null;
-  if (!term.modelId && !term.modelName) return base;
-  const model = (base.models || []).find(m =>
-    (term.modelId && m.idKind !== 'name' && String(m.key) === String(term.modelId)) ||
-    (term.modelName && m.idKind === 'name' && m.key === term.modelName)
-  );
-  if (!model) return null;
-  if (!term.versionId) return model;
-  return (model.versions || []).find(v => String(v.key) === String(term.versionId)) || null;
-}
-
-function checkState (nodeTerm, terms, tree) {
-  if ((terms || []).some(t => termCoversNode(t, nodeTerm))) return 'checked';
-  const kids = childTerms(tree, nodeTerm);
-  if (!kids.length) return 'unchecked';
-  const states = kids.map(k => checkState(k, terms, tree));
-  if (states.every(s => s === 'checked')) return 'checked';
-  if (states.some(s => s !== 'unchecked')) return 'indeterminate';
-  return 'unchecked';
-}
-
-function explode (covering, unchecked, tree) {
-  const coverDepth = (() => {
-    if (covering.versionId) return 4;
-    if (covering.modelId || covering.modelName) return 3;
-    if (covering.baseModel || covering.ecosystem) return 2;
-    if (covering.type) return 1;
-    return 0;
-  })();
-  const path = [];
-  if (unchecked.type) path.push({ type: unchecked.type });
-  if (unchecked.baseModel) {
-    path.push({ type: unchecked.type, baseModel: unchecked.baseModel });
-  } else if (unchecked.ecosystem) {
-    path.push({ type: unchecked.type, ecosystem: unchecked.ecosystem });
-  }
-  if (unchecked.modelId || unchecked.modelName) {
-    path.push({
-      type: unchecked.type,
-      ...(unchecked.baseModel ? { baseModel: unchecked.baseModel } : {}),
-      ...(unchecked.ecosystem ? { ecosystem: unchecked.ecosystem } : {}),
-      ...(unchecked.modelId ? { modelId: unchecked.modelId } : { modelName: unchecked.modelName })
-    });
-  }
-  if (unchecked.versionId) {
-    path.push({ ...path[path.length - 1], versionId: unchecked.versionId });
-  }
-  const added = [];
-  for (let depth = coverDepth; depth < path.length; depth++) {
-    const parent = depth === 0 ? {} : path[depth - 1];
-    const exclude = path[depth];
-    for (const child of childTerms(tree, parent)) {
-      if (termCoversNode(child, exclude) && termCoversNode(exclude, child)) continue;
-      added.push(child);
-    }
-  }
-  return added;
-}
-
-function compactTerms (tree, terms) {
-  if (!tree || !Array.isArray(terms) || !terms.length) return terms || [];
-  const covered = new Set();
-  const out = [];
-  function visit (nodeTerm) {
-    const state = checkState(nodeTerm, terms, tree);
-    if (state === 'checked') {
-      out.push(nodeTerm);
-      terms.forEach((t, i) => {
-        if (termCoversNode(nodeTerm, t) || termCoversNode(t, nodeTerm)) covered.add(i);
-      });
-      return;
-    }
-    if (state === 'indeterminate') {
-      for (const k of childTerms(tree, nodeTerm)) visit(k);
-    }
-  }
-  for (const t of (tree.types || [])) visit({ type: t.key });
-  for (const root of familyRootTerms(tree)) visit(root);
-  terms.forEach((t, i) => { if (!covered.has(i)) out.push(t); });
-  return out;
-}
-
-function addNodeTerm (terms, nodeTerm, tree) {
-  const next = (terms || []).filter(t => !termCoversNode(nodeTerm, t) && !termCoversNode(t, nodeTerm));
-  next.push(nodeTerm);
-  return compactTerms(tree, next);
-}
-
-function removeNodeTerm (terms, nodeTerm, tree) {
-  const covering = (terms || []).filter(t => termCoversNode(t, nodeTerm));
-  if (!covering.length) {
-    return compactTerms(tree, (terms || []).filter(t => !termCoversNode(nodeTerm, t)));
-  }
-  let next = (terms || []).filter(t => !termCoversNode(t, nodeTerm) && !termCoversNode(nodeTerm, t));
-  for (const cov of covering) {
-    next.push(...explode(cov, nodeTerm, tree));
-  }
-  return compactTerms(tree, next);
-}
-
-function termChipLabel (term, tree) {
-  if (term?.familyId || term?.familyOutput) {
-    const n = findNode(tree, term);
-    if (term.familyId) return n?.label || term.familyId;
-    return n?.label || term.familyOutput;
-  }
-  const parts = [];
-  if (term.type) {
-    const n = findNode(tree, { type: term.type });
-    parts.push(n?.label || modelTypeLabel(term.type) || term.type);
-  }
-  if (term.baseModel) {
-    const n = findNode(tree, { type: term.type, baseModel: term.baseModel });
-    parts.push(n?.label || term.baseModel);
-  } else if (term.ecosystem) {
-    parts.push(term.ecosystem);
-  }
-  if (term.modelId || term.modelName) {
-    const n = findNode(tree, term);
-    parts.push(n?.label || term.modelName || `Model ${term.modelId}`);
-  }
-  if (term.versionId) {
-    const n = findNode(tree, term);
-    parts.push(n?.label || `Version ${term.versionId}`);
-  }
-  return parts.join(' / ') || 'Selection';
-}
-
-function nodeMatchesSearch (tree, term, q) {
-  if (!q) return true;
-  const node = findNode(tree, term);
-  if (node?.label && node.label.toLowerCase().includes(q)) return true;
-  if (term.type && String(term.type).toLowerCase().includes(q)) return true;
-  return childTerms(tree, term).some(k => nodeMatchesSearch(tree, k, q));
-}
-
-function findVersionTerm (tree, versionId) {
-  if (!tree) return null;
-  for (const type of tree.types || []) {
-    for (const base of type.baseModels || []) {
-      for (const model of base.models || []) {
-        const hit = (model.versions || []).find(v => String(v.key) === String(versionId));
-        if (hit) {
-          return model.idKind === 'name'
-            ? { type: type.key, baseModel: base.key, modelName: model.key, versionId: String(versionId) }
-            : { type: type.key, baseModel: base.key, modelId: model.key, versionId: String(versionId) };
-        }
-      }
-    }
-  }
-  return null;
-}
-
-function resolveModelInTree (tree, name, type) {
-  if (!tree || !name) return null;
-  const types = type
-    ? (tree.types || []).filter(t => t.key === type)
-    : (tree.types || []);
-  for (const t of types) {
-    for (const b of t.baseModels || []) {
-      const m = (b.models || []).find(n => n.label === name || n.key === name);
-      if (m) {
-        return m.idKind === 'name'
-          ? { type: t.key, baseModel: b.key, modelName: m.key }
-          : { type: t.key, baseModel: b.key, modelId: m.key };
-      }
-    }
-  }
-  return null;
-}
-
-function resolveVersionByName (tree, name, hint) {
-  if (!tree || !name) return null;
-  const types = hint.type
-    ? (tree.types || []).filter(t => t.key === hint.type)
-    : (tree.types || []);
-  const hits = [];
-  for (const t of types) {
-    for (const b of t.baseModels || []) {
-      const models = hint.model
-        ? (b.models || []).filter(m => m.label === hint.model || m.key === hint.model)
-        : (b.models || []);
-      for (const m of models) {
-        for (const v of m.versions || []) {
-          if (v.label === name || v.key === name) {
-            hits.push(m.idKind === 'name'
-              ? { type: t.key, baseModel: b.key, modelName: m.key, versionId: v.key }
-              : { type: t.key, baseModel: b.key, modelId: m.key, versionId: v.key });
-          }
-        }
-      }
-    }
-  }
-  return hits;
-}
-
-function flatToScopeTerms (state, tree) {
-  const types = asCsvList(state.resourceType);
-  const ecos = asCsvList(state.ecosystem);
-  const models = [...new Set([...asCsvList(state.model), ...asCsvList(state.resource)])];
-  const versionNames = asCsvList(state.version);
-  const versionIds = asCsvList(state.versionId);
-
-  const onlyVersionIds = versionIds.length && !types.length && !ecos.length && !models.length && !versionNames.length;
-  if (onlyVersionIds) {
-    return versionIds.map(id => findVersionTerm(tree, id) || { versionId: String(id) });
-  }
-
-  const typeOpts = types.length ? types : [null];
-  const ecoOpts = ecos.length ? ecos : [null];
-  const modelOpts = models.length ? models : [null];
-  const verNameOpts = versionNames.length ? versionNames : [null];
-  const verIdOpts = versionIds.length ? versionIds : [null];
-  const terms = [];
-
-  for (const type of typeOpts) {
-    for (const eco of ecoOpts) {
-      for (const model of modelOpts) {
-        for (const vName of verNameOpts) {
-          for (const vId of verIdOpts) {
-            const term = {};
-            if (type) term.type = type;
-            if (eco) term.ecosystem = eco;
-            if (vId) {
-              const found = findVersionTerm(tree, vId);
-              if (found) {
-                terms.push({ ...term, ...found });
-                continue;
-              }
-              term.versionId = String(vId);
-            }
-            if (model) {
-              const resolved = resolveModelInTree(tree, model, type, eco);
-              if (resolved?.modelId) term.modelId = resolved.modelId;
-              else if (resolved?.modelName) term.modelName = resolved.modelName;
-              else term.modelName = model;
-            }
-            if (vName && !vId) {
-              const hits = resolveVersionByName(tree, vName, { type, eco, model });
-              if (hits.length) {
-                for (const hit of hits) terms.push({ ...term, ...hit });
-                continue;
-              }
-            }
-            if (Object.keys(term).length) terms.push(term);
-          }
-        }
-      }
-    }
-  }
-  return compactTerms(tree, terms);
-}
-
-function TreeRow ({ term, tree, terms, search, expanded, toggleExpand, onToggle, depth }) {
-  const node = findNode(tree, term);
-  if (!node) return null;
+function TreeRow ({ row, tree, terms, search, expanded, toggleExpand, onToggle, depth, registerRow }) {
+  if (!row) return null;
   const q = search.trim().toLowerCase();
-  if (q && !nodeMatchesSearch(tree, term, q)) return null;
-  const kids = childTerms(tree, term);
-  const state = checkState(term, terms, tree);
-  const key = nodeKey(term);
+  if (q && !modelRowMatches(row, q)) return null;
+  const kids = row.children || [];
+  const state = modelRowState(tree, terms, row);
+  const key = row.key;
   const isOpen = expanded.has(key) || !!q;
   const showCaret = kids.length > 0;
 
   return (
     <>
-      <div class="tree-picker-row" data-depth={depth}>
+      <div
+        class="tree-picker-row"
+        data-depth={depth}
+        ref={el => { if (registerRow) registerRow(key, el); }}
+      >
         {showCaret
           ? (
             <button
@@ -627,16 +460,16 @@ function TreeRow ({ term, tree, terms, search, expanded, toggleExpand, onToggle,
             type="checkbox"
             checked={state === 'checked'}
             ref={el => { if (el) el.indeterminate = state === 'indeterminate'; }}
-            onChange={() => onToggle(term, state !== 'checked')}
+            onChange={() => onToggle(row.term, state !== 'checked')}
           />
-          <span class="tree-picker-label">{node.label}</span>
+          <span class="tree-picker-label">{row.label}</span>
         </label>
-        <span class="tree-picker-count">{node.count}</span>
+        <span class="tree-picker-count">{row.count}</span>
       </div>
-      {showCaret && isOpen && kids.map(k => (
+      {showCaret && isOpen && kids.map(kid => (
         <TreeRow
-          key={nodeKey(k)}
-          term={k}
+          key={kid.key}
+          row={kid}
           tree={tree}
           terms={terms}
           search={search}
@@ -644,6 +477,7 @@ function TreeRow ({ term, tree, terms, search, expanded, toggleExpand, onToggle,
           toggleExpand={toggleExpand}
           onToggle={onToggle}
           depth={depth + 1}
+          registerRow={registerRow}
         />
       ))}
     </>
@@ -663,19 +497,27 @@ function ownedModelTerms (tree) {
   return out;
 }
 
-function TreePicker ({ facet, state, update, facetParams, offerShow, showOwn, ownRev }) {
+function TreePicker ({ facet, state, update, facetParams, offerShow, showOwn, ownKnown, ownRev }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [tree, setTree] = useState(null);
   const [expanded, setExpanded] = useState(() => new Set());
+  const [scrollKey, setScrollKey] = useState('');
   const panelRef = useRef(null);
   const btnRef = useRef(null);
+  const moreRef = useRef(null);
+  const rowRefs = useRef(new Map());
   const normalizedRef = useRef(false);
   const seenRev = useRef(ownRev);
-  useOutsideClose(open, setOpen, panelRef, btnRef);
+  const indexEpoch = useIndexEpoch();
+  const seenIndex = useRef(indexEpoch);
+  useOutsideClose(open, setOpen, panelRef, btnRef, moreRef);
 
-  const terms = parseScope(state.scope);
-  const mine = state.mine === true;
+  const parsedModels = parseModels(state.models);
+  const terms = parsedModels.filter(term => !term.mine);
+  const mineTerm = parsedModels.find(term => term.mine) || null;
+  const mine = !!mineTerm && !!ownKnown;
+  const mineHoles = mine && Array.isArray(mineTerm.except) ? mineTerm.except : [];
 
   useEffect(() => {
     if (seenRev.current === ownRev) return;
@@ -684,7 +526,13 @@ function TreePicker ({ facet, state, update, facetParams, offerShow, showOwn, ow
   }, [ownRev]);
 
   useEffect(() => {
-    const needsFetch = open || (!normalizedRef.current && hasFlatTaxonomy(state));
+    if (seenIndex.current === indexEpoch) return;
+    seenIndex.current = indexEpoch;
+    setTree(null);
+  }, [indexEpoch]);
+
+  useEffect(() => {
+    const needsFetch = open || parsedModels.length > 0;
     if (!needsFetch || tree != null) return;
     let cancelled = false;
     getModelHierarchy(facetParams)
@@ -695,21 +543,30 @@ function TreePicker ({ facet, state, update, facetParams, offerShow, showOwn, ow
 
   useEffect(() => {
     if (normalizedRef.current) return;
-    if (state.scope && hasFlatTaxonomy(state)) {
-      normalizedRef.current = true;
-      update(clearedFlatTaxonomy());
-      return;
-    }
-    if (state.scope || !hasFlatTaxonomy(state)) {
+    const dirty = state.scope || hasFlatTaxonomy(state) || (state.familyId != null && state.familyId !== '');
+    if (!dirty) {
       normalizedRef.current = true;
       return;
     }
-    const needsTree = asCsvList(state.version).length > 0 || asCsvList(state.model).length > 0 || asCsvList(state.resource).length > 0;
-    if (needsTree && tree == null) return;
     normalizedRef.current = true;
-    const next = serializeScopeTerms(flatToScopeTerms(state, tree));
-    update({ scope: next, ...clearedFlatTaxonomy() });
-  }, [state, tree, update]);
+    const lifted = stringLiftQuery({
+      models: state.models,
+      scope: state.scope,
+      model: state.model,
+      version: state.version,
+      ecosystem: state.ecosystem,
+      resourceType: state.resourceType,
+      resource: state.resource,
+      versionId: state.versionId,
+      familyId: state.familyId
+    });
+    update({
+      models: lifted.models || '',
+      scope: '',
+      familyId: '',
+      ...clearedFlatTaxonomy()
+    });
+  }, [state, update]);
 
   useEffect(() => {
     if (!tree) return;
@@ -724,63 +581,67 @@ function TreePicker ({ facet, state, update, facetParams, offerShow, showOwn, ow
       for (const key of bag) next.add(key);
       return next;
     });
-  }, [tree, state.scope, mine]);
+  }, [tree, state.models, mine]);
+
+  useEffect(() => {
+    if (!open || !scrollKey) return;
+    const el = rowRefs.current.get(scrollKey);
+    if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' });
+  }, [open, scrollKey, tree, expanded]);
 
   if (offerShow == null) return null;
   if (!offerShow && !mine && !terms.length && !hasFlatTaxonomy(state)) return null;
 
   const owned = ownedModelTerms(tree);
-  const displayTerms = mine ? terms.concat(owned) : terms;
+  const ownedKept = owned.filter(node => !mineHoles.some(hole => String(hole.modelId) === String(node.modelId)));
+  const displayTerms = mine ? terms.concat(ownedKept) : terms;
   const mineState = mine
-    ? 'checked'
+    ? (mineHoles.length ? 'indeterminate' : 'checked')
     : (!owned.length
       ? 'unchecked'
-      : owned.every(n => checkState(n, terms, tree) === 'checked')
+      : owned.every(n => modelStructuralState(tree, terms, n) === 'checked')
         ? 'checked'
-        : owned.some(n => checkState(n, terms, tree) !== 'unchecked')
+        : owned.some(n => modelStructuralState(tree, terms, n) !== 'unchecked')
           ? 'indeterminate'
           : 'unchecked');
   const showMineRow = !!showOwn || mine;
   const activeCount = terms.length + (mine ? 1 : 0);
 
   function commit (nextTerms) {
-    update({ scope: serializeScopeTerms(nextTerms), ...clearedFlatTaxonomy() });
+    update({ models: serializeModels(nextTerms), ...clearedFlatTaxonomy() });
   }
 
   function onMineToggle () {
     if (!tree && !mine) return;
     if (mine) {
-      update({ mine: null });
+      commit(terms);
       return;
     }
     if (mineState === 'checked') {
       let next = terms;
-      for (const node of owned) next = removeNodeTerm(next, node, tree);
-      update({ mine: null, scope: serializeScopeTerms(next), ...clearedFlatTaxonomy() });
+      for (const node of owned) next = toggleModelRow(tree, next, node, false);
+      commit(next);
       return;
     }
-    update({ mine: true });
+    commit([...terms, { mine: true }]);
   }
 
   function onToggle (term, turnOn) {
     if (!tree) return;
-    const isOwnedModel = term.modelId && !term.versionId
-      && owned.some(n => String(n.modelId) === String(term.modelId));
+    const ownTerm = modelTermForOwnUncheck(term);
+    const isOwnedModel = ownTerm?.modelId && !ownTerm.versionId
+      && owned.some(n => String(n.modelId) === String(ownTerm.modelId));
     if (!turnOn && mine && isOwnedModel) {
       const next = narrowOwnSelection({
         mine: true,
-        terms,
+        terms: mineTerm ? [...terms, mineTerm] : terms,
         ownedNodes: owned,
-        unchecked: term
+        unchecked: ownTerm
       });
-      update({
-        mine: null,
-        scope: serializeScopeTerms(compactTerms(tree, next.terms)),
-        ...clearedFlatTaxonomy()
-      });
+      commit(compactModelSelection(tree, next.terms));
       return;
     }
-    commit(turnOn ? addNodeTerm(terms, term, tree) : removeNodeTerm(terms, term, tree));
+    commit(toggleModelRow(tree, terms, term, turnOn));
   }
 
   function toggleExpand (key) {
@@ -791,12 +652,77 @@ function TreePicker ({ facet, state, update, facetParams, offerShow, showOwn, ow
     });
   }
 
-  function removeTerm (idx) {
-    commit(terms.filter((_, i) => i !== idx));
+  function registerRow (key, el) {
+    if (el) rowRefs.current.set(key, el);
+    else rowRefs.current.delete(key);
   }
 
-  const typeTerms = (tree?.types || []).map(t => ({ type: t.key }));
-  const familyTerms = familyRootTerms(tree);
+  function focusTerm (term, parent) {
+    if (term) {
+      const keys = ancestorExpandKeys(term);
+      setExpanded(prev => {
+        const next = new Set(prev);
+        for (const key of keys) next.add(key);
+        return next;
+      });
+      setScrollKey(parent && keys.length ? keys[keys.length - 1] : nodeKey(term));
+    }
+    setOpen(true);
+  }
+
+  const roots = tree ? modelDisplayRoots(tree) : [];
+  const chipGroups = (() => {
+    const groups = modelChipGroups(tree, parsedModels).filter(group => {
+      if (ownKnown === false && parsedModels[group.termIndexes[0]]?.mine) return false;
+      return true;
+    });
+    const mineFirst = [];
+    const rest = [];
+    for (const group of groups) {
+      if (parsedModels[group.termIndexes[0]]?.mine) mineFirst.push(group);
+      else rest.push(group);
+    }
+    return [...mineFirst, ...rest];
+  })();
+
+  function renderGroup (group, index) {
+    const dismiss = () => commit(dropModelGroup(parsedModels, group));
+    if (group.kind === 'cluster') {
+      return (
+        <span key={`${group.text}:${index}`} class="tag-chip active tree-picker-chip chip-cluster">
+          <button
+            type="button"
+            class="chip-cluster-show"
+            onClick={() => focusTerm(parsedModels[group.termIndexes[0]], true)}
+          >
+            {group.text}
+          </button>
+          <button
+            type="button"
+            class="chip-cluster-remove"
+            aria-label={group.ariaLabel}
+            title={group.title}
+            onClick={dismiss}
+          >
+            {'\u00D7'}
+          </button>
+        </span>
+      );
+    }
+    const except = group.kind === 'except';
+    return (
+      <button
+        key={`${group.text}:${index}`}
+        type="button"
+        class={`tag-chip tree-picker-chip remove${except ? ' exception' : ' active'}`}
+        title={group.title}
+        aria-label={group.ariaLabel}
+        onClick={dismiss}
+      >
+        {group.text} {'\u00D7'}
+      </button>
+    );
+  }
 
   return (
     <div class="tag-picker-wrap tree-picker-wrap">
@@ -807,32 +733,24 @@ function TreePicker ({ facet, state, update, facetParams, offerShow, showOwn, ow
         aria-expanded={open}
         onClick={() => setOpen(o => !o)}
       >
-        {facet.label}{activeCount > 0 ? ` (${activeCount})` : ''} {open ? '\u25B4' : '\u25BE'}
+        {facet.label} {open ? '\u25B4' : '\u25BE'}
       </button>
-      {(mine || terms.length > 0) && (
-        <div class="tree-picker-chips">
-          {mine && (
-            <button
-              type="button"
-              class="tag-chip active tree-picker-chip remove"
-              onClick={() => update({ mine: null })}
-              title="Remove this filter"
-            >
-              Mine {'\u00D7'}
-            </button>
-          )}
-          {terms.map((term, i) => (
-            <button
-              key={nodeKey(term) + i}
-              type="button"
-              class="tag-chip active tree-picker-chip remove"
-              onClick={() => removeTerm(i)}
-              title="Remove this filter"
-            >
-              {termChipLabel(term, tree)} {'\u00D7'}
-            </button>
-          ))}
-        </div>
+      {chipGroups.length > 0 && (
+        <ChipOverflow
+          maxLines={1}
+          panelOpen={open}
+          anchorRef={moreRef}
+          onMore={index => {
+            if (open) {
+              setOpen(false);
+              return;
+            }
+            const group = chipGroups[index];
+            focusTerm(parsedModels[group?.termIndexes?.[0]], group?.kind === 'cluster');
+          }}
+        >
+          {chipGroups.map(renderGroup)}
+        </ChipOverflow>
       )}
       {open && (
         <div ref={panelRef} class="tag-picker-panel tree-picker-panel">
@@ -846,7 +764,7 @@ function TreePicker ({ facet, state, update, facetParams, offerShow, showOwn, ow
           />
           <div class="tree-picker-list">
             {showMineRow && (
-              <div class="tree-picker-row" data-depth="0">
+              <div class="tree-picker-row" data-depth="0" title="My models">
                 <span class="tree-picker-caret-spacer" />
                 <label>
                   <input
@@ -860,11 +778,11 @@ function TreePicker ({ facet, state, update, facetParams, offerShow, showOwn, ow
               </div>
             )}
             {tree == null && <span class="tag-picker-empty">Loading…</span>}
-            {tree != null && typeTerms.length === 0 && familyTerms.length === 0 && <span class="tag-picker-empty">No models in the library</span>}
-            {tree != null && typeTerms.map(t => (
+            {tree != null && roots.length === 0 && <span class="tag-picker-empty">No models in the library</span>}
+            {tree != null && roots.map(row => (
               <TreeRow
-                key={nodeKey(t)}
-                term={t}
+                key={row.key}
+                row={row}
                 tree={tree}
                 terms={displayTerms}
                 search={search}
@@ -872,19 +790,7 @@ function TreePicker ({ facet, state, update, facetParams, offerShow, showOwn, ow
                 toggleExpand={toggleExpand}
                 onToggle={onToggle}
                 depth={0}
-              />
-            ))}
-            {tree != null && familyTerms.map(t => (
-              <TreeRow
-                key={nodeKey(t)}
-                term={t}
-                tree={tree}
-                terms={displayTerms}
-                search={search}
-                expanded={expanded}
-                toggleExpand={toggleExpand}
-                onToggle={onToggle}
-                depth={0}
+                registerRow={registerRow}
               />
             ))}
           </div>
@@ -1067,7 +973,7 @@ function Arrange ({ state, sortFields, groupAxes, update }) {
   );
 }
 
-// --- When (date range: presets / corpus months / custom) -------------------
+// --- Date (date range: presets / corpus months / custom) -------------------
 
 const DATE_PRESETS = [
   { id: 'this-month', label: 'This month' },
@@ -1101,7 +1007,7 @@ function presetRange (id, today) {
   }
 }
 
-function When ({ facet, state, update, offerWhen }) {
+function DateRange ({ facet, state, update, dateBounds }) {
   const [open, setOpen] = useState(false);
   const [fromBuf, setFromBuf] = useState(state[facet.key] || '');
   const [toBuf, setToBuf] = useState(state[facet.key2] || '');
@@ -1120,8 +1026,8 @@ function When ({ facet, state, update, offerWhen }) {
   useEffect(() => { setFromBuf(dateFrom); }, [dateFrom]);
   useEffect(() => { setToBuf(dateTo); }, [dateTo]);
 
-  if (offerWhen == null && !active) return null;
-  const bounds = offerWhen || { min: null, max: null };
+  if (dateBounds == null && !active) return null;
+  const bounds = dateBounds || { min: null, max: null };
 
   function setRange (from, to) {
     update({ [facet.key]: from || '', [facet.key2]: to || '' });
@@ -1131,7 +1037,7 @@ function When ({ facet, state, update, offerWhen }) {
   const fromMonth = dateFrom ? dateFrom.slice(0, 7) : (months[0] || '');
   const toMonth = dateTo ? dateTo.slice(0, 7) : (months[months.length - 1] || '');
 
-  const rangeLabel = formatWhenRange(dateFrom, dateTo);
+  const rangeLabel = formatDateRange(dateFrom, dateTo);
   const btnLabel = rangeLabel || facet.label;
 
   return (
@@ -1352,12 +1258,22 @@ function uniqTokens (list) {
   return out;
 }
 
+function FilterText ({ parts }) {
+  const abbr = parts.abbreviation
+    ? (parts.expansion
+        ? <abbr title={parts.expansion}>{parts.abbreviation}</abbr>
+        : parts.abbreviation)
+    : null;
+  if (abbr && parts.label) return <>{abbr}{' \u00B7 '}{parts.label}</>;
+  if (abbr) return abbr;
+  return parts.label;
+}
+
 function DisclosureTreeRow ({ node, depth, expanded, toggleExpand, stateOf, onToggle }) {
   const kids = node.children || [];
   const showCaret = kids.length > 0;
   const isOpen = expanded.has(node.path);
   const state = stateOf(node.path);
-  const title = node.title || undefined;
   return (
     <>
       <div class="tree-picker-row" data-depth={depth}>
@@ -1378,7 +1294,9 @@ function DisclosureTreeRow ({ node, depth, expanded, toggleExpand, stateOf, onTo
             ref={el => { if (el) el.indeterminate = state === 'indeterminate'; }}
             onChange={() => onToggle(node.path, state !== 'checked')}
           />
-          <span class="tree-picker-label" title={title}>{node.label}</span>
+          <span class="tree-picker-label">
+            <FilterText parts={typeWorkflowRowParts(node, depth)} />
+          </span>
         </label>
         {node.count > 0 && <span class="tree-picker-count">{node.count}</span>}
       </div>
@@ -1439,7 +1357,7 @@ function NestedTreePicker ({ facet, state, update, facetParams, offer }) {
     ? aspectSelection(aspectPayload, state.aspect || [])
     : (tree
       ? paramsToTypeWorkflowSelection(tree, {
-        type: state.type || [],
+        type: state.mediaType || [],
         workflowMode: state.workflowMode || [],
         workflow: state.workflow || []
       })
@@ -1463,13 +1381,13 @@ function NestedTreePicker ({ facet, state, update, facetParams, offer }) {
 
   const tokenCount = isAspect
     ? (state.aspect || []).length
-    : (state.type || []).length + (state.workflowMode || []).length + (state.workflow || []).length;
+    : (state.mediaType || []).length + (state.workflowMode || []).length + (state.workflow || []).length;
 
   const extraRows = (selection.extras || []).map(token => ({
     token,
-    label: isAspect || !(state.workflow || []).includes(token)
-      ? token
-      : (formatWorkflowQueryLabel(token) || token)
+    parts: isAspect
+      ? { abbreviation: '', expansion: '', label: token }
+      : filterExtraParts(token, { workflow: (state.workflow || []).includes(token) })
   }));
 
   function toggleExpand (path) {
@@ -1485,7 +1403,7 @@ function NestedTreePicker ({ facet, state, update, facetParams, offer }) {
     const written = selectionToTypeWorkflowParams(tree, nextExplicit);
     const extra = new Set(selection.extras || []);
     update({
-      type: uniqTokens([...csvTokens(written.type), ...(state.type || []).filter(t => extra.has(t))]),
+      mediaType: uniqTokens([...csvTokens(written.type), ...(state.mediaType || []).filter(t => extra.has(t))]),
       workflowMode: uniqTokens([...csvTokens(written.workflowMode), ...(state.workflowMode || []).filter(t => extra.has(t))]),
       workflow: uniqTokens([...csvTokens(written.workflow), ...(state.workflow || []).filter(t => extra.has(t))])
     });
@@ -1512,7 +1430,7 @@ function NestedTreePicker ({ facet, state, update, facetParams, offer }) {
       return;
     }
     update({
-      type: (state.type || []).filter(t => t !== token),
+      mediaType: (state.mediaType || []).filter(t => t !== token),
       workflowMode: (state.workflowMode || []).filter(t => t !== token),
       workflow: (state.workflow || []).filter(t => t !== token)
     });
@@ -1558,7 +1476,7 @@ function NestedTreePicker ({ facet, state, update, facetParams, offer }) {
                     checked
                     onChange={() => removeExtra(row.token)}
                   />
-                  <span class="tree-picker-label">{row.label}</span>
+                  <span class="tree-picker-label"><FilterText parts={row.parts} /></span>
                 </label>
               </div>
             ))}
@@ -1603,6 +1521,7 @@ export function FacetBar ({
   const effectiveParams = facetParams || EMPTY_FACET_PARAMS;
   const paramsKey = facetParamsKey(effectiveParams);
   const ownRev = useOwnModelsRevision();
+  const indexEpoch = useIndexEpoch();
   const offerKey = useRef(paramsKey);
 
   useEffect(() => {
@@ -1615,7 +1534,7 @@ export function FacetBar ({
       .then(data => { if (!cancelled) setOffer(data || { show: {}, groupAxes: [] }); })
       .catch(() => { if (!cancelled) setOffer({ show: {}, groupAxes: [] }); });
     return () => { cancelled = true; };
-  }, [paramsKey, ownRev]);
+  }, [paramsKey, ownRev, indexEpoch]);
 
   const isPrimary = f => f.kind === 'chips' || f.kind === 'multi' || f.kind === 'tree' || f.kind === 'nested-tree' || f.kind === 'tristate' || f.kind === 'date-range' || f.kind === 'flag';
   const primary = facets.filter(isPrimary);
@@ -1665,6 +1584,8 @@ export function FacetBar ({
             key={listKey}
             facet={facet}
             active={state[facet.key] || []}
+            ratingActive={state.rating || []}
+            postTagActive={state.postTag || []}
             update={update}
             facetParams={effectiveParams}
             offerShow={offer == null ? null : !!offer.show.tags}
@@ -1680,13 +1601,14 @@ export function FacetBar ({
             facetParams={effectiveParams}
             offerShow={offer == null ? null : !!offer.show.resources}
             showOwn={offer == null ? false : !!offer.show.ownModels}
+            ownKnown={offer == null ? false : offer.ownKnown === true}
             ownRev={ownRev}
           />
         );
       case 'nested-tree': {
         if (offer == null) return null;
         if (facet.tree === 'type-workflow') {
-          const active = (state.type || []).length
+          const active = (state.mediaType || []).length
             || (state.workflowMode || []).length
             || (state.workflow || []).length;
           if (!offer.show.typeTree && !active) return null;
@@ -1711,12 +1633,12 @@ export function FacetBar ({
         if (offer == null) return null;
         if (!offer.show.when && !(state[facet.key] || state[facet.key2])) return null;
         return (
-          <When
+          <DateRange
             key={listKey}
             facet={facet}
             state={state}
             update={update}
-            offerWhen={offer.when || { min: null, max: null }}
+            dateBounds={offer.when || { min: null, max: null }}
           />
         );
       case 'number-range': {

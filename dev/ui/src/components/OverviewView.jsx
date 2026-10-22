@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
+import { useIndexEpoch } from '../lib/index-settle.js';
 import { getOverview } from '../api.js';
 import { formatDate, formatMediaCounts } from '../lib/format.js';
 import { TimeText } from './TimeText.jsx';
@@ -148,15 +149,22 @@ export function OverviewView ({ viewWasUnknown, unknownView }) {
   const [status, setStatus] = useState('loading'); // 'loading' | 'ready' | 'error'
 
   useDocumentTitle({ place: 'overview' });
+  const indexEpoch = useIndexEpoch();
+  const painted = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
-    setStatus('loading');
+    if (!painted.current) setStatus('loading');
     getOverview()
-      .then(d => { if (!cancelled) { setData(d); setStatus('ready'); } })
-      .catch(() => { if (!cancelled) setStatus('error'); });
+      .then(d => {
+        if (cancelled) return;
+        painted.current = true;
+        setData(d);
+        setStatus('ready');
+      })
+      .catch(() => { if (!cancelled && !painted.current) setStatus('error'); });
     return () => { cancelled = true; };
-  }, []);
+  }, [indexEpoch]);
 
   if (status === 'loading') {
     return (

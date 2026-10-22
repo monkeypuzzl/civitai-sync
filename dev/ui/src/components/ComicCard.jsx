@@ -3,9 +3,10 @@ import { TimeText } from './TimeText.jsx';
 import { tileLead, tileSlotIso } from '../lib/tile-title.js';
 import { HighlightText } from './HighlightText.jsx';
 import { MediaThumb } from './MediaThumb.jsx';
+import { tileLeadMedia } from '../lib/tile-media.js';
 
 export function ComicCard ({ item, onClick, search, href }) {
-  const first = item.media[0];
+  const first = tileLeadMedia(item);
   if (!first) return null;
 
   const thumbW = Number(first.width);

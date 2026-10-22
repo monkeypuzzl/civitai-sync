@@ -14,12 +14,15 @@ import {
   shouldLoadFocusPrefix,
   readHistoryFocus
 } from '../lib/open-origin-node.js';
+import { resolveFocusId } from '../lib/gallery-focus.js';
+import { useIndexEpoch } from '../lib/index-settle.js';
 import {
   publicationFacet,
   USED_AS_INPUT_FACET,
   effectivePublication,
   publicationFromInPost
 } from '../lib/publication.js';
+import { galleryRequestQuery } from '../lib/gallery-query.js';
 import { pruneGrainParams } from '../lib/grain.js';
 import { useDocumentTitle } from '../lib/page-title.js';
 import { GranularityToggle } from './GranularityToggle.jsx';
@@ -36,15 +39,8 @@ export const URL_SCHEMA = {
   sort: { type: 'string', default: 'date:desc' },
   tag: { type: 'csv', default: [] },
   q: { type: 'string', default: '' },
-  type: { type: 'csv', default: [] },
-  ecosystem: { type: 'csv', default: [] },
-  model: { type: 'csv', default: [] },
-  version: { type: 'csv', default: [] },
-  resourceType: { type: 'csv', default: [] },
-  resource: { type: 'csv', default: [] },
-  versionId: { type: 'csv', default: [] },
-  scope: { type: 'string', default: '' },
-  mine: { type: 'boolean', default: null },
+  mediaType: { type: 'csv', default: [] },
+  models: { type: 'string', default: '' },
   aspect: { type: 'csv', default: [] },
   dateFrom: { type: 'string', default: '' },
   dateTo: { type: 'string', default: '' },
@@ -65,10 +61,10 @@ export const URL_SCHEMA = {
 
 const FACETS = [
   { key: 'reaction', kind: 'chips', source: 'reaction', valuesSource: 'reactionTags', options: ['favorite', 'feedback:liked', 'feedback:disliked'], label: 'Reactions' },
-  { key: 'type', kind: 'nested-tree', tree: 'type-workflow', label: 'Media Type' },
+  { key: 'mediaType', kind: 'nested-tree', tree: 'type-workflow', label: 'Media Type' },
   { key: 'aspect', kind: 'nested-tree', tree: 'aspect', label: 'Aspect Ratio', alwaysShowRoots: true },
-  { key: 'scope', kind: 'tree', label: 'Models' },
-  { key: 'dateFrom', key2: 'dateTo', kind: 'date-range', label: 'When' },
+  { key: 'models', kind: 'tree', label: 'Models' },
+  { key: 'dateFrom', key2: 'dateTo', kind: 'date-range', label: 'Date' },
   { key: 'cfgMin', key2: 'cfgMax', kind: 'number-range', label: 'CFG' },
   { key: 'stepsMin', key2: 'stepsMax', kind: 'number-range', label: 'Steps' },
   publicationFacet(),
@@ -137,22 +133,11 @@ export function GenerationsView () {
     updateUrl({ publication: publicationFromInPost(urlState.inPost), inPost: null });
   }, [urlState.publication, urlState.inPost, updateUrl]);
 
-  // The wire query — facet/sort/group keys. `granularity` IS keyed
-  // here so toggling batch↔media resets paging and refetches the other source;
-  // the fetcher strips it before it reaches the server (it is not a facet).
-  const query = useMemo(() => ({
-    tag: urlState.tag, reaction: urlState.reaction, q: urlState.q, sort: urlState.sort,
-    type: urlState.type, ecosystem: urlState.ecosystem, model: urlState.model,
-    version: urlState.version, resourceType: urlState.resourceType, resource: urlState.resource,
-    versionId: urlState.versionId, scope: urlState.scope,
-    aspect: urlState.aspect, dateFrom: urlState.dateFrom, dateTo: urlState.dateTo,
-    cfgMin: urlState.cfgMin, cfgMax: urlState.cfgMax, stepsMin: urlState.stepsMin, stepsMax: urlState.stepsMax,
-    publication: effectivePublication(urlState.publication, urlState.inPost),
-    usedAsInput: urlState.usedAsInput === true ? true : null,
-    workflow: urlState.workflow,
-    workflowMode: urlState.workflowMode,
-    groupBy: urlState.groupBy, groupSort: urlState.groupSort,
-    granularity: urlState.granularity
+  // The wire query. `granularity` is keyed so toggling batch↔media
+  // refetches; the fetcher strips it before the request. `mine` is included
+  // here — the Models picker writes it on the URL, and the list must send it.
+  const query = useMemo(() => galleryRequestQuery(urlState, {
+    publication: effectivePublication(urlState.publication, urlState.inPost)
   }), [urlState]);
 
   // One fetcher, routed by granularity: `media` serves the flat projection
@@ -166,7 +151,8 @@ export function GenerationsView () {
       : getGenerations(rest);
   }, []);
 
-  const { items, groupsMeta, loading, sentinelRef, setItems, hasMore, loadMore, pending } = useGalleryData({ fetcher: galleryFetcher, query });
+  const reloadEpoch = useIndexEpoch();
+  const { items, groupsMeta, loading, sentinelRef, setItems, hasMore, loadMore, pending } = useGalleryData({ fetcher: galleryFetcher, query, reloadEpoch });
 
   const facetParams = useMemo(() => (
     grain === 'media'
@@ -175,10 +161,11 @@ export function GenerationsView () {
   ), [grain]);
 
   useEffect(() => {
-    if (shouldLoadFocusPrefix(readHistoryFocus(), { loading, itemCount: items.length, hasMore })) {
+    const focus = readHistoryFocus();
+    if (shouldLoadFocusPrefix(focus, { loading, hasMore, idFound: resolveFocusId(items, focus) != null })) {
       loadMore();
     }
-  }, [loading, items.length, hasMore, loadMore]);
+  }, [loading, items, hasMore, loadMore]);
 
   // Clear the multi-select set when the result set changes (it is per
   // result-set). Reaction / selection state is view-local, never URL state.

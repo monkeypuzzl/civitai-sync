@@ -1,5 +1,6 @@
 import { useState, useLayoutEffect, useRef, useMemo } from 'preact/hooks';
 import { layoutJustified, packedViewTop, shouldHoldWidow, visibleWindow } from '../lib/justified-layout.js';
+import { tileLeadMedia } from '../lib/tile-media.js';
 
 // Window a justified-row gallery into a visible-range + overscan slice.
 // Packing is memoized on items / groups / measured width / cols / gap /
@@ -17,7 +18,7 @@ const STARTER_END = 48;
 const EMPTY_ITEMS = [];
 
 function itemRatio (item) {
-  const m = item && item.media && item.media[0];
+  const m = tileLeadMedia(item);
   const w = Number(m && m.width);
   const h = Number(m && m.height);
   return (w > 0 && h > 0) ? w / h : 1;

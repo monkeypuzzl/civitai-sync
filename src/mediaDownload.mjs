@@ -12,6 +12,13 @@ import { pipeline } from 'node:stream/promises';
 import { mkdirp } from 'mkdirp';
 import { fileExists, rename, unlink } from './utils.mjs';
 import { fetchCivitaiImage } from './civitaiApi.mjs';
+import {
+  recallFetchMiss,
+  recordFetchMiss,
+  clearFetchMiss,
+  failureCause,
+  reportTransientFetch
+} from './fetchMiss.mjs';
 
 export const MEDIA_DOWNLOAD_ATTEMPTS = 3;
 export const MEDIA_IDLE_MS = 30_000;
@@ -124,7 +131,7 @@ async function attemptOnce (url, finalPath, tempPath, { signal, idleMs, replace 
     }
 
     if (!fetched.body) {
-      return { status: 'failed', message: 'empty response body' };
+      return { status: 'failed', message: 'empty response body', cause: '' };
     }
 
     fileStream = fs.createWriteStream(tempPath, { flags: 'wx' });
@@ -144,7 +151,7 @@ async function attemptOnce (url, finalPath, tempPath, { signal, idleMs, replace 
       const size = (await fs.promises.stat(tempPath)).size;
       if (size !== fetched.contentLength) {
         await discard(tempPath);
-        return { status: 'failed', message: `short body ${size}/${fetched.contentLength}` };
+        return { status: 'failed', message: `short body ${size}/${fetched.contentLength}`, cause: '' };
       }
     }
 
@@ -153,22 +160,36 @@ async function attemptOnce (url, finalPath, tempPath, { signal, idleMs, replace 
     if (fileStream) fileStream.destroy();
     await discard(tempPath);
     if (signal?.aborted) return { status: 'aborted' };
-    return { status: 'failed', message: error.message };
+    if (idle.signal.aborted) {
+      return { status: 'failed', message: 'no bytes for 30s', cause: '' };
+    }
+    return {
+      status: 'failed',
+      message: error.message || 'fetch failed',
+      cause: failureCause(error),
+      code: typeof error.code === 'string' ? error.code : ''
+    };
   } finally {
     idle.dispose();
   }
 }
 
+function isTerminalStatus (status) {
+  return status === 404 || status === 410;
+}
+
 /**
  * Download `url` to `finalPath`.
+ * `recall` is `download` (default), `auto`, or `recheck`.
  *
- * @returns {Promise<{ status: 'published'|'skipped'|'unavailable'|'aborted'|'failed', message?: string, httpStatus?: number }>}
+ * @returns {Promise<{ status: 'published'|'skipped'|'unavailable'|'aborted'|'failed', message?: string, cause?: string, httpStatus?: number, remembered?: boolean }>}
  */
 export async function downloadMediaFile (url, finalPath, {
   signal,
   idleMs = MEDIA_IDLE_MS,
   attempts = MEDIA_DOWNLOAD_ATTEMPTS,
-  replace = false
+  replace = false,
+  recall = 'download'
 } = {}) {
   const tempPath = `${finalPath}.partial`;
 
@@ -177,10 +198,15 @@ export async function downloadMediaFile (url, finalPath, {
     return { status: 'skipped' };
   }
 
+  const prior = await recallFetchMiss(url);
+  if (recall !== 'recheck' && prior?.outcome === 'terminal') {
+    return { status: 'unavailable', httpStatus: prior.httpStatus || 404, remembered: true };
+  }
+
   await mkdirp(dirname(finalPath));
   await discard(tempPath);
 
-  let last = { status: 'failed', message: 'no attempt' };
+  let last = { status: 'failed', message: 'no attempt', cause: '' };
   const tries = Math.max(1, attempts);
 
   for (let attempt = 1; attempt <= tries; attempt++) {
@@ -191,12 +217,34 @@ export async function downloadMediaFile (url, finalPath, {
 
     last = await attemptOnce(url, finalPath, tempPath, { signal, idleMs, replace });
 
-    if (last.status === 'published' || last.status === 'skipped' || last.status === 'unavailable' || last.status === 'aborted') {
+    if (last.status === 'published') {
+      await clearFetchMiss(url);
+      return last;
+    }
+
+    if (last.status === 'unavailable' && isTerminalStatus(last.httpStatus)) {
+      await recordFetchMiss(url, {
+        outcome: 'terminal',
+        httpStatus: last.httpStatus,
+        message: '',
+        cause: ''
+      });
+      return last;
+    }
+
+    if (last.status === 'skipped' || last.status === 'unavailable' || last.status === 'aborted') {
       return last;
     }
   }
 
   await discard(tempPath);
-  console.log(`Warning: media download failed for ${url}${last.message ? ` — ${last.message}` : ''}`);
-  return { status: 'failed', message: last.message };
+  const message = last.message || '';
+  const cause = last.cause || '';
+  await reportTransientFetch(url, {
+    message,
+    cause,
+    recall,
+    prefix: 'Warning: media download failed for'
+  });
+  return { status: 'failed', message, cause };
 }

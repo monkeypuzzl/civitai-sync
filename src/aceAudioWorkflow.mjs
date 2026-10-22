@@ -5,11 +5,16 @@
 // reads the raw workflow (output.parsed, else aceStepAudio.input strings).
 // I/O: fetchAceSongIntoSidecar. Extractors are pure.
 
-import { wait } from './utils.mjs';
-import { getWorkflow, normalizeCivitaiError } from './civitaiApi.mjs';
+import { getWorkflow, normalizeCivitaiError, workflowFetchUrl } from './civitaiApi.mjs';
 import { upsertAceAudioSidecar } from './aceAudioId3.mjs';
-
-const WORKFLOW_WAIT_MS = 100;
+import {
+  recallFetchMiss,
+  recordFetchMiss,
+  clearFetchMiss,
+  failureCause,
+  reportTransientFetch,
+  flushFetchMiss
+} from './fetchMiss.mjs';
 
 export function needsAceWorkflowFill (params) {
   if (!params || typeof params !== 'object') return false;
@@ -79,14 +84,20 @@ export async function fetchAceSongIntoSidecar ({
   audioIds,
   secretKey,
   signal,
-  dataPath
+  dataPath,
+  recall = 'download'
 } = {}) {
   if (!secretKey || !workflowId || !dataPath) return { ok: false };
   const ids = [...new Set((audioIds || []).filter(Boolean))];
   if (!ids.length) return { ok: false };
+  const url = workflowFetchUrl(workflowId);
 
   try {
-    await wait(WORKFLOW_WAIT_MS);
+    if (recall !== 'recheck') {
+      const prior = await recallFetchMiss(url);
+      if (prior?.outcome === 'terminal') return { ok: false, miss: true };
+    }
+
     if (signal?.aborted) return { ok: false, aborted: true };
 
     const wf = await getWorkflow({ workflowId, secretKey, signal });
@@ -94,14 +105,21 @@ export async function fetchAceSongIntoSidecar ({
 
     if (wf?.error) {
       const err = normalizeCivitaiError(wf.error);
-      if (err.httpStatus === 404) {
-        const updates = {};
-        for (const id of ids) {
-          updates[id] = { workflowMiss: true, workflowId };
-        }
-        await upsertAceAudioSidecar(dataPath, updates);
+      if (err.httpStatus === 404 || err.httpStatus === 410) {
+        await recordFetchMiss(url, {
+          outcome: 'terminal',
+          httpStatus: err.httpStatus,
+          message: '',
+          cause: ''
+        });
         return { ok: false, miss: true };
       }
+      await reportTransientFetch(url, {
+        message: err.message || 'fetch failed',
+        cause: '',
+        recall,
+        prefix: 'Warning: workflow fetch failed for'
+      });
       return { ok: false };
     }
 
@@ -116,13 +134,21 @@ export async function fetchAceSongIntoSidecar ({
         bpm: song.bpm,
         key: song.key,
         source: 'workflow',
-        workflowId,
-        workflowMiss: false
+        workflowId
       };
     }
     await upsertAceAudioSidecar(dataPath, updates);
+    await clearFetchMiss(url);
     return { ok: true };
-  } catch (ignoreErr) {
+  } catch (error) {
+    await reportTransientFetch(url, {
+      message: error?.message || 'fetch failed',
+      cause: failureCause(error),
+      recall,
+      prefix: 'Warning: workflow fetch failed for'
+    });
     return { ok: false };
+  } finally {
+    await flushFetchMiss();
   }
 }

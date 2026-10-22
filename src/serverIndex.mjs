@@ -5,8 +5,9 @@ import { createHash } from 'node:crypto';
 import { readFile, listDirectory, isDate, writeFile, toDateString } from './utils.mjs';
 import { getEffectiveMediaInfo, generationMediaFilename } from './generations.mjs';
 import { normalizeMediaId } from './mediaId.mjs';
-import { loadOverrides, getMediaOverride, reactionsToTags, remapMediaOverride } from './overrides.mjs';
-import { extractInputDescriptors, blobIdFromUrl, existingInputFilepath } from './inputMedia.mjs';
+import { portableFileSegment } from './portableFileSegment.mjs';
+import { loadOverrides, getMediaOverride, reactionsToTags, mergeOccurrenceReactions, remapMediaOverride } from './overrides.mjs';
+import { extractInputDescriptors, blobIdFromUrl, existingInputFilepath, adoptLegacyInputNames } from './inputMedia.mjs';
 import { loadAliasStore, resolveCanonicalId, recordAlias, persistAliasStore, imageKey } from './mediaIdentity.mjs';
 import { postedSourceName, postedMatchAt, buildGenerationRecipeIndex, matchRecipe } from './postedIdentity.mjs';
 import { backfillContentHashes } from './contentHashBackfill.mjs';
@@ -35,6 +36,8 @@ import {
   ASPECT_CLASS_LABELS
 } from './mediaAspect.mjs';
 import { ensureTagCacheLoaded, getTagNameFromCache, formatTagName } from './tagCache.mjs';
+import { browsingLevelOf } from './civitaiWire.mjs';
+import { isRatingTagName, ratingTagLabel, ratingTokenForLevel } from '../dev/ui/src/lib/browsing-level.js';
 import { CONFIG } from './cli.mjs';
 import { civitaiUrl } from './civitaiDomain.mjs';
 import { getEcosystemDisplayName } from './ecosystemDisplay.mjs';
@@ -42,7 +45,7 @@ import { getWorkflowAbbreviationExpansion, getWorkflowDisplayLabel, getWorkflowV
 import { parseWorkflowFamily, remainderTokenFor } from './workflowFamily.mjs';
 import { canonicalizeWorkflow, fullestWorkflow, workflowFromGenerationParams } from './workflowDesignate.mjs';
 import { modelTypeLabel } from './modelTypeDisplay.mjs';
-import { resolveCheckpoint, hydrateResource, unionDecomposedSlots } from './checkpointResolution.mjs';
+import { resolveCheckpoint, hydrateResource, resolveResourceVersionName, unionDecomposedSlots, decomposeCivitaiMetaResource, postedGenerationView } from './checkpointResolution.mjs';
 import { assignModelFamily, fallbackGeneratorFamily, getModelFamily, sectionLabel } from './modelFamily.mjs';
 import { extractEmbeddedMeta } from './embeddedMeta.mjs';
 import { bumpOriginListCache } from './originList.mjs';
@@ -157,7 +160,7 @@ import {
 //  16 — Generation occurrences: buildMediaItems pass 1 appends
 //       containers.generations[] (never last-wins overwrite). Derived
 //       containers.generation + date + thumbnailPath + prompt/params
-//       = newest sortKey. When matches any occurrence day.
+//       = newest sortKey. Date matches any occurrence day.
 //  17 — Comics index: `index.comics` + populated `containers.comics`.
 //       Rebuild from saved JSON; no re-download of gens/posts. See
 //       .cursor/plans/phase-5b-comics_c0m1c5ab.plan.md.
@@ -220,13 +223,40 @@ import {
 //       mesh with empty resources cannot resolve a generator family
 //       until rebuild. Rebuild from saved JSON; no re-download.
 //       See .cursor/plans/3d-generator-identity_3dfam01.plan.md.
+//  33 — post and comic media rows carry imageResources. Media items union
+//       those version ids after the generation slots and the file recipe.
+//       A v32 post entry has no sibling, so a model the site lists beside
+//       a recipe is missing until rescan. Rebuild from saved JSON. The
+//       sibling itself arrives on the next posts or comics download.
+//       See .cursor/plans/image-resource-union_i4r5u01.plan.md.
+//  34 — post and comic images store one image.getGenerationData body.
+//       Index rows project meta, process, techniques, and imageResources
+//       from that body. A v33 entry has no body, so a field that lived
+//       only on the untrimmed response is missing until rescan.
+//       See .cursor/plans/generation-data-body_g3nb0d1.plan.md.
+//  35 — post and comic entries store the container browsing-level bit.
+//       Each post image and comic panel stores its own bit. Media items
+//       copy the image bit. rating= reads the image bit only. A v34
+//       cache has neither, so rebuild from saved JSON. No re-download.
+//       See .cursor/plans/rating-scope_r4t1ng01.plan.md.
+//  36 — a published card overlays the generation job on the media item.
+//       Prompt, parameters, workflow, and resources come from the card
+//       when the card has them. The generation file is not rewritten.
+//       A v35 cache still prefers the job, so rebuild from saved JSON.
+//       See .cursor/plans/published-refresh_p8rfsh01.plan.md.
+//  37 — comic entries store `genre` (the wire token, or null). A v36 line
+//       has no genre, so rebuild from saved JSON. No re-download.
+//       See .cursor/plans/comic-genre_g3nr301.plan.md.
+//  38 — Avatar (`img2img:avatar`) is an accepted workflow. A v37 generation
+//       line stored that job with an empty workflow, so rebuild from saved
+//       JSON. No re-download.
+//       See .cursor/plans/vendored-residuals_r3s1d01.plan.md.
 // Query-time Generations scope (`isGenerationBacked` / hasGeneration=1) does
 // not bump INDEX_VERSION — saved JSON and NDJSON are unchanged.
-export const INDEX_VERSION = 32;
+export const INDEX_VERSION = 38;
 
-// v30 Model3D rows lack workflowId and thumbnailImageId. A cache older
-// than this is rebuilt from saved JSON, so a v30 cache rescans.
-export const REUSABLE_ENTRY_VERSION = 32;
+// A v37 generation line has no Avatar workflow. A cache older than this is rebuilt from saved JSON.
+export const REUSABLE_ENTRY_VERSION = 38;
 
 // --- Aspect-class helper (shared by entry builders + media-items) ---
 //
@@ -259,6 +289,25 @@ function persistInputRefs (record, origin) {
 }
 
 const REACTION_TAG_RE = /^(favorite|feedback:liked|feedback:disliked)$/;
+
+// Finite browsing-level bit, or null when the saved record has none.
+// Callers pass a Civitai record (via browsingLevelOf) or an index row
+// that already stores the number.
+function indexBrowsingLevel (record) {
+  if (record && typeof record.browsingLevel === 'number' && Number.isFinite(record.browsingLevel)) {
+    return record.browsingLevel;
+  }
+  const level = browsingLevelOf(record);
+  if (level == null || level === '') return null;
+  const n = Number(level);
+  return Number.isFinite(n) ? n : null;
+}
+
+function applyImageBrowsingLevel (item, level) {
+  if (level == null || level === '') return;
+  const n = Number(level);
+  if (Number.isFinite(n)) item.browsingLevel = n;
+}
 
 function splitReactionTags (tags) {
   const reactions = [];
@@ -523,32 +572,33 @@ export function buildGenerationEntry (gen, date) {
     },
     aspectClass: deriveAspectClass(width, height),
     inputs: persistInputRefs(gen, 'generation'),
-    ...(audio ? { audio } : {})
+    ...(audio ? { audio } : {}),
+    ...(gen.downloadOpen === true ? { downloadOpen: true } : {})
   };
 }
 
-// Resolve a post entry's content-tag NAMES (Phase 3). Content tags come
-// from two sources per explorer-url-protocol.md § Tag kinds: the post-level
-// `tags[].name` (always human-readable, from post.get) and the per-image
-// numeric `tagIds` (from post.getInfinite), resolved to names via the
-// per-account tag-name cache. Unresolved ids contribute nothing (the UI
-// falls back to `tag-<id>` display in a later phase). `getTagName` is
-// injected so unit tests can drive resolution without the cache singleton;
-// an un-loaded cache returns null and the function degrades to post-level
-// names only.
+// Image content-tag names from numeric ids. Ladder names are not content.
+// Unresolved ids are skipped here; the media page adds `tag-<id>` itself.
+function namesFromTagIds (tagIds, getTagName) {
+  const seen = new Set();
+  const out = [];
+  for (const id of tagIds || []) {
+    const name = getTagName(id);
+    if (!name || isRatingTagName(name) || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
+
+// Image-name union on a post. Curated `post.tags` are not content tags.
+// `getTagName` is injected so tests resolve ids without the cache singleton.
 export function resolvePostContentTags (postEntry, getTagName = getTagNameFromCache) {
-  const names = new Set();
-  for (const t of postEntry.tags || []) {
-    const n = typeof t === 'string' ? t : t?.name;
-    if (n) names.add(n);
-  }
+  const ids = [];
   for (const m of postEntry.media || []) {
-    for (const id of m.tagIds || []) {
-      const n = getTagName(id);
-      if (n) names.add(n);
-    }
+    for (const id of m.tagIds || []) ids.push(id);
   }
-  return [...names].sort();
+  return namesFromTagIds(ids, getTagName).sort();
 }
 
 // A draft's temporal coordinate. post.getInfinite/post.get omit top-level
@@ -608,6 +658,7 @@ export function buildPostEntry (post, date, getTagName = getTagNameFromCache) {
     const width = img.width || 0;
     const height = img.height || 0;
     const createdAt = temporalDay(img.createdAt) ? img.createdAt : undefined;
+    const view = postedGenerationView(img);
     return {
       index: i + 1,
       imageId: img.id,
@@ -617,7 +668,7 @@ export function buildPostEntry (post, date, getTagName = getTagNameFromCache) {
       height,
       aspectClass: deriveAspectClass(width, height),
       duration: img.metadata?.duration || undefined,
-      meta: img.meta || null,
+      meta: view.meta,
       // Per-image creation time from post.getInfinite. The post entry's
       // `date` is the storage bucket (`YYYY-MM-DD` or `'drafts'`); this is
       // the media item's temporal coordinate when it has no generation.
@@ -626,9 +677,12 @@ export function buildPostEntry (post, date, getTagName = getTagNameFromCache) {
       // names via the tag-name cache for the `tag=` filter on standalone
       // post images. Kept as numbers so a later cache fill can re-resolve.
       tagIds: Array.isArray(img.tagIds) ? img.tagIds.filter(n => typeof n === 'number') : [],
+      browsingLevel: indexBrowsingLevel(img),
+      ...(img.hasMeta === false ? { hasMeta: false } : {}),
+      ...(img.hideMeta === true ? { hideMeta: true } : {}),
       thumbnailPath: `/media/posts/${date}/${post.id}/${paddedIndex}_${img.id}${ext}`,
-      inputs: persistInputRefs(img, 'post-image'),
-      ...persistedGenerationSources(img)
+      inputs: persistInputRefs(view.meta ? { ...img, meta: view.meta } : img, 'post-image'),
+      ...persistedGenerationSources(view)
     };
   });
 
@@ -667,10 +721,12 @@ export function buildPostEntry (post, date, getTagName = getTagNameFromCache) {
     videoCount: media.filter(m => m.type === 'video').length,
     audioCount: media.filter(m => m.type === 'audio').length,
     deletedImages: Array.isArray(post.deletedImages) ? post.deletedImages : [],
+    browsingLevel: indexBrowsingLevel(post),
     media
   };
   // Phase 3: derived content-tag name list used by the `tag=` filter.
   entry.contentTags = resolvePostContentTags(entry, getTagName);
+  if (post.downloadOpen === true) entry.downloadOpen = true;
   return entry;
 }
 
@@ -680,6 +736,12 @@ function pad2 (n) {
 
 function isIndexableComicPanel (panel) {
   return Boolean(panel && panel.status === 'Ready' && (panel.imageId != null || panel.imageUrl));
+}
+
+function comicGenreToken (value) {
+  if (typeof value !== 'string') return null;
+  const token = value.trim();
+  return token ? token : null;
 }
 
 export function buildComicEntry (comic, date) {
@@ -710,6 +772,7 @@ export function buildComicEntry (comic, date) {
       const mediaId = panelMediaId(panel);
       const width = panel.image?.width || 0;
       const height = panel.image?.height || 0;
+      const view = postedGenerationView(panel.image);
       media.push({
         role: 'panel',
         panelId: panel.id,
@@ -724,10 +787,13 @@ export function buildComicEntry (comic, date) {
         width,
         height,
         aspectClass: deriveAspectClass(width, height),
-        meta: panel.image?.meta || null,
+        meta: view.meta,
+        ...(panel.image?.hasMeta === false ? { hasMeta: false } : {}),
+        ...(panel.image?.hideMeta === true ? { hideMeta: true } : {}),
         createdAt: temporalDay(panel.image?.createdAt) ? panel.image.createdAt : undefined,
+        browsingLevel: indexBrowsingLevel(panel.image),
         thumbnailPath: `/media/comics/${date}/${comic.id}/${chapterFolder}/${pad2(panel.position)}_${mediaId}.jpeg`,
-        ...persistedGenerationSources(panel.image)
+        ...persistedGenerationSources(view)
       });
     }
   }
@@ -752,6 +818,7 @@ export function buildComicEntry (comic, date) {
     publishedAt: comic.publishedAt ?? null,
     name: comic.name || '',
     description: comic.description ?? null,
+    genre: comicGenreToken(comic.genre),
     url: civitaiUrl(`/comics/project/${comic.id}`),
     metrics: comic.metrics || {},
     chapters,
@@ -759,9 +826,11 @@ export function buildComicEntry (comic, date) {
     videoCount: 0,
     audioCount: 0,
     deletedPanels: Array.isArray(comic.deletedPanels) ? comic.deletedPanels : [],
+    browsingLevel: indexBrowsingLevel(comic),
     media
   };
   entry.status = deriveComicStatus(entry);
+  if (comic.downloadOpen === true) entry.downloadOpen = true;
   return entry;
 }
 
@@ -862,7 +931,8 @@ export function buildModel3dEntry (model, date) {
     thumbnailPath,
     primaryPath,
     files,
-    media
+    media,
+    ...(model.downloadOpen === true ? { downloadOpen: true } : {})
   };
 }
 
@@ -925,6 +995,9 @@ function persistedGenerationSources (src) {
   if (typeof src.process === 'string' && src.process) out.process = src.process;
   if (Array.isArray(src.techniques)) out.techniques = src.techniques;
   if (src.workflowSourcesCaptured === true) out.workflowSourcesCaptured = true;
+  if (Array.isArray(src.imageResources) && src.imageResources.length) {
+    out.imageResources = src.imageResources;
+  }
   return out;
 }
 
@@ -951,13 +1024,101 @@ function paramsWithDesignation (params, row, mediaType) {
   return { ...base, workflow: designatedWorkflow(row, mediaType) };
 }
 
-function fillWorkflowFromRow (existing, row) {
-  if (!existing) return;
-  const current = typeof existing.params?.workflow === 'string' ? existing.params.workflow : '';
-  if (current) return;
-  const designated = designatedWorkflow(row, existing.type || row?.type);
-  if (!designated) return;
-  existing.params = { ...(existing.params || {}), workflow: designated };
+function publishedMetaWithheld (row) {
+  return row?.hideMeta === true || row?.hasMeta === false;
+}
+
+function publishedMetaObject (row) {
+  if (publishedMetaWithheld(row)) return null;
+  const meta = row?.meta;
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null;
+  if (!Object.keys(meta).length) return null;
+  return meta;
+}
+
+function slotStrength (slot) {
+  const value = slot?.strength;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+// Published resources replace the generation list when the card has any.
+// A shared version id keeps the generation strength when the card omits it.
+// An empty card leaves the generation resources. Returns whether a list landed.
+function replacePublishedResources (existing, meta, imageResources) {
+  const hasRecipe = Array.isArray(meta?.civitaiResources) && meta.civitaiResources.length > 0;
+  const hasRows = Array.isArray(imageResources) && imageResources.length > 0;
+  if (!hasRecipe && !hasRows) return false;
+  const resolved = slotsWithImageResources(resolveCheckpoint({ meta }), imageResources);
+  const published = Array.isArray(resolved?.resources) ? resolved.resources : [];
+  if (!published.length) return false;
+
+  const genById = new Map();
+  const genSlots = [];
+  if (existing.checkpoint) genSlots.push(existing.checkpoint);
+  if (Array.isArray(existing.resources)) genSlots.push(...existing.resources);
+  for (const slot of genSlots) {
+    const key = versionSlotKey(slot);
+    if (key && !genById.has(key)) genById.set(key, slot);
+  }
+
+  const resources = published.map(slot => {
+    const next = { ...slot };
+    const gen = genById.get(versionSlotKey(slot));
+    if (gen && slotStrength(next) == null && slotStrength(gen) != null) {
+      next.strength = gen.strength;
+    }
+    return next;
+  });
+  const checkpoint = resources.find(slot => slot.type === 'Checkpoint') || resources[0] || null;
+  existing.resources = resources;
+  existing.checkpoint = checkpoint;
+  if (checkpoint?.modelName && checkpoint.modelName !== '(unknown)') {
+    existing.model = checkpoint.modelName;
+  }
+  return true;
+}
+
+// Overlay a published card onto a generation-backed media item.
+// `lock` records fields a post already supplied so a later comic does not
+// replace them. Does not write the generation job.
+function overlayPublishedCard (existing, row, lock) {
+  const supplied = { meta: false, workflow: false, resources: false };
+  if (!existing || !row) return supplied;
+  const meta = publishedMetaObject(row);
+
+  if (!lock?.meta && meta) {
+    if ('prompt' in meta || 'Prompt' in meta) {
+      existing.prompt = meta.prompt || meta.Prompt || '';
+    }
+    if ('negativePrompt' in meta || 'Negative prompt' in meta) {
+      existing.negativePrompt = meta.negativePrompt || meta['Negative prompt'] || '';
+    }
+    const derived = paramsFromImageMeta(meta, row);
+    const params = { ...(existing.params || {}) };
+    if (derived.sampler) params.sampler = derived.sampler;
+    if (derived.steps) params.steps = derived.steps;
+    if (derived.cfgScale) params.cfgScale = derived.cfgScale;
+    if (derived.width) params.width = derived.width;
+    if (derived.height) params.height = derived.height;
+    existing.params = params;
+    const seed = seedFromMeta(meta);
+    if (seed !== undefined) existing.seed = seed;
+    supplied.meta = true;
+  }
+
+  if (!lock?.workflow) {
+    const designated = designatedWorkflow(row, existing.type || row?.type);
+    if (designated) {
+      existing.params = { ...(existing.params || {}), workflow: designated };
+      supplied.workflow = true;
+    }
+  }
+
+  if (!lock?.resources && replacePublishedResources(existing, meta, row.imageResources)) {
+    supplied.resources = true;
+  }
+
+  return supplied;
 }
 
 // Leftover input-only fill from JPEG UserComment / PNG parameters.
@@ -999,37 +1160,36 @@ function applyEmbeddedMeta (item, filepath) {
 // backed) media item. Generation slots win on versionId. When there are no
 // civitaiResources, keep the older null-checkpoint backfill (freeform
 // meta.Model). Does not rewrite generation entries.
-function applyUnionFromMeta (existing, meta) {
-  const cr = meta?.civitaiResources;
-  if (Array.isArray(cr) && cr.length) {
-    const extra = resolveCheckpoint({ meta }).resources;
-    const primary = (Array.isArray(existing.resources) && existing.resources.length)
-      ? existing.resources
-      : (existing.checkpoint ? [existing.checkpoint] : []);
-    const { resources, checkpoint } = unionDecomposedSlots(primary, extra);
-    existing.resources = resources;
-    if (!existing.checkpoint && checkpoint) {
-      existing.checkpoint = checkpoint;
-      if (!existing.model) {
-        existing.model = checkpoint.modelName !== '(unknown)'
-          ? checkpoint.modelName
-          : (meta?.Model || '');
-      }
-    }
-    return;
+function finiteResourceVersionId (value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function decomposedImageResources (rows) {
+  if (!Array.isArray(rows) || !rows.length) return [];
+  const out = [];
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const id = row.modelVersionId ?? row.versionId;
+    if (!finiteResourceVersionId(id)) continue;
+    const decomposed = decomposeCivitaiMetaResource(row);
+    if (!decomposed || !finiteResourceVersionId(decomposed.versionId)) continue;
+    out.push(decomposed);
   }
-  if (!existing.checkpoint) {
-    const filled = resolveCheckpoint({ meta });
-    if (filled.checkpoint) {
-      existing.checkpoint = filled.checkpoint;
-      existing.resources = filled.resources;
-      if (!existing.model) {
-        existing.model = filled.checkpoint.modelName !== '(unknown)'
-          ? filled.checkpoint.modelName
-          : (meta?.Model || '');
-      }
-    }
-  }
+  return out;
+}
+
+function versionSlotKey (resource) {
+  if (resource?.versionId == null || resource.versionId === '') return '';
+  return String(resource.versionId);
+}
+
+function slotsWithImageResources (resolved, imageResources) {
+  const extra = decomposedImageResources(imageResources);
+  if (!extra.length) return resolved;
+  const primary = (Array.isArray(resolved?.resources) && resolved.resources.length)
+    ? resolved.resources
+    : (resolved?.checkpoint ? [resolved.checkpoint] : []);
+  return unionDecomposedSlots(primary, extra);
 }
 
 function postedImageId (m) {
@@ -1180,16 +1340,6 @@ function projectMediaItemRecords (generations, posts, comics, getTagName) {
   // Resolve a post media item's numeric tagIds to content-tag names via the
   // tag-name cache (Phase 3). Unresolved ids are skipped (graceful — the
   // pure unit tests run with no cache loaded and simply see no content tags).
-  const resolveContentNames = (tagIds) => {
-    if (!Array.isArray(tagIds)) return [];
-    const out = [];
-    for (const id of tagIds) {
-      const n = getTagName(id);
-      if (n) out.push(n);
-    }
-    return out;
-  };
-
   // Pass 1: every generation media item gets a record carrying full
   // generation-side metadata — model, params, resources, tags, batch ref.
   // One media id may appear on many jobs; append occurrences and derive
@@ -1332,6 +1482,8 @@ function projectMediaItemRecords (generations, posts, comics, getTagName) {
   }
 
   const recipeIndex = buildGenerationRecipeIndex(generations);
+  // Fields a post card already supplied. A later comic does not replace them.
+  const publishedLock = new Map();
 
   // Pass 2: each post media item either merges into an existing generation
   // record (cross-surface dedup) or creates a new record sourced only from
@@ -1348,7 +1500,10 @@ function projectMediaItemRecords (generations, posts, comics, getTagName) {
         status: post.status || 'published',
         title: post.title || '',
         thumbnailPath: m.thumbnailPath,
-        url: civitaiUrl('/posts/' + post.id),
+        // Media-page On Civitai opens this Image row. The post page keeps
+        // entry.url (/posts/{id}). A joined item's page id is the blob;
+        // this stays the Image id from the start of the loop.
+        url: civitaiUrl('/images/' + id),
         availability: typeof post.availability === 'string' ? post.availability : null,
         // Read-time scheduled vs published is derived from this stamp
         // (never frozen). Drafts have publishedAt: null.
@@ -1357,8 +1512,6 @@ function projectMediaItemRecords (generations, posts, comics, getTagName) {
         // post-only media items sort on the temporal axis, not as ''.
         sortKey: post.publishedAt || post.createdAt || ''
       };
-
-      const contentNames = resolveContentNames(m.tagIds);
 
       const postedAt = postedMatchAt(m);
       const existing = resolvePostedExisting(m, byId, recipeIndex, postedAt);
@@ -1371,16 +1524,17 @@ function projectMediaItemRecords (generations, posts, comics, getTagName) {
           existing.contentTagIds = [...new Set([...(existing.contentTagIds || []), ...m.tagIds])];
         }
         applyMeasuredSize(existing, m);
-        // Content-tag names join `tags`. Reaction tokens are split out after
-        // the projection loop.
-        if (contentNames.length) {
-          existing.tags = [...new Set([...existing.tags, ...contentNames])];
-        }
-        applyUnionFromMeta(existing, m.meta);
-        fillWorkflowFromRow(existing, m);
+        applyImageBrowsingLevel(existing, m.browsingLevel);
+        const supplied = overlayPublishedCard(existing, m, null);
+        const prior = publishedLock.get(existing) || { meta: false, workflow: false, resources: false };
+        publishedLock.set(existing, {
+          meta: prior.meta || supplied.meta,
+          workflow: prior.workflow || supplied.workflow,
+          resources: prior.resources || supplied.resources
+        });
       } else {
         const fromMeta = paramsWithDesignation(paramsFromImageMeta(m.meta, m), m, m.type);
-        const resolved = resolveCheckpoint({ meta: m.meta });
+        const resolved = slotsWithImageResources(resolveCheckpoint({ meta: m.meta }), m.imageResources);
         const modelName = resolved.checkpoint?.modelName;
         byId.set(id, {
           id,
@@ -1396,8 +1550,9 @@ function projectMediaItemRecords (generations, posts, comics, getTagName) {
           pixelSource: (m.width && m.height) ? 'post' : 'none',
           aspectClass: deriveAspectClass(m.width, m.height),
           duration: m.duration,
-          tags: contentNames,
+          tags: [],
           contentTagIds: Array.isArray(m.tagIds) ? [...new Set(m.tagIds)] : [],
+          browsingLevel: indexBrowsingLevel(m),
           prompt: m.meta?.prompt || m.meta?.Prompt || '',
           negativePrompt: m.meta?.negativePrompt || m.meta?.['Negative prompt'] || '',
           model: (modelName && modelName !== '(unknown)') ? modelName : (m.meta?.Model || ''),
@@ -1429,6 +1584,9 @@ function projectMediaItemRecords (generations, posts, comics, getTagName) {
       const chapter = Array.isArray(comic.chapters)
         ? comic.chapters.find(ch => ch && String(ch.id) === String(m.chapterId))
         : null;
+      // An Image-backed panel opens /images/{id}. A panel with no Image
+      // id has no public image page; the comic page stays entry.url.
+      const imagePageId = postedImageId(m);
       const comicRef = {
         id: comic.id,
         chapterId: m.chapterId,
@@ -1436,7 +1594,9 @@ function projectMediaItemRecords (generations, posts, comics, getTagName) {
         panelId: m.panelId,
         name: comic.name || '',
         thumbnailPath: m.thumbnailPath,
-        url: civitaiUrl('/comics/project/' + comic.id),
+        url: imagePageId
+          ? civitaiUrl('/images/' + imagePageId)
+          : civitaiUrl('/comics/project/' + comic.id),
         availability: chapter?.availability ?? null,
         earlyAccessEndsAt: chapter?.earlyAccessEndsAt ?? null,
         // Wire ComicChapterStatus (PascalCase). Matcher classifies from
@@ -1451,12 +1611,12 @@ function projectMediaItemRecords (generations, posts, comics, getTagName) {
         collectPostedAlias(pendingAliases, existing, m);
         existing.containers.comics = existing.containers.comics || [];
         existing.containers.comics.push(comicRef);
+        applyImageBrowsingLevel(existing, m.browsingLevel);
         applyMeasuredSize(existing, m);
-        applyUnionFromMeta(existing, m.meta);
-        fillWorkflowFromRow(existing, m);
+        overlayPublishedCard(existing, m, publishedLock.get(existing));
       } else {
         const fromMeta = paramsWithDesignation(paramsFromImageMeta(m.meta, m), m, m.type || 'image');
-        const resolved = resolveCheckpoint({ meta: m.meta });
+        const resolved = slotsWithImageResources(resolveCheckpoint({ meta: m.meta }), m.imageResources);
         const modelName = resolved.checkpoint?.modelName;
         byId.set(id, {
           id,
@@ -1471,6 +1631,7 @@ function projectMediaItemRecords (generations, posts, comics, getTagName) {
           duration: m.duration,
           tags: [],
           contentTagIds: [],
+          browsingLevel: indexBrowsingLevel(m),
           prompt: m.meta?.prompt || m.meta?.Prompt || '',
           negativePrompt: m.meta?.negativePrompt || m.meta?.['Negative prompt'] || '',
           model: (modelName && modelName !== '(unknown)') ? modelName : (m.meta?.Model || ''),
@@ -1501,7 +1662,7 @@ function projectMediaItemRecords (generations, posts, comics, getTagName) {
     const base = sep === -1 ? filepath : filepath.slice(sep + 1);
     const dot = base.lastIndexOf('.');
     const ext = dot === -1 ? 'jpeg' : base.slice(dot + 1);
-    return `/media/inputs/${id}.${ext}`;
+    return `/media/inputs/${portableFileSegment(id)}.${ext}`;
   }
 
   function resolveInputRef (ref, { consumerCreatedAt } = {}) {
@@ -1652,16 +1813,28 @@ function projectMediaItemRecords (generations, posts, comics, getTagName) {
     }
   }
 
-  // Reaction tokens leave `tags` (content names). Generation files already
-  // carry the override inside `media[].tags` via getEffectiveMediaInfo.
-  // Post-only and comic-only items merge the override here.
+  // Reaction tokens leave `tags` (content names). The reaction record is
+  // the union of every generation occurrence, then the local override.
+  // A job's own tags stay on the generation entry; they are not this record.
+  // Content names stay the primary occurrence's. Date, path, and prompt
+  // stay newest and are already copied above.
   for (const item of byId.values()) {
     if (!Array.isArray(item.inputs)) item.inputs = [];
     if (!Array.isArray(item.usedAsInput)) item.usedAsInput = [];
+    item.contentTags = namesFromTagIds(item.contentTagIds, getTagName);
     const split = splitReactionTags(item.tags);
-    item.reactions = split.reactions;
     item.tags = split.content;
-    if (item.containers.generation == null) mergeOverrideReactions(item);
+    const occs = item.containers?.generations;
+    if (Array.isArray(occs) && occs.length) {
+      const rows = occs.map(occ => {
+        const row = mediaRowFieldsByOcc.get(`${item.id}\0${occ.id}`);
+        return { sortKey: occ.sortKey || '', tags: row?.tags || [] };
+      });
+      item.reactions = reactionsToTags(mergeOccurrenceReactions(rows));
+    } else {
+      item.reactions = split.reactions;
+    }
+    mergeOverrideReactions(item);
   }
 
   // Sort newest first. Generation sortKey wins when present; otherwise the
@@ -1882,11 +2055,18 @@ export function createIndexStore (options) {
         else if (m.type === 'model3d') genModel3d++;
         else genImages++;
       }
-      if (g.tags.includes('favorite')) totalFavorites++;
-      if (g.tags.includes('feedback:liked')) totalLiked++;
-      if (g.tags.includes('feedback:disliked')) totalDisliked++;
       if (g.date && (!genFrom || g.date < genFrom)) genFrom = g.date;
       if (g.date && (!genTo || g.date > genTo)) genTo = g.date;
+    }
+
+    if (Array.isArray(mediaItems)) {
+      for (const mi of mediaItems) {
+        if (!isProduced(mi)) continue;
+        const reactions = Array.isArray(mi.reactions) ? mi.reactions : [];
+        if (reactions.includes('favorite')) totalFavorites++;
+        if (reactions.includes('feedback:liked')) totalLiked++;
+        if (reactions.includes('feedback:disliked')) totalDisliked++;
+      }
     }
 
     for (const p of posts) {
@@ -2210,6 +2390,7 @@ export function createIndexStore (options) {
     if (loadingPromise) return loadingPromise;
 
     loadingPromise = (async () => {
+      await adoptLegacyInputNames();
       // Load the reaction overrides before any entry is built so
       // buildGenerationEntry (via getEffectiveMediaInfo) merges them. On the
       // cache-hit path the entries' tags were already baked in at their last
@@ -2241,6 +2422,7 @@ export function createIndexStore (options) {
   // every entry from the on-disk JSON, rewriting the NDJSON cache.
   // Use sparingly: the hot path is upsert().
   async function rebuild () {
+    await adoptLegacyInputNames();
     // Mirror ensureLoaded(): overrides + tag-name cache must be loaded
     // before fullRebuild() derives entries via getEffectiveMediaInfo /
     // resolvePostContentTags.
@@ -2254,7 +2436,8 @@ export function createIndexStore (options) {
     await backfillContentHashes({
       generations: index.generations,
       posts: index.posts,
-      comics: index.comics || []
+      comics: index.comics || [],
+      force: true
     });
     await backfillAspectFileDims({
       mediaItems: index.mediaItems,
@@ -2555,9 +2738,15 @@ export function collectVersionIdsFromIndex (index = getIndex()) {
   for (const post of index.posts || []) {
     for (const m of post.media || []) {
       const civitaiResources = m.meta?.civitaiResources;
-      if (!Array.isArray(civitaiResources)) continue;
-      for (const r of civitaiResources) {
-        consider(r?.modelVersionId);
+      if (Array.isArray(civitaiResources)) {
+        for (const r of civitaiResources) {
+          consider(r?.modelVersionId);
+        }
+      }
+      if (Array.isArray(m.imageResources)) {
+        for (const r of m.imageResources) {
+          consider(r?.modelVersionId);
+        }
       }
     }
   }
@@ -3064,6 +3253,176 @@ function rangeShow (min, max, withValue, N) {
   return withValue > 0 && withValue < N;
 }
 
+const RATING_TOKEN_ORDER = ['pg', 'pg-13', 'r', 'x', 'xxx'];
+
+function contentNamesOfItem (mi) {
+  const out = [];
+  const push = (name) => {
+    if (typeof name !== 'string' || !name) return;
+    if (name === 'favorite' || name.startsWith('feedback:')) return;
+    if (isRatingTagName(name)) return;
+    out.push(name);
+  };
+  if (Array.isArray(mi?.contentTags)) {
+    for (const t of mi.contentTags) push(t);
+    return out;
+  }
+  const tags = Array.isArray(mi?.tags) ? mi.tags : [];
+  const named = tags.some(t => typeof t === 'string' && t && t !== 'favorite' && !t.startsWith('feedback:') && !isRatingTagName(t));
+  if (named) {
+    for (const t of tags) push(t);
+    return out;
+  }
+  if (Array.isArray(mi?.contentTagIds)) {
+    for (const id of mi.contentTagIds) push(formatTagName(id));
+  }
+  return out;
+}
+
+function curatedPostNames (post) {
+  const out = [];
+  const seen = new Set();
+  for (const t of post?.tags || []) {
+    const name = typeof t === 'string' ? t : t?.name;
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
+
+function postMemberItems (post, byId) {
+  const out = [];
+  for (const m of post?.media || []) {
+    const id = m?.imageId ?? m?.mediaId;
+    if (id == null || id === '') continue;
+    const mi = byId.get(String(id));
+    if (mi) out.push(mi);
+  }
+  return out;
+}
+
+function originMediaItems (index, comicBacked) {
+  const out = [];
+  for (const mi of index?.mediaItems || []) {
+    if (!isProduced(mi)) continue;
+    if (comicBacked) {
+      if (!isComicBacked(mi)) continue;
+    } else if (!isPostBacked(mi)) continue;
+    out.push(mi);
+  }
+  return out;
+}
+
+function selectedRatingTokens (rating) {
+  return new Set(String(rating || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
+}
+
+/**
+ * Tags panel payload. `ratings` counts images of this origin at both
+ * grains. A label on every image is omitted by the client (`count ===
+ * ratingTotal`). A label on every post, and not every image, stays.
+ * `values` are image content names. `dateSource=container` counts posts
+ * that contain the name; omitting it counts images. `postTags` are the
+ * post's curated names, posts origin only. `rating` limits both lists
+ * to images of those labels. Ladder names are not content values.
+ *
+ * @param {object} index
+ * @param {{ comicBacked?: boolean, dateSource?: string, rating?: string }} [opts]
+ */
+export function computeTagFacet (index, { comicBacked = false, dateSource = '', rating = '' } = {}) {
+  const images = originMediaItems(index, comicBacked);
+  const containerGrain = dateSource === 'container' && !comicBacked;
+  const byId = new Map();
+  for (const mi of images) byId.set(String(mi.id), mi);
+  const selected = selectedRatingTokens(rating);
+  const inRating = (mi) => {
+    if (!selected.size) return true;
+    const token = ratingTokenForLevel(mi.browsingLevel);
+    return !!(token && selected.has(token));
+  };
+  const ratingCounts = new Map();
+  let ratingTotal = 0;
+  for (const mi of images) {
+    ratingTotal++;
+    const token = ratingTokenForLevel(mi.browsingLevel);
+    if (token) ratingCounts.set(token, (ratingCounts.get(token) || 0) + 1);
+  }
+  const ratings = RATING_TOKEN_ORDER
+    .filter(token => (ratingCounts.get(token) || 0) > 0)
+    .map(token => ({
+      value: token,
+      label: ratingTagLabel(token),
+      count: ratingCounts.get(token)
+    }));
+
+  const counts = new Map();
+  const bump = (name) => {
+    if (!name || isRatingTagName(name)) return;
+    const e = counts.get(name) || { value: name, label: name, count: 0 };
+    e.count++;
+    counts.set(name, e);
+  };
+  let total = 0;
+  if (containerGrain) {
+    for (const p of index?.posts || []) {
+      if (!p.media?.length) continue;
+      const members = postMemberItems(p, byId).filter(inRating);
+      if (selected.size && !members.length) continue;
+      total++;
+      const names = new Set();
+      for (const mi of members) {
+        for (const name of contentNamesOfItem(mi)) names.add(name);
+      }
+      for (const name of names) bump(name);
+    }
+  } else {
+    for (const mi of images) {
+      if (!inRating(mi)) continue;
+      total++;
+      for (const name of contentNamesOfItem(mi)) bump(name);
+    }
+  }
+  const values = [...counts.values()]
+    .sort((a, b) => b.count - a.count || String(a.label).localeCompare(String(b.label)));
+
+  const postCounts = new Map();
+  const bumpPost = (name) => {
+    if (!name) return;
+    const e = postCounts.get(name) || { value: name, label: name, count: 0 };
+    e.count++;
+    postCounts.set(name, e);
+  };
+  let postTotal = 0;
+  if (!comicBacked) {
+    const posts = index?.posts || [];
+    const postById = new Map(posts.map(p => [String(p.id), p]));
+    if (containerGrain) {
+      for (const p of posts) {
+        if (!p.media?.length) continue;
+        const members = postMemberItems(p, byId).filter(inRating);
+        if (selected.size && !members.length) continue;
+        postTotal++;
+        for (const name of curatedPostNames(p)) bumpPost(name);
+      }
+    } else {
+      for (const mi of images) {
+        if (!inRating(mi)) continue;
+        postTotal++;
+        const names = new Set();
+        for (const ref of mi.containers?.posts || []) {
+          const post = postById.get(String(ref.id));
+          for (const name of curatedPostNames(post)) names.add(name);
+        }
+        for (const name of names) bumpPost(name);
+      }
+    }
+  }
+  const postTags = [...postCounts.values()]
+    .sort((a, b) => b.count - a.count || String(a.label).localeCompare(String(b.label)));
+  return { values, total, ratings, ratingTotal, postTags, postTotal };
+}
+
 /**
  * FacetBar offer payload for one origin + grain. Population P is produced
  * media items in scope; N = |P|. Membership controls use P; group axes and
@@ -3193,39 +3552,23 @@ export function computeListOffer (index, getModelVersion = () => null, opts = {}
     }
   }
 
-  // Content tags: same population as handleFacetValues tags branch. N_tags is
-  // that row count (not necessarily |P|). Payload carries only show.tags.
-  const tagCounts = new Map();
-  let NTags = 0;
-  if (comicBacked) {
-    for (const mi of index.mediaItems || []) {
-      if (!isProduced(mi) || !isComicBacked(mi)) continue;
-      NTags++;
-      if (Array.isArray(mi.contentTagIds) && mi.contentTagIds.length) {
-        for (const id of mi.contentTagIds) {
-          const name = formatTagName(id);
-          if (name) tagCounts.set(name, (tagCounts.get(name) || 0) + 1);
-        }
-      } else if (Array.isArray(mi.tags)) {
-        for (const t of mi.tags) {
-          if (typeof t === 'string' && t !== 'favorite' && !t.startsWith('feedback:')) {
-            tagCounts.set(t, (tagCounts.get(t) || 0) + 1);
-          }
-        }
-      }
-    }
-  } else {
-    for (const p of index.posts || []) {
-      if (!p.media?.length) continue;
-      NTags++;
-      for (const name of p.contentTags || []) {
-        if (name) tagCounts.set(name, (tagCounts.get(name) || 0) + 1);
-      }
+  // Content names and rating labels. A chip shows when it can change
+  // this grain's rows. Rating labels use member image bits, not the
+  // container bit.
+  const tagFacet = computeTagFacet(index, { comicBacked, dateSource });
+  let showTags = false;
+  for (const v of tagFacet.values) {
+    if (v.count > 0 && v.count < tagFacet.total) { showTags = true; break; }
+  }
+  if (!showTags) {
+    for (const v of tagFacet.ratings) {
+      if (v.count > 0 && v.count < tagFacet.ratingTotal) { showTags = true; break; }
     }
   }
-  let showTags = false;
-  for (const count of tagCounts.values()) {
-    if (count > 0 && count < NTags) { showTags = true; break; }
+  if (!showTags) {
+    for (const v of tagFacet.postTags || []) {
+      if (v.count > 0 && v.count < tagFacet.postTotal) { showTags = true; break; }
+    }
   }
 
   const showType = [...typeCounts.keys()].length >= 2;
@@ -3308,7 +3651,7 @@ export function computeListOffer (index, getModelVersion = () => null, opts = {}
     ownModels: !!(ownIds && ownIds.size && usesOwn)
   };
 
-  const payload = { total: N, show, groupAxes };
+  const payload = { total: N, show, groupAxes, ownKnown: opts.ownIds != null };
   if (showType) payload.types = types;
   if (showReaction) payload.reaction = reaction;
   if (showPublication) payload.publication = publication;
@@ -3419,10 +3762,8 @@ function treeNodeLabel (level, key, rep, getModelVersion) {
       return `Model ${key}`;
     }
     case 'version': {
-      const cached = getModelVersion(rep?.versionId);
-      const name = cached?.data?.name;
+      const name = resolveResourceVersionName(rep, getModelVersion);
       if (name) return name;
-      if (rep?.versionName) return rep.versionName;
       return `Version ${key}`;
     }
     default: return key;
@@ -4366,6 +4707,35 @@ export function computeOverview (index, { now = Date.now() } = {}) {
 // downloadPostsActions.mjs continue to import the names below.
 
 export function getIndex () { return defaultStore().getIndex(); }
+
+function openRows (rows) {
+  const out = [];
+  for (const row of rows || []) {
+    if (!row || row.downloadOpen !== true || row.id == null) continue;
+    out.push({
+      id: row.id,
+      date: row.date || '',
+      publishedAt: row.publishedAt || null,
+      createdAt: row.createdAt || null
+    });
+  }
+  return out;
+}
+
+export function downloadOpenIds () {
+  const index = getIndex();
+  return {
+    posts: openRows(index.posts),
+    comics: openRows(index.comics),
+    model3ds: openRows(index.model3ds),
+    generations: openRows(index.generations)
+  };
+}
+
+export function hasDownloadOpen () {
+  const open = downloadOpenIds();
+  return open.posts.length + open.comics.length + open.model3ds.length + open.generations.length > 0;
+}
 export async function ensureIndexLoaded () { return defaultStore().ensureLoaded(); }
 export async function buildIndex () { return defaultStore().ensureLoaded(); }
 export async function rebuildIndex () { return defaultStore().rebuild(); }

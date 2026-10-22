@@ -54,11 +54,10 @@ function paramSet (...keys) {
 //             entityId (`/models/{id}-{slug}`). sort/select via CONTROL_KEYS.
 export const VIEW_PARAM_KEYS = Object.freeze({
   generations: paramSet(
-    'type', 'ecosystem', 'model', 'version', 'resourceType', 'resource',
-    'versionId', 'scope',
+    'mediaType', 'models',
     'aspect', 'tag', 'reaction', 'dateFrom', 'dateTo',
     'cfgMin', 'cfgMax', 'stepsMin', 'stepsMax', 'inPost', 'publication', 'usedAsInput',
-    'workflow', 'workflowMode', 'mine',
+    'workflow', 'workflowMode',
     'from',
     'slot',
     // prune-only: retired media-view generation= (API hop kept). Option F
@@ -66,10 +65,9 @@ export const VIEW_PARAM_KEYS = Object.freeze({
     'generation'
   ),
   posts: paramSet(
-    'type', 'ecosystem', 'model', 'version', 'resourceType', 'resource',
-    'versionId', 'scope',
-    'tag', 'reaction', 'aspect', 'dateFrom', 'dateTo', 'status', 'publication', 'engagement',
-    'cfgMin', 'cfgMax', 'stepsMin', 'stepsMax', 'usedAsInput', 'workflow', 'workflowMode', 'mine',
+    'mediaType', 'models',
+    'tag', 'postTag', 'rating', 'reaction', 'aspect', 'dateFrom', 'dateTo', 'status', 'publication', 'engagement',
+    'cfgMin', 'cfgMax', 'stepsMin', 'stepsMax', 'usedAsInput', 'workflow', 'workflowMode',
     'title',
     'from',
     'slot',
@@ -80,19 +78,17 @@ export const VIEW_PARAM_KEYS = Object.freeze({
     'from'
   ),
   comics: paramSet(
-    'type', 'ecosystem', 'model', 'version', 'resourceType', 'resource',
-    'versionId', 'scope',
-    'tag', 'reaction', 'aspect', 'dateFrom', 'dateTo', 'status', 'publication', 'engagement',
-    'cfgMin', 'cfgMax', 'stepsMin', 'stepsMax', 'usedAsInput', 'workflow', 'workflowMode', 'mine',
+    'mediaType', 'models',
+    'tag', 'rating', 'reaction', 'aspect', 'dateFrom', 'dateTo', 'status', 'publication', 'engagement',
+    'cfgMin', 'cfgMax', 'stepsMin', 'stepsMax', 'usedAsInput', 'workflow', 'workflowMode',
     'title',
     'from',
     'slot',
     'generation' // prune-only; see generations
   ),
   media: paramSet(
-    'type', 'ecosystem', 'model', 'version', 'resourceType', 'resource',
-    'versionId', 'familyId', 'scope',
-    'aspect', 'tag', 'reaction', 'dateFrom', 'dateTo',
+    'mediaType', 'models',
+    'aspect', 'tag', 'postTag', 'rating', 'reaction', 'dateFrom', 'dateTo',
     'cfgMin', 'cfgMax', 'stepsMin', 'stepsMax', 'inPost', 'publication', 'usedAsInput',
     'workflow', 'workflowMode',
     'title',

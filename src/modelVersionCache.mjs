@@ -55,13 +55,12 @@
 
 import fs from 'node:fs';
 import { readFile, writeFile } from './utils.mjs';
-import { wait } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
 import { resolveModelVersion } from './civitaiApi.mjs';
+import { runAsBackground } from './requestScheduler.mjs';
 
 export const CACHE_VERSION = 2;
 
-const DATA_RATE_LIMIT = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** A record reaches `permanent: true` after this much time of consistent 404s. */
@@ -319,7 +318,7 @@ export function createModelVersionCache (options) {
    * Discover and fetch model-version records.
    *
    * Default mode: only fetch ids not already cached. Sequential fetch
-   * with `DATA_RATE_LIMIT` (100ms) between calls. A 404 produces (or
+   * Calls run one at a time as background work. A 404 produces (or
    * updates) a tombstone via `recordFailure`; non-404 errors flow into
    * `report.errors`.
    *
@@ -388,11 +387,9 @@ export function createModelVersionCache (options) {
         continue;
       }
 
-      if (i > 0) await wait(DATA_RATE_LIMIT);
-
       let response;
       try {
-        response = await fetcher({ id, secretKey, signal });
+        response = await runAsBackground(() => fetcher({ id, secretKey, signal }));
       } catch (err) {
         report.errors.push({ id, error: err.message });
         if (onProgress) onProgress({ index: i + 1, total, currentId: id, status: 'error' });
@@ -509,6 +506,13 @@ function defaultCache () {
  * call rebuilds it. Used by integration tests that mutate `CONFIG.dataPath`.
  */
 export function _resetDefaultModelVersionCacheForTest () { _defaultCache = null; }
+
+// Drop the loaded cache and the ndjson. The next read starts empty.
+export async function clearModelVersionCache () {
+  _defaultCache = null;
+  const file = `${CONFIG.dataPath}/model-cache/versions.ndjson`;
+  await fs.promises.unlink(file).catch(() => {});
+}
 
 // Backwards-compatible named exports — runtime callers go through these.
 export async function ensureModelVersionCacheLoaded () { return defaultCache().ensureLoaded(); }

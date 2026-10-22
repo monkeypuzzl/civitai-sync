@@ -29,6 +29,10 @@
 // `orchestrator_video_no_resources` is the operational coverage check).
 
 import { ENGINE_TO_ECOSYSTEM, WAN_VERSION_ECOSYSTEMS, ECOSYSTEM_TO_VERSION_ID } from './vendor/orchestrator-model-map.mjs';
+import { ECOSYSTEM_VERSION_RESIDUALS } from './vendor/civitai-residuals.mjs';
+import { mergeRecords } from './residualMerge.mjs';
+
+const VERSION_IDS = mergeRecords(ECOSYSTEM_TO_VERSION_ID, ECOSYSTEM_VERSION_RESIDUALS);
 
 function videoProcess (params) {
   const type = String(params.type || '').toLowerCase();
@@ -54,7 +58,7 @@ function wanI2vResolution (params) {
 
 function lookup (ecosystemKey) {
   if (!ecosystemKey) return null;
-  const versionId = ECOSYSTEM_TO_VERSION_ID[ecosystemKey];
+  const versionId = VERSION_IDS[ecosystemKey];
   if (typeof versionId !== 'number') return null;
   return {
     modelVersionId: versionId,

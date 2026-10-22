@@ -82,7 +82,7 @@ function buildMainMenuChoices (libraryOnDisk) {
             value: 'browse',
             description: accessIsLan
               ? explorerAccessDescription(EXPLORER_ACCESS_LAN)
-              : 'Open your local library of creations in the browser'
+              : 'Open your library in the browser'
           },
 
       {
@@ -178,7 +178,7 @@ export async function mainMenu ({ clear = true, defaultValue = '' } = {}) {
 
   try {
     const answer = await liveSelect({
-      message: 'Please select:',
+      message: 'Select:',
       readChoices: () => buildMainMenuChoices(libraryOnDisk),
       preamble: mainMenuPreamble,
       aliases: { 'check-update': 'software-update' },

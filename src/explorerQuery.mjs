@@ -16,16 +16,23 @@
 // in serverIndex.mjs). Extractors read each facet from whichever shape
 // applies. On a post/comic row, media-item axes (`reaction=`, the
 // type/workflowMode/workflow union, scope, cfg/steps, usedAsInput) match if
-// **any** resolved member matches (`ctx.mediaById`); content tags stay
-// entry-level. A facet with no member and no entry-level value filters
-// the row out. `reaction=` requires every selected mark in that union.
+// **any** resolved member matches (`ctx.mediaById`). `tag=` is image content
+// names; on a post or comic one member image must match, and when `rating=`
+// is also set that same image must match both. `postTag=` is the post's
+// curated names. `rating=` reads that image's browsing-level bit, never the
+// container bit. A facet with no member and no entry-level value filters the
+// row out. `reaction=` requires every selected mark in the member union.
+// A generation uses that same union for `reaction=` only. Its other facets
+// stay on the entry. When no member resolves, the entry's own marks remain.
 
 import { getEcosystemDisplayName } from './ecosystemDisplay.mjs';
 import { assignModelFamily, generatorFamilyForItem, getModelFamily } from './modelFamily.mjs';
 import { normalizeMediaId } from './mediaId.mjs';
+import { parseModels } from './modelsQuery.mjs';
 import {
   resolveModelGroupKey,
   resolveResourceLineName,
+  resolveResourceVersionName,
   hydratedResourceSlots
 } from './checkpointResolution.mjs';
 import {
@@ -38,6 +45,7 @@ import {
   parseWorkflowFamily,
   remainderTypeOf
 } from './workflowFamily.mjs';
+import { isRatingTagName, ratingTokenForLevel } from '../dev/ui/src/lib/browsing-level.js';
 
 // --- Field extractors (shape-tolerant) -------------------------------------
 
@@ -183,14 +191,49 @@ export function itemReactionTags (item) {
   return item.tags.filter(t => typeof t === 'string' && isReactionToken(t));
 }
 
-/** Content tag names — resolved post-level + image tag names. Posts only. */
+/** Image content-tag names. `contentTags` wins when the projection set it. */
 export function itemContentTags (item) {
   const names = Array.isArray(item.contentTags)
     ? item.contentTags
     : (Array.isArray(item.tags)
       ? item.tags.map(t => (typeof t === 'string' ? t : t?.name))
       : []);
-  return names.filter(t => t && !isReactionToken(t));
+  return names.filter(t => t && !isReactionToken(t) && !isRatingTagName(t));
+}
+
+function curatedTagNames (item) {
+  const out = [];
+  for (const t of item?.tags || []) {
+    const name = typeof t === 'string' ? t : t?.name;
+    if (name) out.push(name);
+  }
+  return out;
+}
+
+/** Curated post names. A post matches its own tags. A media item matches when a containing post does. */
+export function matchesPostTags (item, required, ctx = {}) {
+  if (!required.length) return true;
+  if (item?.type === 'post') {
+    const have = new Set(curatedTagNames(item));
+    return required.some(name => have.has(name));
+  }
+  const refs = item?.containers?.posts;
+  if (!Array.isArray(refs) || !refs.length || typeof ctx.getPostById !== 'function') return false;
+  for (const ref of refs) {
+    const post = ctx.getPostById(ref?.id);
+    if (!post) continue;
+    const have = new Set(curatedTagNames(post));
+    if (required.some(name => have.has(name))) return true;
+  }
+  return false;
+}
+
+/** Image browsing-level label. Empty required list matches. Unrated and Blocked match nothing. */
+export function matchesRating (item, required) {
+  if (!required.length) return true;
+  const token = ratingTokenForLevel(item?.browsingLevel);
+  if (!token) return false;
+  return required.includes(token);
 }
 
 function isContainerEntry (item) {
@@ -217,6 +260,18 @@ export function resolveMemberMedia (m, ctx) {
     return ctx.getMediaItemById(id) || ctx.getMediaItemById(norm) || null;
   }
   return null;
+}
+
+/** Owner marks for one post or comic member. A miss is `[]`. */
+export function ownerReactionsForMember (member, ctx) {
+  return itemReactionTags(resolveMemberMedia(member, ctx));
+}
+
+/** Owner marks for a published 3D still. The thumbnail image only. */
+export function ownerReactionsForStill (entry, ctx) {
+  const id = entry?.thumbnailImageId;
+  if (id == null || id === '') return [];
+  return itemReactionTags(resolveMemberMedia({ imageId: id }, ctx));
 }
 
 function forEachResolvedMember (item, ctx, fn) {
@@ -357,27 +412,37 @@ export function matchesTags (item, requiredTags) {
   return requiredTags.some(t => content.has(t));
 }
 
+function readsMemberReactions (item) {
+  return item?.type === 'post' || item?.type === 'comic' || item?.type === 'generation';
+}
+
+// Union of resolved members' reaction tokens. `null` when none resolve, so
+// the caller keeps the entry's own marks. An empty array is the answer:
+// those members have no marks, and the entry's tags do not fill them back in.
+function memberReactionUnion (entry, ctx) {
+  const have = [];
+  let any = false;
+  forEachResolvedMember(entry, ctx, mi => {
+    any = true;
+    for (const t of itemReactionTags(mi)) {
+      if (!have.includes(t)) have.push(t);
+    }
+  });
+  return any ? have : null;
+}
+
 /**
  * Private reactions. Every selected token must be present (AND). On a
- * post or comic the tokens are the union of members, so Favorite and Liked
- * may sit on different members. A media item must carry each token itself.
+ * post, comic, or generation the tokens are the union of resolved members,
+ * so Favorite and Liked may sit on different members. A media item must
+ * carry each token itself. A generation whose members do not resolve still
+ * reads the entry.
  */
 export function matchesReactions (item, required, ctx = {}) {
   if (!required.length) return true;
-  const have = new Set();
-  if (isContainerEntry(item)) {
-    let anyMember = false;
-    forEachResolvedMember(item, ctx, mi => {
-      anyMember = true;
-      for (const t of itemReactionTags(mi)) have.add(t);
-    });
-    if (!anyMember) {
-      for (const t of itemReactionTags(item)) have.add(t);
-    }
-  } else {
-    for (const t of itemReactionTags(item)) have.add(t);
-  }
-  return required.every(t => have.has(t));
+  const union = readsMemberReactions(item) ? memberReactionUnion(item, ctx) : null;
+  const have = union == null ? itemReactionTags(item) : union;
+  return required.every(t => have.includes(t));
 }
 
 // --- Substring search (prompt-like text only; tags are facets) -------------
@@ -544,53 +609,15 @@ function csv (params, key) {
   return String(v).split(',').map(s => s.trim()).filter(Boolean);
 }
 
-function someIn (values, wanted) {
-  if (!wanted.length) return true;
-  const set = new Set(values);
-  return wanted.some(w => set.has(w));
-}
-
-// --- scope grammar (hierarchical model/resource filter) --------------------
+// --- models grammar --------------------------------------------------------
 //
-// `scope` = `~`-separated terms; each term = `/`-separated, level-prefixed
-// segments (values encodeURIComponent-ed). A term is a partial constraint
-// (segments are an unordered set). An item matches if ANY resource slot
-// (checkpoint ∪ resources[]) satisfies ALL segments of ANY term.
-//
-// Prefixes: t.<ModelType> | b.<baseModel> | e.<ecosystem> | m.<modelId>
-// | v.<versionId> | mn.<modelName> (id-less / legacy)
-// | o.<family output type> | f.<family id>.
-// See explorer-url-protocol.md. `e.` remains valid for old bookmarks;
-// the FacetBar emits `b.` (Civitai's Base model token). `f.` / `o.` are
-// the 3D generator-family rows.
-
-const SCOPE_PREFIX = {
-  t: 'type',
-  b: 'baseModel',
-  e: 'ecosystem',
-  m: 'modelId',
-  v: 'versionId',
-  mn: 'modelName',
-  o: 'familyOutput',
-  f: 'familyId'
-};
-
-const SCOPE_SERIALIZE_ORDER = ['type', 'baseModel', 'ecosystem', 'modelId', 'modelName', 'versionId', 'familyOutput', 'familyId'];
-const SCOPE_SERIALIZE_PREFIX = {
-  type: 't',
-  baseModel: 'b',
-  ecosystem: 'e',
-  modelId: 'm',
-  modelName: 'mn',
-  versionId: 'v',
-  familyOutput: 'o',
-  familyId: 'f'
-};
+// `models=` is parsed in src/modelsQuery.mjs. A term matches when one
+// resource slot satisfies every positive segment and none of that term's
+// exceptions. Terms are OR. A hole narrows only its own term.
 
 /**
- * Resource-slot tuples used by `matchesScope`. Each slot is
- * `{ type, ecosystem, modelId, versionId, modelName }`. Cache-hydrated so a
- * post-only `{ type, versionId }` can still satisfy an `m.` / `e.` term.
+ * Resource-slot tuples used by `matchesScope`. Cache-hydrated so a
+ * post-only `{ type, versionId }` can still satisfy a model or ecosystem term.
  */
 export function itemScopeTuples (item, getModelVersion = () => null) {
   const out = [];
@@ -610,7 +637,8 @@ export function itemScopeTuples (item, getModelVersion = () => null) {
       versionId: r.versionId != null && r.versionId !== '' ? String(r.versionId) : '',
       modelName: (r.modelName && r.modelName !== '(unknown)') ? r.modelName : '',
       familyId: fam?.id || '',
-      familyOutput: fam?.outputType || ''
+      familyOutput: fam?.outputType || '',
+      variantIds: Array.isArray(assignment?.variantIds) ? assignment.variantIds.map(id => String(id)) : []
     };
     const key = `${tuple.type}\0${tuple.baseModel}\0${tuple.ecosystem}\0${tuple.modelId}\0${tuple.versionId}\0${tuple.modelName}\0${tuple.familyId}`;
     if (seen.has(key)) continue;
@@ -627,61 +655,18 @@ export function itemScopeTuples (item, getModelVersion = () => null) {
       versionId: '',
       modelName: '',
       familyId: fallback.familyId,
-      familyOutput: 'model3d'
+      familyOutput: 'model3d',
+      variantIds: []
     });
   }
   return out;
 }
 
-function parseScopeSegment (raw) {
-  if (!raw) return null;
-  const dot = raw.indexOf('.');
-  if (dot < 1) return null;
-  const field = SCOPE_PREFIX[raw.slice(0, dot)];
-  if (!field) return null;
-  let value = raw.slice(dot + 1);
-  try { value = decodeURIComponent(value); } catch { /* keep raw */ }
-  if (!value) return null;
-  return { field, value };
-}
-
-/** Parse a `scope=` param into an array of term objects. Empty / absent → []. */
-export function parseScope (param) {
-  if (!param) return [];
-  const terms = [];
-  for (const rawTerm of String(param).split('~')) {
-    if (!rawTerm) continue;
-    const term = {};
-    for (const rawSeg of rawTerm.split('/')) {
-      const seg = parseScopeSegment(rawSeg);
-      if (!seg) continue;
-      term[seg.field] = seg.value;
-    }
-    if (Object.keys(term).length) terms.push(term);
-  }
-  return terms;
-}
-
-function serializeScopeTerm (term) {
-  if (!term || typeof term !== 'object') return '';
-  const segs = [];
-  for (const field of SCOPE_SERIALIZE_ORDER) {
-    const value = term[field];
-    if (value == null || value === '') continue;
-    // Prefer `m.` over `mn.` when both are present (id is the stable key).
-    if (field === 'modelName' && term.modelId) continue;
-    segs.push(`${SCOPE_SERIALIZE_PREFIX[field]}.${encodeURIComponent(String(value))}`);
-  }
-  return segs.join('/');
-}
-
-/** Serialize term objects back to the `scope=` param form. */
-export function serializeScopeTerms (terms) {
-  if (!Array.isArray(terms) || !terms.length) return '';
-  return terms.map(serializeScopeTerm).filter(Boolean).join('~');
-}
-
 function tupleMatchesTerm (tuple, term) {
+  if (term?.mine) return false;
+  if (term.variant != null && term.variant !== '' && (term.familyId == null || term.familyId === '')) {
+    return false;
+  }
   if (term.type != null && (tuple.type || 'Other') !== term.type) return false;
   if (term.baseModel != null && (tuple.baseModel || '') !== term.baseModel) return false;
   if (term.ecosystem != null && (tuple.ecosystem || '') !== term.ecosystem) return false;
@@ -690,6 +675,12 @@ function tupleMatchesTerm (tuple, term) {
   if (term.versionId != null && String(tuple.versionId || '') !== String(term.versionId)) return false;
   if (term.familyOutput != null && (tuple.familyOutput || '') !== term.familyOutput) return false;
   if (term.familyId != null && (tuple.familyId || '') !== term.familyId) return false;
+  if (term.variant != null && term.variant !== '') {
+    const ids = Array.isArray(tuple.variantIds) ? tuple.variantIds : [];
+    const option = String(term.variant);
+    const compound = `${term.familyId}:${option}`;
+    if (!ids.some(id => id === option || id === compound)) return false;
+  }
   return true;
 }
 
@@ -697,29 +688,45 @@ function tupleMatchesTerm (tuple, term) {
  * OR-of-terms, prefix/subtree match: an item matches if any resource slot
  * satisfies every segment of any term. Empty terms → no constraint.
  */
-function mineOn (params) {
-  return params?.mine === '1' || params?.mine === 'true' || params?.mine === true;
+function holeList (term) {
+  return Array.isArray(term?.except) ? term.except : [];
 }
 
-function slotInOwnSet (item, ctx) {
+function tupleExcluded (tuple, term) {
+  return holeList(term).some(hole => tupleMatchesTerm(tuple, hole));
+}
+
+function tupleHitsTerm (tuple, term) {
+  if (!tupleMatchesTerm(tuple, term)) return false;
+  return !tupleExcluded(tuple, term);
+}
+
+function slotInOwnSet (item, ctx, mineTerm) {
   const ids = ctx?.ownModels?.ids;
   if (!ids || !ids.size) return false;
-  return itemScopeTuples(item, ctx.getModelVersion).some(t => t.modelId && ids.has(String(t.modelId)));
+  return itemScopeTuples(item, ctx.getModelVersion).some(tuple => {
+    if (!tuple.modelId || !ids.has(String(tuple.modelId))) return false;
+    return !tupleExcluded(tuple, mineTerm);
+  });
 }
 
 /**
- * Model dimension: `scope` and live `mine`. Unknown own-models record
- * (no file, or another username) does not apply `mine`.
+ * Model dimension. A `mine` term is OR'd with the other terms. When the
+ * own-models record is missing the term is skipped and the other terms
+ * still apply. `models=mine` alone then matches everything. Exceptions on
+ * mine are skipped with it.
  */
 function matchesModelDimension (item, params, ctx) {
-  const terms = parseScope(params?.scope);
+  const all = parseModels(params?.models);
+  const terms = all.filter(term => !term.mine);
+  const mineTerm = all.find(term => term.mine) || null;
+  const wantMine = !!mineTerm;
   const scopeOk = !terms.length || anyMemberOrSelf(
     item, ctx, it => matchesScope(it, terms, ctx.getModelVersion)
   );
-  const wantMine = mineOn(params);
   const known = ctx?.ownModels?.known === true;
   if (!wantMine || !known) return scopeOk;
-  const mineOk = anyMemberOrSelf(item, ctx, it => slotInOwnSet(it, ctx));
+  const mineOk = anyMemberOrSelf(item, ctx, it => slotInOwnSet(it, ctx, mineTerm));
   if (!terms.length) return mineOk;
   return scopeOk || mineOk;
 }
@@ -728,7 +735,7 @@ export function matchesScope (item, terms, getModelVersion = () => null) {
   if (!Array.isArray(terms) || !terms.length) return true;
   const tuples = itemScopeTuples(item, getModelVersion);
   if (!tuples.length) return false;
-  return terms.some(term => tuples.some(tuple => tupleMatchesTerm(tuple, term)));
+  return terms.some(term => tuples.some(tuple => tupleHitsTerm(tuple, term)));
 }
 
 export const PUBLICATION_TOKENS = Object.freeze([
@@ -842,8 +849,8 @@ function listsOverlap (values, wanted) {
 }
 
 /**
- * Union of `type`, `workflowMode`, and exact `workflow`. Unconstrained when
- * all three are empty. `type=image` includes an item with no workflow.
+ * Union of `mediaType`, `workflowMode`, and exact `workflow`. Unconstrained when
+ * all three are empty. `mediaType=image` includes an item with no workflow.
  * `workflowMode=T2I` hits `txt2img` and `txt2img:face-fix`. `workflow=txt2img`
  * does not hit `txt2img:hires-fix`. `workflowMode=none:image` hits that
  * gallery type only when the workflow is not an offered media workflow.
@@ -859,7 +866,7 @@ function listsOverlap (values, wanted) {
  * @returns {boolean}
  */
 export function matchesTypeWorkflow (item, params) {
-  const types = csv(params || {}, 'type');
+  const types = csv(params || {}, 'mediaType');
   const modes = csv(params || {}, 'workflowMode');
   const wfs = csv(params || {}, 'workflow');
   if (!types.length && !modes.length && !wfs.length) return true;
@@ -887,6 +894,18 @@ export function matchesTypeWorkflow (item, params) {
 }
 
 /**
+ * Query keys `matchesFacets` reads. The origin walk's membership table must
+ * name every one of these (`src/originList.mjs`). Adding a facet updates
+ * both lists in the same change. `postTag` arrives with the tag split.
+ */
+export const FACET_PARAM_KEYS = Object.freeze([
+  'tag', 'rating', 'reaction', 'mediaType', 'workflow', 'workflowMode',
+  'aspect', 'models',
+  'dateFrom', 'dateTo', 'cfgMin', 'cfgMax', 'stepsMin', 'stepsMax',
+  'publication', 'status', 'inPost', 'usedAsInput', 'title', 'q', 'postTag'
+]);
+
+/**
  * Apply every facet present in `params` to a single item. `ctx` may carry
  * `now` (for read-time post scheduled vs published) and `mediaById` (the
  * index Map, for batch-grain union of member media items).
@@ -895,30 +914,24 @@ export function matchesTypeWorkflow (item, params) {
  * in `src/mediaId.mjs`); the caller passes `normalizeMediaId`.
  */
 export function matchesFacets (item, params, searchField, ctx = {}) {
-  if (!matchesTags(item, csv(params, 'tag'), ctx)) return false;
+  const ratings = csv(params, 'rating');
+  const tags = csv(params, 'tag');
+  if (isContainerEntry(item) && (ratings.length || tags.length)) {
+    const members = adaptedContainerMembers(item, ctx);
+    if (!members.some(m => matchesRating(m, ratings) && matchesTags(m, tags))) return false;
+  } else {
+    if (!matchesRating(item, ratings)) return false;
+    if (!matchesTags(item, tags)) return false;
+  }
+  if (!matchesPostTags(item, csv(params, 'postTag'), ctx)) return false;
   if (!matchesReactions(item, csv(params, 'reaction'), ctx)) return false;
   if (!anyMemberOrSelf(item, ctx, it => matchesTypeWorkflow(it, params))) return false;
-  if (!anyMemberOrSelf(item, ctx, it => someIn(itemEcosystems(it, ctx.getModelVersion), csv(params, 'ecosystem')))) return false;
-  if (!anyMemberOrSelf(item, ctx, it => someIn(itemModels(it, ctx.getModelVersion), csv(params, 'model')))) return false;
-  if (!anyMemberOrSelf(item, ctx, it => someIn(itemVersions(it, ctx.getModelVersion), csv(params, 'version')))) return false;
-  // versionId: the Models-tree leaf scope (by immutable id, across all slots).
-  if (!anyMemberOrSelf(item, ctx, it => someIn(itemVersionIds(it), csv(params, 'versionId')))) return false;
-  if (!anyMemberOrSelf(item, ctx, it => someIn(itemResourceTypes(it, ctx.getModelVersion), csv(params, 'resourceType')))) return false;
-  if (!anyMemberOrSelf(item, ctx, it => someIn(itemResources(it, ctx.getModelVersion), csv(params, 'resource')))) return false;
   if (!anyMemberOrSelf(item, ctx, it => itemMatchesAspect(it, csv(params, 'aspect')))) return false;
 
-  // Hierarchical scope, OR a live `mine=1` (account-published model ids on
+  // Hierarchical models, OR a live `mine=1` (account-published model ids on
   // ctx.ownModels). An unknown record ignores `mine`. A known empty set
   // matches nothing. Other facets still AND with this dimension.
   if (!matchesModelDimension(item, params, ctx)) return false;
-  if (params?.familyId != null && params.familyId !== '') {
-    const want = String(params.familyId);
-    const hit = anyMemberOrSelf(item, ctx, it => {
-      const fam = generatorFamilyForItem(it);
-      return fam != null && fam.familyId === want;
-    });
-    if (!hit) return false;
-  }
 
   // Date range (inclusive). Compare on the YYYY-MM-DD prefix so a `dateTo`
   // of 2025-06-30 includes everything on that day regardless of time.
@@ -1101,7 +1114,7 @@ const VALID_GROUP_AXES = new Set([
 export function groupKeysFor (item, axis, getModelVersion = () => null) {
   switch (axis) {
     case 'model': return [resolveModelGroupKey(item, getModelVersion)];
-    case 'version': return [item.checkpoint?.versionName || ''];
+    case 'version': return [checkpointVersionGroupKey(item, getModelVersion)];
     case 'ecosystem': return [item.checkpoint?.air?.ecosystem || (itemEcosystems(item, getModelVersion)[0] || '')];
     case 'resourceType': {
       const types = itemResourceTypes(item, getModelVersion);
@@ -1121,7 +1134,23 @@ export function groupKeysFor (item, axis, getModelVersion = () => null) {
   }
 }
 
-export function groupLabel (axis, key) {
+function checkpointVersionGroupKey (item, getModelVersion) {
+  const checkpoint = item?.checkpoint;
+  if (checkpoint?.versionId != null && checkpoint.versionId !== '') return String(checkpoint.versionId);
+  return resolveResourceVersionName(checkpoint, getModelVersion) || '';
+}
+
+function versionGroupLabel (key, { items, getModelVersion } = {}) {
+  const list = Array.isArray(items) ? items : [];
+  for (const item of list) {
+    const name = resolveResourceVersionName(item?.checkpoint, getModelVersion);
+    if (name) return name;
+  }
+  if (/^[0-9]+$/.test(String(key))) return `Version ${key}`;
+  return key;
+}
+
+export function groupLabel (axis, key, context = {}) {
   if (!key) {
     if (axis === 'resource') return 'No resource';
     if (axis === 'model') return 'No model';
@@ -1132,6 +1161,7 @@ export function groupLabel (axis, key) {
     return getModelFamily(id)?.label || id;
   }
   if (axis === 'ecosystem') return getEcosystemDisplayName(key) || key;
+  if (axis === 'version') return versionGroupLabel(key, context);
   return key;
 }
 
@@ -1154,7 +1184,7 @@ export function groupItems (items, axis, { sort, groupSort, getModelVersion } = 
 
   let groups = [...map.entries()].map(([key, groupItemsArr]) => ({
     key,
-    label: groupLabel(axis, key),
+    label: groupLabel(axis, key, { items: groupItemsArr, getModelVersion }),
     count: groupItemsArr.length,
     items: sort ? applySort(groupItemsArr, sort) : groupItemsArr
   }));
@@ -1336,8 +1366,10 @@ export function originFileForOverlay (entry, { origin, containerId } = {}) {
  * the origin tree (`originFileForOverlay`); date is unchanged.
  * `media[].mediaId` is the canonical media-item id when `getMediaItemById`
  * is passed (joined post/comic Image ids hop onto the generation blob).
+ * `previewMember` is one container `media[]` row, already chosen. When
+ * set, `preview` is that row lightened. `media[]` stays in stored order.
  */
-export function toTile (entry, { q, usedAsInput, mediaById, normalizeId, getMediaItemById, fileOrigin, originContainerId } = {}) {
+export function toTile (entry, { q, usedAsInput, mediaById, normalizeId, getMediaItemById, fileOrigin, originContainerId, previewMember } = {}) {
   const memberCtx = { mediaById, normalizeId, getMediaItemById };
   const hasMedia = Array.isArray(entry.media) && entry.media.length > 0;
   const media = hasMedia
@@ -1345,9 +1377,14 @@ export function toTile (entry, { q, usedAsInput, mediaById, normalizeId, getMedi
     : (MEDIA_ITEM_TYPES.has(entry.type) ? [lightMedia({ ...entry, mediaId: entry.id }, memberCtx)] : []);
   const { hasInputs, inputKinds } = tileInputSummary(entry);
 
-  const reactions = Array.isArray(entry.reactions)
-    ? entry.reactions.filter(isReactionToken)
-    : (Array.isArray(entry.tags) ? entry.tags.filter(isReactionToken) : []);
+  const memberReactions = entry?.type === 'generation'
+    ? memberReactionUnion(entry, memberCtx)
+    : null;
+  const reactions = memberReactions == null
+    ? (Array.isArray(entry.reactions)
+      ? entry.reactions.filter(isReactionToken)
+      : (Array.isArray(entry.tags) ? entry.tags.filter(isReactionToken) : []))
+    : memberReactions;
   const tile = {
     id: entry.id,
     type: entry.type,
@@ -1423,6 +1460,7 @@ export function toTile (entry, { q, usedAsInput, mediaById, normalizeId, getMedi
       tile.media[0] = { ...tile.media[0], thumbnailPath: path };
     }
   }
+  if (previewMember) tile.preview = lightMedia(previewMember, memberCtx);
   return tile;
 }
 

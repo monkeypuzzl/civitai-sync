@@ -1,3 +1,9 @@
+import { createProgressSession } from './lib/progress-session.js';
+
+const progressSession = createProgressSession({
+  readStatus: () => getDownloadStatus()
+});
+
 async function fetchJson (url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -78,8 +84,9 @@ export function getModel3ds (params = {}) {
   return fetchJson(`/api/model3ds?${toQuery({ limit: 50, ...params })}`);
 }
 
-export function getModel3d (id) {
-  return fetchJson(`/api/model3ds/${encodeURIComponent(id)}`);
+export function getModel3d (id, params) {
+  const q = toQuery(params || {});
+  return fetchJson(`/api/model3ds/${encodeURIComponent(id)}${q ? `?${q}` : ''}`);
 }
 
 // Media-item granularity. Tile DTO via the same item-paginated envelope as
@@ -218,8 +225,18 @@ export function getDownloadStatus () {
   return fetchJson('/api/download/status');
 }
 
-export function startDownload (type, mode) {
-  return postJson(`/api/download/${type}`, { mode });
+export function startDownloadQueue (body) {
+  return postJson('/api/download/queue', body);
+}
+
+export function saveDownloadModes (body) {
+  return postJson('/api/download/modes', body);
+}
+
+export function startDownload (type, mode, { checkAllMedia = false } = {}) {
+  const body = { mode };
+  if (checkAllMedia === true && type !== 'generations') body.checkAllMedia = true;
+  return postJson(`/api/download/${type}`, body);
 }
 
 export function abortDownload () {
@@ -240,6 +257,22 @@ export function refreshModelCache (force = false) {
 
 export function abortModelCacheRefresh () {
   return postJson('/api/model-cache/abort', {});
+}
+
+export function saveApiKey (body) {
+  return postJson('/api/key', body);
+}
+
+export function deleteApiKey () {
+  return postJson('/api/key/delete', {});
+}
+
+export function protectApiKey (body) {
+  return postJson('/api/key/password', body);
+}
+
+export function unprotectApiKey (body) {
+  return postJson('/api/key/unprotect', body);
 }
 
 export function unlockKey (password) {
@@ -327,6 +360,12 @@ export function updateExport (slug, patch) {
 // succeed (`ok: false`, `error` incomplete / unsafe-root / shared-destination).
 // Downloaded originals are never the target. The destination itself is changed
 // with Edit, not a separate control.
+// Files Delete files would unlink. `{ files: 0 }` is an empty or missing
+// folder. A non-OK response throws so the row can keep the confirm note.
+export function removalFileCount (slug) {
+  return fetchJson(`/api/exports/${encodeURIComponent(slug)}/removal`);
+}
+
 export function deleteExport (slug, { deleteFiles = false } = {}) {
   const qs = deleteFiles ? '?files=1' : '';
   return deleteJson(`/api/exports/${encodeURIComponent(slug)}${qs}`);
@@ -340,6 +379,13 @@ export function deleteExport (slug, { deleteFiles = false } = {}) {
 // { pending, reason } (destination offline) or { error } (404).
 export function planExport (slug) {
   return postJson(`/api/exports/${encodeURIComponent(slug)}/sync`, { dryRun: true });
+}
+
+// Plan a create or edit that has not been written. `slug` is set when editing.
+// A confirm result is not a saved change. `{ pending: true }` means the
+// destination could not be read; the export was not written.
+export function planExportDraft (body) {
+  return postJson('/api/exports/plan', body || {});
 }
 
 // Requests a bulk sync. Resolves to one of: the started-plan shape
@@ -388,34 +434,8 @@ export function connectExportSync (slug, jobId, onEvent) {
   };
 }
 
+// One session for the shell and the Download page. A second call adds a
+// listener; it does not open another EventSource.
 export function connectProgress (onEvent) {
-  let es = null;
-  let timer = null;
-  let closed = false;
-  let retries = 0;
-
-  function connect () {
-    if (closed) return;
-    es = new EventSource('/api/download/progress');
-    es.onmessage = (e) => {
-      retries = 0;
-      try { onEvent(JSON.parse(e.data)); } catch {}
-    };
-    es.onerror = () => {
-      es.close();
-      es = null;
-      if (closed) return;
-      retries++;
-      const delay = Math.min(30000, 3000 * Math.pow(2, retries - 1));
-      timer = setTimeout(connect, delay);
-    };
-  }
-
-  connect();
-
-  return () => {
-    closed = true;
-    if (timer) clearTimeout(timer);
-    if (es) es.close();
-  };
+  return progressSession.connectProgress(onEvent);
 }

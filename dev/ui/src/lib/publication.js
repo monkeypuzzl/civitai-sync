@@ -13,6 +13,13 @@ export const PUBLICATION_LABELS = {
   unposted: 'Not in a post or comic'
 };
 
+// Published 3D gallery. Three status words. Not the post/comic set.
+export const MODEL3D_PUBLICATION_LABELS = {
+  published: 'Published',
+  draft: 'Draft',
+  unpublished: 'Unpublished'
+};
+
 export function publicationFacet ({ unposted = true } = {}) {
   const options = unposted
     ? PUBLICATION_OPTIONS

@@ -4,10 +4,16 @@ import { writeFile, readFile, fileExists, toDateString } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
 import { getCivitaiImageBase } from './civitaiApi.mjs';
 import { downloadMediaFile } from './mediaDownload.mjs';
+import { mapPool, MEDIA_POOL_WIDTH } from './requestScheduler.mjs';
+import { applyStorageFault } from './downloadFault.mjs';
+import { flushFetchMiss } from './fetchMiss.mjs';
+import { byteMissKeepsOpen, markContainerOpen, commitOpenContainer } from './downloadOpen.mjs';
+import { sameResourceUrl, resourceIdentity } from './signedUrl.mjs';
 import { extractInputDescriptors, saveInputMedia } from './inputMedia.mjs';
 import { normalizeMediaId } from './mediaId.mjs';
 import { joinPostedFileIfHashed } from './contentHashBackfill.mjs';
-import { collectGenerationSourceUpdates, imageNeedsGenerationData } from './posts.mjs';
+import { collectGenerationSourceUpdates } from './posts.mjs';
+import { WIRE, browsingLevelOf } from './civitaiWire.mjs';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -108,10 +114,80 @@ function isReadyPanel (panel) {
   return Boolean(panel && panel.status === 'Ready' && usableImageUrl(panel.imageUrl));
 }
 
+function chapterSummary (chapters) {
+  const list = Array.isArray(chapters) ? chapters : [];
+  return list
+    .filter(ch => ch && ch.position != null)
+    .map(ch => ({
+      id: ch.id,
+      position: ch.position,
+      status: ch.status,
+      panelCount: ch.panelCount
+    }))
+    .sort((a, b) => a.position - b.position);
+}
+
+// True when the shell's chapter list is not the saved summary. A missing
+// panelCount cannot prove the chapters are current.
+export function comicNeedsChapters (shell, saved) {
+  if (!saved) return true;
+  const savedChapters = Array.isArray(saved.chapters) ? saved.chapters : [];
+  if (savedChapters.some(ch => ch && ch.panelCount == null)) return true;
+  const shellChapters = Array.isArray(shell && shell.chapters) ? shell.chapters : [];
+  return JSON.stringify(chapterSummary(savedChapters)) !== JSON.stringify(chapterSummary(shellChapters));
+}
+
+// Project fields the list shell can show without opening chapters.
+export function applyComicShell (saved, shell) {
+  const next = { ...(saved || {}) };
+  const source = shell && typeof shell === 'object' ? shell : {};
+  if ('name' in source) next.name = source.name;
+  if ('description' in source) next.description = source.description;
+  if ('genre' in source) next.genre = source.genre;
+  if ('coverImage' in source) next.coverImage = source.coverImage;
+  if ('coverImageId' in source) next.coverImageId = source.coverImageId;
+  if ('heroImage' in source) next.heroImage = source.heroImage;
+  if ('heroImageId' in source) next.heroImageId = source.heroImageId;
+  if ('references' in source) next.references = source.references;
+  const level = browsingLevelOf(source);
+  if (level !== undefined) next[WIRE.browsingLevel] = level;
+  if (saved && 'chapters' in saved) next.chapters = saved.chapters;
+  if (saved && 'deletedPanels' in saved) next.deletedPanels = saved.deletedPanels;
+  if (saved && 'deletedChapters' in saved) next.deletedChapters = saved.deletedChapters;
+  return next;
+}
+
+function chromeKey (image, id) {
+  const raw = image && image.url != null ? image.url : null;
+  return JSON.stringify({
+    id: image && image.id != null ? image.id : (id ?? null),
+    url: typeof raw === 'string' ? resourceIdentity(raw) : raw
+  });
+}
+
+function referenceIds (comic) {
+  const refs = Array.isArray(comic && comic.references) ? comic.references : [];
+  return refs.map(ref => ref && ref.id).filter(id => id != null).sort();
+}
+
 export function mergeComic (shell, chapters) {
   const rest = { ...shell };
   delete rest.chapters;
-  return { ...rest, chapters: Array.isArray(chapters) ? chapters : [] };
+  const byPos = new Map();
+  for (const ch of (Array.isArray(shell?.chapters) ? shell.chapters : [])) {
+    if (ch && ch.position != null) byPos.set(ch.position, ch);
+  }
+  const stamped = (Array.isArray(chapters) ? chapters : []).map(ch => {
+    if (!ch || typeof ch !== 'object') return ch;
+    const fromShell = byPos.get(ch.position);
+    let panelCount = fromShell && typeof fromShell.panelCount === 'number'
+      ? fromShell.panelCount
+      : ch.panelCount;
+    if (typeof panelCount !== 'number' && Array.isArray(ch.panels)) panelCount = ch.panels.length;
+    if (typeof panelCount !== 'number') return ch;
+    return { ...ch, panelCount };
+  });
+  return { ...rest, chapters: stamped };
 }
 
 // Latest-state merge: chapters[] is the fresh walk. Deleted chapters/panels
@@ -202,8 +278,20 @@ function mergePanelSources (fresh, saved) {
   if (savedImage.workflowSourcesCaptured === true && freshImage?.workflowSourcesCaptured !== true) {
     patch.workflowSourcesCaptured = true;
   }
+  if (savedImage.imageResourcesCaptured === true && freshImage?.imageResourcesCaptured !== true) {
+    patch.imageResourcesCaptured = true;
+  }
   if (savedImage.process != null && freshImage?.process == null) patch.process = savedImage.process;
   if (savedImage.techniques != null && freshImage?.techniques == null) patch.techniques = savedImage.techniques;
+  if (savedImage.imageResources != null && freshImage?.imageResources == null) {
+    patch.imageResources = savedImage.imageResources;
+  }
+  if (savedImage.generationDataCaptured === true && freshImage?.generationDataCaptured !== true) {
+    patch.generationDataCaptured = true;
+  }
+  if (savedImage.generationData != null && freshImage?.generationData == null) {
+    patch.generationData = savedImage.generationData;
+  }
   if (savedImage.meta && !(freshImage && freshImage.meta)) patch.meta = savedImage.meta;
   if (('hasMeta' in savedImage) && !(freshImage && ('hasMeta' in freshImage))) patch.hasMeta = savedImage.hasMeta;
   if (!Object.keys(patch).length) return fresh;
@@ -238,7 +326,7 @@ function referenceImagesForExtractor (reference, cdnBase) {
   }).filter(Boolean);
 }
 
-async function saveComicReferences (comic, cdnBase, { signal, onProgress } = {}) {
+async function saveComicReferences (comic, cdnBase, { signal, onProgress, recall = 'download' } = {}) {
   const descriptors = [];
   for (const reference of (Array.isArray(comic.references) ? comic.references : [])) {
     const images = referenceImagesForExtractor(reference, cdnBase);
@@ -247,12 +335,25 @@ async function saveComicReferences (comic, cdnBase, { signal, onProgress } = {})
     // `image.url` UUIDs on the comics wire are rewritten to CDN URLs first.
     descriptors.push(...extractInputDescriptors({ images }, 'comic-reference'));
   }
-  if (!descriptors.length) return;
-  await saveInputMedia(descriptors, { signal, onProgress });
+  if (!descriptors.length) return null;
+  return saveInputMedia(descriptors, { signal, onProgress, recall });
 }
 
-export async function saveComicMedia (comic, { signal, secretKey, onProgress } = {}) {
+function panelImageUrls (comic) {
+  const map = new Map();
+  for (const chapter of (Array.isArray(comic?.chapters) ? comic.chapters : [])) {
+    for (const panel of (Array.isArray(chapter?.panels) ? chapter.panels : [])) {
+      if (panel && panel.id != null && typeof panel.imageUrl === 'string') {
+        map.set(panel.id, panel.imageUrl);
+      }
+    }
+  }
+  return map;
+}
+
+export async function saveComicMedia (comic, { signal, secretKey, onProgress, previousPanelUrls } = {}) {
   const report = { imagesSaved: 0, error: undefined, aborted: false };
+  try {
   const { id: comicId, createdAt } = comic;
 
   if (!createdAt) return report;
@@ -262,84 +363,125 @@ export async function saveComicMedia (comic, { signal, secretKey, onProgress } =
   // 'stop' ends the comic walk (user abort). 'ready' means the final file is
   // present (just published, or already there). 'next' is a miss: no file,
   // and the rest of the comic still downloads.
-  async function saveOne (imageUrl, filepath) {
-    if (signal && signal.aborted) {
+  let opening = null;
+  const ensureOpen = () => {
+    if (CONFIG.downloadMedia === false) return Promise.resolve();
+    if (!opening) {
+      opening = markContainerOpen(comic, (doc) => commitOpenContainer(doc, 'comics', saveComicData));
+    }
+    return opening;
+  };
+
+  async function saveOne (imageUrl, filepath, { replace = false, live = signal, kind, panelId } = {}) {
+    if (live && live.aborted) {
       report.aborted = true;
       return 'stop';
     }
-    const result = await downloadMediaFile(imageUrl, filepath, { signal });
-    if (result.status === 'aborted') {
+    const needsFetch = replace || !(await fileExists(filepath));
+    if (needsFetch) {
+      if (onProgress) onProgress({ phase: 'media', kind, panelId });
+      await ensureOpen();
+    }
+    const result = await downloadMediaFile(imageUrl, filepath, { signal: live, replace });
+    if (applyStorageFault(report, result) || result.status === 'aborted') {
       report.aborted = true;
       return 'stop';
     }
     if (result.status === 'published') report.imagesSaved++;
+    if (byteMissKeepsOpen(result)) report.incomplete = true;
     if (result.status === 'published' || result.status === 'skipped') return 'ready';
     return 'next';
   }
 
+  const jobs = [];
   const cover = comic.coverImage;
   const coverId = cover?.id ?? comic.coverImageId;
   if (coverId != null && usableImageUrl(cover?.url)) {
-    if (onProgress) onProgress({ phase: 'media', kind: 'cover' });
-    const outcome = await saveOne(
-      buildComicCdnUrl(cdnBase, cover.url),
-      comicCoverFilepath({ comicId, createdAt, imageId: coverId })
-    );
-    if (outcome === 'stop') return report;
+    jobs.push({
+      imageUrl: buildComicCdnUrl(cdnBase, cover.url),
+      filepath: comicCoverFilepath({ comicId, createdAt, imageId: coverId }),
+      kind: 'cover'
+    });
   }
 
   const hero = comic.heroImage;
   const heroId = hero?.id ?? comic.heroImageId;
   if (heroId != null && usableImageUrl(hero?.url)) {
-    if (onProgress) onProgress({ phase: 'media', kind: 'hero' });
-    const outcome = await saveOne(
-      buildComicCdnUrl(cdnBase, hero.url),
-      comicHeroFilepath({ comicId, createdAt, imageId: heroId })
-    );
-    if (outcome === 'stop') return report;
+    jobs.push({
+      imageUrl: buildComicCdnUrl(cdnBase, hero.url),
+      filepath: comicHeroFilepath({ comicId, createdAt, imageId: heroId }),
+      kind: 'hero'
+    });
   }
 
   for (const chapter of (Array.isArray(comic.chapters) ? comic.chapters : [])) {
     if (!chapter) continue;
     for (const panel of (Array.isArray(chapter.panels) ? chapter.panels : [])) {
       if (!isReadyPanel(panel)) continue;
-      // Ready files use panel.imageUrl only. Nested image.url is not selected
-      // on getChapter and must not be read.
       const imageUrl = buildComicCdnUrl(cdnBase, panel.imageUrl);
       if (!imageUrl) continue;
-      if (onProgress) onProgress({ phase: 'media', kind: 'panel', panelId: panel.id });
-      const filepath = comicPanelFilepath({
-        comicId,
-        createdAt,
-        chapterPosition: chapter.position,
-        chapterId: chapter.id,
-        panelPosition: panel.position,
-        panelMediaId: panelMediaId(panel)
+      const previousUrl = previousPanelUrls && panel.id != null ? previousPanelUrls.get(panel.id) : undefined;
+      jobs.push({
+        imageUrl,
+        filepath: comicPanelFilepath({
+          comicId,
+          createdAt,
+          chapterPosition: chapter.position,
+          chapterId: chapter.id,
+          panelPosition: panel.position,
+          panelMediaId: panelMediaId(panel)
+        }),
+        replace: typeof previousUrl === 'string' && !sameResourceUrl(previousUrl, panel.imageUrl),
+        imageId: panel.imageId,
+        kind: 'panel',
+        panelId: panel.id
       });
-      const outcome = await saveOne(imageUrl, filepath);
-      if (outcome === 'stop') return report;
-      if (outcome === 'ready' && panel.imageId != null && panel.imageId !== '') {
-        try {
-          await joinPostedFileIfHashed(filepath, panel.imageId);
-        } catch (ignoreErr) {
-          // Fail-soft: hash/join must not fail the download.
-        }
-      }
     }
   }
 
+  await mapPool(jobs, MEDIA_POOL_WIDTH, async (job, _index, poolSignal) => {
+    const live = poolSignal || signal;
+    const outcome = await saveOne(job.imageUrl, job.filepath, {
+      replace: job.replace === true,
+      live,
+      kind: job.kind,
+      panelId: job.panelId
+    });
+    if (outcome === 'stop') return { stop: true };
+    if (outcome === 'ready' && job.imageId != null && job.imageId !== '') {
+      try {
+        await joinPostedFileIfHashed(job.filepath, job.imageId);
+      } catch (ignoreErr) {
+        // Fail-soft: hash/join must not fail the download.
+      }
+    }
+    return null;
+  }, { signal });
+
+  if (signal?.aborted) report.aborted = true;
+  if (report.aborted) return report;
+
   if (!(signal && signal.aborted) && CONFIG.downloadMedia !== false) {
     try {
-      await saveComicReferences(comic, cdnBase, { signal, onProgress });
+      const inputs = await saveComicReferences(comic, cdnBase, { signal, onProgress, recall: 'download' });
+      if (inputs && inputs.fault === 'storage') {
+        report.fault = 'storage';
+        report.aborted = true;
+        return report;
+      }
     } catch (ignoreErr) {
       // Reference capture is best-effort; panel/cover files already landed.
     }
   }
 
+  if (signal?.aborted) report.aborted = true;
   return report;
+  } finally {
+    await flushFetchMiss();
+  }
 }
 
-async function enrichComicPanelSources (comic, { secretKey, signal } = {}) {
+async function enrichComicPanelSources (comic, { secretKey, signal, force = false } = {}) {
   const records = [];
   const panels = [];
   for (const chapter of (Array.isArray(comic.chapters) ? comic.chapters : [])) {
@@ -351,36 +493,90 @@ async function enrichComicPanelSources (comic, { secretKey, signal } = {}) {
       panels.push(panel);
     }
   }
-  if (!records.length) return false;
+  if (!records.length) return { changed: false, incomplete: false };
 
-  const updates = await collectGenerationSourceUpdates(records, { secretKey, signal });
-  if (!updates.size) return false;
+  const updates = await collectGenerationSourceUpdates(records, { secretKey, signal, force });
+  const incomplete = force === true && updates.size < records.length;
+  if (!updates.size) return { changed: false, incomplete };
 
   let changed = false;
   for (let i = 0; i < panels.length; i++) {
-    const before = records[i];
-    const updated = updates.get(before.id);
+    const updated = updates.get(records[i].id);
     if (!updated) continue;
     const image = panels[i].image && typeof panels[i].image === 'object' ? panels[i].image : {};
     const hadId = Object.prototype.hasOwnProperty.call(image, 'id');
     const next = { ...image };
-    if (imageNeedsGenerationData(before)) {
-      if (updated.meta) next.meta = updated.meta;
+    if (updated.generationDataCaptured === true) {
+      next.generationDataCaptured = true;
       next.hasMeta = updated.hasMeta;
+      if (updated.generationData) next.generationData = updated.generationData;
+      else delete next.generationData;
+      delete next.meta;
+      delete next.process;
+      delete next.techniques;
+      delete next.imageResources;
     }
-    if (updated.process !== undefined) next.process = updated.process;
-    if (updated.techniques !== undefined) next.techniques = updated.techniques;
-    next.workflowSourcesCaptured = true;
     if (!hadId) delete next.id;
     panels[i].image = next;
     changed = true;
   }
-  return changed;
+  return { changed, incomplete };
+}
+
+// Cover, hero, and references only, and only when that identity changed.
+// Panel files stay for the chapter walk.
+export async function saveChangedComicChrome (next, previous, { signal, secretKey, onProgress } = {}) {
+  const report = { imagesSaved: 0, aborted: false };
+  if (!next || !next.createdAt) return report;
+  const cdnBase = await getCivitaiImageBase({ secretKey });
+
+  async function saveOne (imageUrl, filepath, replace) {
+    if (signal && signal.aborted) {
+      report.aborted = true;
+      return;
+    }
+    const result = await downloadMediaFile(imageUrl, filepath, { signal, replace });
+    if (result.status === 'aborted') report.aborted = true;
+    if (result.status === 'published') report.imagesSaved += 1;
+  }
+
+  const pairs = [
+    ['cover', next.coverImage, next.coverImageId, previous && previous.coverImage, previous && previous.coverImageId, comicCoverFilepath],
+    ['hero', next.heroImage, next.heroImageId, previous && previous.heroImage, previous && previous.heroImageId, comicHeroFilepath]
+  ];
+  for (const [kind, image, id, prevImage, prevId, filepathOf] of pairs) {
+    if (chromeKey(image, id) === chromeKey(prevImage, prevId)) continue;
+    const imageId = image && image.id != null ? image.id : id;
+    if (imageId == null || !usableImageUrl(image && image.url)) continue;
+    if (onProgress) onProgress({ phase: 'media', kind });
+    const urlChanged = typeof (prevImage && prevImage.url) === 'string' && !sameResourceUrl(prevImage.url, image.url);
+    await saveOne(
+      buildComicCdnUrl(cdnBase, image.url),
+      filepathOf({ comicId: next.id, createdAt: next.createdAt, imageId }),
+      urlChanged
+    );
+    if (report.aborted) return report;
+  }
+
+  if (JSON.stringify(referenceIds(next)) !== JSON.stringify(referenceIds(previous))) {
+    try {
+      const inputs = await saveComicReferences(next, cdnBase, { signal, onProgress, recall: 'download' });
+      if (inputs && inputs.fault === 'storage') {
+        report.fault = 'storage';
+        report.aborted = true;
+        return report;
+      }
+    } catch (ignoreErr) {
+      // Reference capture is best-effort.
+    }
+  }
+  return report;
 }
 
 export async function saveComic (comic, {
   overwriteIfModified = true,
   withImages = true,
+  checkAllMedia = false,
   signal,
   secretKey,
   onProgress
@@ -413,10 +609,12 @@ export async function saveComic (comic, {
   const exists = await fileExists(filepath);
   let toWrite = comic;
   let dataChanged = !exists;
+  let previousPanelUrls = new Map();
 
   if (exists) {
     try {
       const savedJson = JSON.parse(await readFile(filepath));
+      previousPanelUrls = panelImageUrls(savedJson);
       if (overwriteIfModified) {
         const reconciled = reconcileComic(savedJson, comic);
         if (JSON.stringify(reconciled, null, 2) !== JSON.stringify(savedJson, null, 2)) {
@@ -447,8 +645,15 @@ export async function saveComic (comic, {
 
   if (secretKey && !(signal && signal.aborted)) {
     try {
-      const stamped = await enrichComicPanelSources(toWrite, { secretKey, signal });
-      if (stamped) {
+      const stamped = await enrichComicPanelSources(toWrite, {
+        secretKey,
+        signal,
+        force: checkAllMedia === true
+      });
+      if (stamped.incomplete) {
+        report.error = { message: 'Could not refresh every comic panel' };
+      }
+      if (stamped.changed) {
         if (onProgress) onProgress({ phase: 'saving', id });
         const savedFilepath = await saveComicData(toWrite);
         if (!savedFilepath) {
@@ -464,12 +669,26 @@ export async function saveComic (comic, {
   }
 
   if (withImages && CONFIG.downloadMedia !== false) {
-    const mediaReport = await saveComicMedia(toWrite, { signal, secretKey, onProgress });
+    const mediaReport = await saveComicMedia(toWrite, {
+      signal,
+      secretKey,
+      onProgress,
+      previousPanelUrls
+    });
     report.imagesSaved = mediaReport.imagesSaved;
     report.aborted = mediaReport.aborted;
-    report.error = mediaReport.error;
+    if (mediaReport.error) report.error = mediaReport.error;
     if (mediaReport.imagesSaved > 0 && !report.comicSaved) {
       report.comicSaved = 1;
+    }
+    const hadOpen = toWrite.downloadOpen === true;
+    const shouldOpen = mediaReport.incomplete === true;
+    const mediaStopped = mediaReport.aborted === true || mediaReport.fault === 'storage';
+    if (!mediaStopped && shouldOpen !== hadOpen) {
+      if (shouldOpen) toWrite.downloadOpen = true;
+      else delete toWrite.downloadOpen;
+      const savedFilepath = await saveComicData(toWrite);
+      if (savedFilepath) report.comicSaved = 1;
     }
   }
 

@@ -18,7 +18,36 @@
 // set `state.v` to their own `to` value so the runner knows the work is
 // done.
 
-export const CURRENT_PROTOCOL_VERSION = 4;
+import { isRatingTagName } from './browsing-level.js';
+import { stringLiftQuery } from '../../../../src/modelsQuery.mjs';
+
+export const CURRENT_PROTOCOL_VERSION = 6;
+
+function liftRatingParams (params) {
+  const next = { ...(params || {}) };
+  const parts = String(next.tag || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!parts.length) return next;
+  const tags = [];
+  const lifted = [];
+  for (const part of parts) {
+    const key = part.toLowerCase();
+    if (isRatingTagName(part)) lifted.push(key);
+    else tags.push(part);
+  }
+  if (!lifted.length) return next;
+  const existing = String(next.rating || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const seen = new Set();
+  const merged = [];
+  for (const token of [...existing, ...lifted]) {
+    if (seen.has(token)) continue;
+    seen.add(token);
+    merged.push(token);
+  }
+  next.rating = merged.join(',');
+  if (tags.length) next.tag = tags.join(',');
+  else delete next.tag;
+  return next;
+}
 
 function leadingId (token) {
   const m = String(token ?? '').match(/^(\d+)/);
@@ -89,6 +118,29 @@ export const migrations = [
       delete params.status;
       if (params.groupBy === 'status') params.groupBy = 'publication';
       return { ...state, params, v: 4 };
+    }
+  },
+  {
+    // _v=4 → _v=5: Rating is the image browsing-level bit, not a content-tag
+    // name. Ladder tokens move from tag= to rating=. Other tag values stay.
+    // A URL already at _v=5 is untouched, including one that still names a
+    // ladder word as a content tag.
+    from: 4,
+    to: 5,
+    migrate (state) {
+      return { ...state, params: liftRatingParams(state.params), v: 5 };
+    }
+  },
+  {
+    // _v=5 → _v=6: gallery model filters are one `models` term list.
+    // Media type is mediaType. Model type is resourceType. mine=1 is a
+    // mine term. The source is the v6.0.0 keys. A type. segment is not
+    // rewritten. The models catalog keeps its own keys. A URL already at
+    // _v=6 is untouched.
+    from: 5,
+    to: 6,
+    migrate (state) {
+      return { ...state, params: stringLiftQuery(state.params, { view: state.view }), v: 6 };
     }
   }
 ];

@@ -5,6 +5,9 @@ import { writeFile, fileExists, toDateString, unlink, rename } from './utils.mjs
 import { readFile, listDirectory, isDate } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
 import { downloadMediaFile } from './mediaDownload.mjs';
+import { mapPool, MEDIA_POOL_WIDTH } from './requestScheduler.mjs';
+import { applyStorageFault } from './downloadFault.mjs';
+import { flushFetchMiss } from './fetchMiss.mjs';
 import { normalizeMediaId } from './mediaId.mjs';
 import {
   needsAceWorkflowFill,
@@ -12,6 +15,8 @@ import {
 } from './aceAudioWorkflow.mjs';
 import { getMediaOverride, reactionsToTags } from './overrides.mjs';
 import { extractInputDescriptors, saveInputMedia } from './inputMedia.mjs';
+import { byteMissKeepsOpen, markContainerOpen, commitOpenContainer } from './downloadOpen.mjs';
+import { comparableDownloadJson } from './signedUrl.mjs';
 import {
   loadAliasStore,
   recordAlias,
@@ -283,19 +288,6 @@ async function renameJpegPoisonTo (destPath) {
   return true;
 }
 
-// After-listen walk. Index rows already say model3d; rename a leftover
-// `.jpeg` onto the mesh name. Idempotent.
-export async function repairIndexedModel3dJpegs (generations) {
-  if (!Array.isArray(generations)) return;
-  for (const gen of generations) {
-    const media = Array.isArray(gen?.media) ? gen.media : [];
-    for (const row of media) {
-      if (row?.type !== 'model3d' || !row.mediaPath) continue;
-      await renameJpegPoisonTo(diskPathFromGenerationPublic(row.mediaPath));
-    }
-  }
-}
-
 function logicalMediaType (step, type) {
   if (type === 'model3d' || step?.$type === 'polyGen') return 'model3d';
   if (type === 'audio') return 'audio';
@@ -498,6 +490,28 @@ export async function forEachGeneration (fn, { includeLegacy = false }) {
 // e.g. downloading while on-site queue is pending. It should
 // refresh the generation data and download missing media.
 // Workaround, use 'Download missing'
+async function syncGenerationOpen (filepath, open) {
+  let doc;
+  try {
+    doc = JSON.parse(await readFile(filepath));
+  } catch {
+    return null;
+  }
+  const had = doc.downloadOpen === true;
+  if (open === had) return null;
+  if (open) doc.downloadOpen = true;
+  else delete doc.downloadOpen;
+  const written = await saveGenerationData(doc);
+  if (!written) return null;
+  try {
+    const { upsertIndexEntries } = await import('./serverIndex.mjs');
+    await upsertIndexEntries({ generations: [doc] });
+  } catch {
+    // The caller's savedItems upsert is the other chance to publish the flag.
+  }
+  return doc;
+}
+
 export async function saveGenerationData (generation) {
   const { id, createdAt } = generation;
   const filepath = generationFilepath({ id, createdAt });
@@ -530,7 +544,8 @@ async function fillAceSongSidecar (generation, { secretKey, signal }) {
     audioIds,
     secretKey,
     signal,
-    dataPath: CONFIG.dataPath
+    dataPath: CONFIG.dataPath,
+    recall: 'download'
   });
 }
 
@@ -548,6 +563,7 @@ export async function saveGenerations (apiGenerationsResponse, {
 
   const report = {
     generationsNew: 0,
+    generationsUpdated: 0,
     generationsSaved: 0,
     imagesSaved: 0,
     videosSaved: 0,
@@ -606,12 +622,19 @@ export async function saveGenerations (apiGenerationsResponse, {
     const date = toDateString(createdAt);
     const filepath = generationFilepath({ id, createdAt });
     const exists = await fileExists(filepath);
+    const existed = exists;
     let shouldOverwrite = exists && overwrite;
 
     if (exists && overwriteIfModified) {
       const savedGenerationString = await getGeneration(date, id, { stringType: true });
 
-      if (savedGenerationString !== JSON.stringify(generation, null, 2)) {
+      let savedCmp = savedGenerationString;
+      try {
+        savedCmp = comparableDownloadJson(JSON.parse(savedGenerationString));
+      } catch {
+        savedCmp = savedGenerationString;
+      }
+      if (savedCmp !== comparableDownloadJson(generation)) {
         shouldOverwrite = true;
 
         // Post-cutover there are no tag directories to prune when a reaction
@@ -661,8 +684,10 @@ export async function saveGenerations (apiGenerationsResponse, {
 
     // JSON exists does not skip media (posts parity). Per-file skip and
     // expired CDN fail-soft live inside saveGenerationMedia.
+    let mediaIncomplete = false;
     if (withImages) {
       const mediaReport = await saveGenerationMedia(generation, { signal, onProgress: (a) => setActivity(a), reactions });
+      mediaIncomplete = mediaReport.incomplete === true;
       const { error, aborted, complete } = mediaReport;
 
       report.imagesSaved += mediaReport.imagesSaved;
@@ -691,6 +716,24 @@ export async function saveGenerations (apiGenerationsResponse, {
       }
 
     }
+
+    let opened = null;
+    const mediaStopped = !!(report.currentMedia && (report.currentMedia.aborted === true || report.currentMedia.fault === 'storage'));
+    if (withImages && CONFIG.downloadMedia !== false && !mediaStopped && await fileExists(filepath)) {
+      if (!mediaIncomplete) delete generation.downloadOpen;
+      opened = await syncGenerationOpen(filepath, mediaIncomplete);
+      // A clean finish writes the same JSON the walk started from. Hole-fill
+      // must not report that as a saved generation. An incomplete walk does.
+      if (opened && mediaIncomplete) report.savedItems.push(opened);
+    }
+
+    const mediaWrote = !!(report.currentMedia && (
+      (report.currentMedia.imagesSaved || 0) > 0 ||
+      (report.currentMedia.videosSaved || 0) > 0 ||
+      (report.currentMedia.audioSaved || 0) > 0 ||
+      (report.currentMedia.model3dSaved || 0) > 0
+    ));
+    if (existed && (shouldOverwrite || mediaWrote || opened)) report.generationsUpdated++;
 
     // Unchanged since download
     if (currentReportItem.status === 'data-downloaded') {
@@ -733,23 +776,44 @@ async function recordGenerationContentHash (mediaId, filepath) {
 export async function saveGenerationMedia (generation, { doFetch = true, signal, onProgress, reactions } = {}) {
   const media = getGeneratedMediaInfo(generation);
   const report = { imagesSaved: 0, videosSaved: 0, audioSaved: 0, model3dSaved: 0, error: undefined, aborted: false, complete: false };
+  try {
   const totalMedia = media.length;
 
   // The run's tag list, not `generationReactions`. Omitted or empty saves
   // every file. A reaction run passes that run's tags.
   const selectedReactions = Array.isArray(reactions) ? reactions : [];
   const saveEveryFile = selectedReactions.length === 0;
+  let opening = null;
+  const ensureOpen = () => {
+    if (!doFetch || CONFIG.downloadMedia === false) return Promise.resolve();
+    if (!opening) {
+      opening = markContainerOpen(generation, async () => {
+        const filepath = generationFilepath({ id: generation.id, createdAt: generation.createdAt });
+        let stored = generation;
+        try {
+          stored = JSON.parse(await readFile(filepath));
+        } catch {
+          stored = generation;
+        }
+        stored.downloadOpen = true;
+        generation.downloadOpen = true;
+        await commitOpenContainer(stored, 'generations', (doc) => saveGenerationData(doc));
+      });
+    }
+    return opening;
+  };
 
-  for (let mediaIndex = 0; mediaIndex < totalMedia; mediaIndex++) {
-    const mediaInfo = media[mediaIndex];
-
-    if (!saveEveryFile && !mediaInfo.tags.some(tag => selectedReactions.includes(tag))) {
-      continue;
+  await mapPool(media, MEDIA_POOL_WIDTH, async (mediaInfo, mediaIndex, poolSignal) => {
+    const live = poolSignal || signal;
+    if (live?.aborted) {
+      report.aborted = true;
+      return { stop: true };
     }
 
-    // Always write the single canonical store, media-type-agnostically.
-    // Image / video / audio keep the extension in the id, or `.jpeg` when
-    // the id has no dot. A mesh uses `.<format>` (default glb). No tag-dir copies.
+    if (!saveEveryFile && !mediaInfo.tags.some(tag => selectedReactions.includes(tag))) {
+      return null;
+    }
+
     const itemFilepath = mediaFilepath(mediaInfo);
 
     if (mediaInfo.type === 'model3d') {
@@ -761,75 +825,83 @@ export async function saveGenerationMedia (generation, { doFetch = true, signal,
     if (mediaInfo.type !== 'model3d') {
       if (primaryExists) {
         await recordGenerationContentHash(mediaInfo.mediaId, itemFilepath);
-        continue;
+        return null;
       }
 
-      if (!doFetch) {
-        continue;
-      }
+      if (!doFetch) return null;
 
       if (onProgress) onProgress({ phase: 'media', index: mediaIndex + 1, total: totalMedia });
 
-      const result = await downloadMediaFile(mediaInfo.url, itemFilepath, { signal });
+      await ensureOpen();
+      const result = await downloadMediaFile(mediaInfo.url, itemFilepath, { signal: live });
 
-      if (result.status === 'aborted') {
+      if (applyStorageFault(report, result) || result.status === 'aborted') {
         report.aborted = true;
-        return report;
+        return { stop: true };
       }
 
-      // Non-200: removed on the generator, or the CDN has no object. No file.
       if (result.status !== 'published') {
-        continue;
+        if (byteMissKeepsOpen(result)) report.incomplete = true;
+        return null;
       }
 
-      if (mediaInfo.type === 'audio') {
-        report.audioSaved++;
-      } else if (mediaInfo.type === 'video') {
-        report.videosSaved++;
-      } else {
-        report.imagesSaved++;
-      }
+      if (mediaInfo.type === 'audio') report.audioSaved++;
+      else if (mediaInfo.type === 'video') report.videosSaved++;
+      else report.imagesSaved++;
 
       await recordGenerationContentHash(mediaInfo.mediaId, itemFilepath);
-      continue;
+      return null;
     }
 
-    // Mesh: a primary already on disk still leaves thumb and variants to fetch.
-    // model3dSaved counts a primary download only, never a rename and never imagesSaved.
     if (primaryExists) {
       await recordGenerationContentHash(mediaInfo.mediaId, itemFilepath);
     } else if (doFetch) {
       if (onProgress) onProgress({ phase: 'media', index: mediaIndex + 1, total: totalMedia });
-      const result = await downloadMediaFile(mediaInfo.url, itemFilepath, { signal });
-      if (result.status === 'aborted') {
+      await ensureOpen();
+      const result = await downloadMediaFile(mediaInfo.url, itemFilepath, { signal: live });
+      if (applyStorageFault(report, result) || result.status === 'aborted') {
         report.aborted = true;
-        return report;
+        return { stop: true };
       }
       if (result.status === 'published') {
         report.model3dSaved++;
         await recordGenerationContentHash(mediaInfo.mediaId, itemFilepath);
+      } else if (byteMissKeepsOpen(result)) {
+        report.incomplete = true;
       }
     }
 
     if (doFetch && Array.isArray(mediaInfo.files)) {
       for (const file of mediaInfo.files) {
+        if (live?.aborted || report.aborted) return { stop: true };
         const disk = diskPathFromGenerationPublic(file.path);
         if (!disk || !file.url) continue;
         if (await fileExists(disk)) continue;
-        const result = await downloadMediaFile(file.url, disk, { signal });
-        if (result.status === 'aborted') {
+        await ensureOpen();
+        const result = await downloadMediaFile(file.url, disk, { signal: live });
+        if (applyStorageFault(report, result) || result.status === 'aborted') {
           report.aborted = true;
-          return report;
+          return { stop: true };
         }
+        if (byteMissKeepsOpen(result)) report.incomplete = true;
       }
     }
-  }
+    return null;
+  }, { signal });
+
+  if (signal?.aborted) report.aborted = true;
+  if (report.aborted) return report;
 
   // Inputs are captured whenever files are fetched, including on a reaction
   // run. The file filter above does not skip them. Data only does.
   if (doFetch && CONFIG.downloadMedia !== false) {
     const inputDescriptors = extractInputDescriptors(generation, 'generation');
-    await saveInputMedia(inputDescriptors, { signal, onProgress });
+    const inputs = await saveInputMedia(inputDescriptors, { signal, onProgress, recall: 'download' });
+    if (inputs && inputs.fault === 'storage') {
+      report.fault = 'storage';
+      report.aborted = true;
+      return report;
+    }
 
     if (signal && signal.aborted) {
       report.aborted = true;
@@ -839,6 +911,9 @@ export async function saveGenerationMedia (generation, { doFetch = true, signal,
 
   report.complete = true;
   return report;
+  } finally {
+    await flushFetchMiss();
+  }
 }
 
 export async function deleteAllDeletedMedia () {

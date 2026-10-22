@@ -4,7 +4,7 @@ import { mainMenu } from './mainMenu.mjs';
 import { downloadMenu } from './downloadMenu.mjs';
 import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
 import { hasSavedPosts } from './postsPresence.mjs';
-import { rememberPostDownload } from './downloadTypes.mjs';
+import { rememberPostDownload, settleRememberedMode } from './downloadTypes.mjs';
 
 let previousMenuItem;
 
@@ -49,6 +49,12 @@ export async function downloadPosts (mode = 'latest') {
   ]);
 
   const secretKey = await getSecretKey();
+  const { requireLibraryAccount } = await import('./accountIdentity.mjs');
+  const gate = await requireLibraryAccount(secretKey);
+  if (!gate.ok) {
+    console.log(chalk.red(gate.message));
+    return;
+  }
   const ui = new inquirer.ui.BottomBar();
 
   function log (text) {
@@ -88,6 +94,9 @@ export async function downloadPosts (mode = 'latest') {
     });
 
     log(formatPostCompletion(result));
+    const errors = (result?.errors || []).length;
+    const status = result?.aborted ? 'aborted' : (errors && !result?.postsNew) ? 'error' : 'complete';
+    await settleRememberedMode('posts', mode, { status, errors });
     import('./ownModels.mjs').then(m => m.scheduleOwnModelsCheck({ secretKey })).catch(() => {});
   }
 
@@ -119,17 +128,23 @@ export async function downloadPostsMenu (doClearTerminal = true) {
   }
 
   const hasPosts = await savedPostsPresence();
-  // Same rule as postsNeedGenerationData: posts on disk, All not yet completed.
+  // Same rule as the posts presence predicates: posts on disk, All not yet completed.
   const needGenerationData = hasPosts && CONFIG.postsGenerationDataFilled !== true;
+  const needImageResources = hasPosts && CONFIG.postsImageResourcesFilled !== true;
+  const needGenerationResponse = hasPosts && CONFIG.postsGenerationResponseFilled !== true;
+  let latestDescription = 'Download posts from the last 30 days, and any post that is not saved yet. The newest saved post is included.';
+  let allDescription = 'Download all posts. Any missing will be saved.';
+  if (needGenerationData || needImageResources || needGenerationResponse) {
+    latestDescription = 'Updates posts from the last 30 days. Older posts stay until All.';
+    allDescription = 'Download All to update the posts.';
+  }
   const choices = [];
 
   choices.push(
     {
       name: 'Latest',
       value: 'download-latest-posts',
-      description: needGenerationData
-        ? 'Download the most recent posts not yet saved. Does not fill generation parameters on older posts.'
-        : 'Download the most recent posts not yet saved.'
+      description: latestDescription
     }
   );
 
@@ -138,9 +153,7 @@ export async function downloadPostsMenu (doClearTerminal = true) {
       {
         name: 'All',
         value: 'download-all-posts',
-        description: needGenerationData
-          ? 'Fills generation parameters on posts already saved. Any missing posts are saved too.'
-          : 'Download all posts. Any missing will be saved.'
+        description: allDescription
       }
     );
   }
@@ -163,7 +176,7 @@ export async function downloadPostsMenu (doClearTerminal = true) {
 
   const choiceValues = choices.flatMap(choice => (choice && choice.value ? [choice.value] : []));
   let initial = 'download-latest-posts';
-  if (needGenerationData) initial = 'download-all-posts';
+  if (needGenerationData || needImageResources || needGenerationResponse) initial = 'download-all-posts';
   else if (CONFIG.postDownload === 'all' && choiceValues.includes('download-all-posts')) {
     initial = 'download-all-posts';
   }

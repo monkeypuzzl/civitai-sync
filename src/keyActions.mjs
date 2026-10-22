@@ -5,7 +5,6 @@ import password from '@inquirer/password';
 import { CONFIG, CONFIG_PATH } from './cli.mjs';
 import { encryptAES, decryptAES } from './crypto.mjs';
 import { setConfig } from './config.mjs';
-import { CIVITAI_DOMAINS } from './civitaiDomain.mjs';
 
 let SECRET_KEY;
 
@@ -175,6 +174,79 @@ export function setMemoizedSecretKey (key) {
   SECRET_KEY = key || null;
 }
 
+function keyTestMessage (result) {
+  const is5xx = result.httpStatus >= 500 && result.httpStatus < 600;
+  if (is5xx || (result.retryable && result.httpStatus >= 500)) {
+    return 'The web service is down. Please check again shortly.';
+  }
+  return result.message || 'The API key was rejected.';
+}
+
+// Test, then save. `password` null stores the key in the clear. A password
+// that fails to encrypt leaves the previous key on disk. `{ encrypt }` is
+// the cipher; tests pass a function that throws.
+export async function saveTestedKey ({ key, password, encrypt = encryptAES } = {}) {
+  const trimmed = typeof key === 'string' ? key.trim() : '';
+  if (!trimmed) return { ok: false, message: 'Enter an API key.' };
+
+  const tested = await testKey(trimmed);
+  if (!tested.success) {
+    return { ok: false, message: keyTestMessage(tested) };
+  }
+
+  let stored = trimmed;
+  let keyEncrypt = false;
+  if (password) {
+    try {
+      stored = encrypt(trimmed, password);
+      if (!stored) return { ok: false, message: 'Could not encrypt key' };
+      keyEncrypt = true;
+    } catch {
+      return { ok: false, message: 'Could not encrypt key' };
+    }
+  }
+
+  await setConfig({ secretKey: stored, keyEncrypt });
+  setMemoizedSecretKey(trimmed);
+
+  const { resetUserDataSession } = await import('./userData.mjs');
+  resetUserDataSession();
+
+  const { getCivitaiUser, getMe } = await import('./civitaiApi.mjs');
+  const { applyAccountIdentity, rememberAccountKey } = await import('./accountIdentity.mjs');
+  const { altDomainEligibleOf } = await import('./civitaiWire.mjs');
+
+  const session = await getCivitaiUser({ secretKey: trimmed });
+  let identity = null;
+  const sessionId = Number(session && session.id);
+  if (session && Number.isInteger(sessionId) && sessionId > 0 && session.username) {
+    identity = { id: sessionId, username: session.username };
+    const eligible = altDomainEligibleOf(session);
+    if (typeof eligible === 'boolean') identity.eligible = eligible;
+  } else {
+    const me = await getMe({ secretKey: trimmed });
+    const meId = Number(me && me.id);
+    if (me && Number.isInteger(meId) && meId > 0 && me.username) {
+      identity = { id: meId, username: me.username };
+    }
+  }
+
+  if (!identity) {
+    rememberAccountKey(trimmed, null);
+    return { ok: true, kind: 'unresolved', username: CONFIG.username || '' };
+  }
+
+  const applied = await applyAccountIdentity(identity);
+  rememberAccountKey(trimmed, applied);
+  return {
+    ok: true,
+    kind: applied.kind,
+    username: applied.username || CONFIG.username || '',
+    libraryUsername: applied.libraryUsername,
+    keyUsername: applied.keyUsername
+  };
+}
+
 export async function requestKey () {
   const newKey = await input({ message: 'Enter API key (or press Enter to cancel):' });
 
@@ -182,48 +254,34 @@ export async function requestKey () {
     return null;
   }
 
-  const { fillIfMissing, resetUserDataSession } = await import('./userData.mjs');
+  const pass = await requestNewPassword();
+  const result = await saveTestedKey({ key: newKey, password: pass });
 
-  SECRET_KEY = newKey;
-  // A new API key may belong to a different user, or the same user with
-  // different content permissions. Clear identity-derived fields so the next
-  // refresh repopulates them cleanly. Reset domain to civitai.com as well,
-  // to avoid being stuck on civitai.red without eligibility confirmation; the
-  // next first-write of allowAltDomain will seed .red if the SessionUser
-  // flag is true.
-  await setConfig({
-    username: '',
-    allowAltDomain: undefined,
-    domain: CIVITAI_DOMAINS[0]
-  });
-  resetUserDataSession();
-
-  const encryptedKey = await encryptKey(newKey);
-
-  if (!encryptedKey) {
-    await setConfig({
-      keyEncrypt: false,
-      secretKey: newKey
-    });
+  if (!result.ok) {
+    console.log(chalk.red(result.message));
+    return null;
   }
 
-  console.log(chalk.green(`Key saved ${encryptedKey ? '(encrypted) ' : ''}in config at ${CONFIG_PATH}`));
+  if (result.kind === 'blocked') {
+    const { accountMismatchText } = await import('./accountIdentity.mjs');
+    console.log(accountMismatchText(result.libraryUsername, result.keyUsername));
+    return newKey;
+  }
 
-  // Do not await: a failing or slow auth.getUser must not hold the menu.
-  fillIfMissing({ secretKey: newKey }).catch(() => {});
-
+  console.log(chalk.green(`Key saved ${passwordWasSet(pass) ? '(encrypted) ' : ''}in config at ${CONFIG_PATH}`));
   return newKey;
 }
 
+function passwordWasSet (pass) {
+  return typeof pass === 'string' && pass.length > 0;
+}
+
 export async function removeKey () {
-  SECRET_KEY = null;
+  setMemoizedSecretKey(null);
 
   await setConfig({
     keyEncrypt: false,
-    secretKey: null,
-    username: '',
-    allowAltDomain: undefined,
-    domain: CIVITAI_DOMAINS[0]
+    secretKey: ''
   });
   const { resetUserDataSession } = await import('./userData.mjs');
   resetUserDataSession();

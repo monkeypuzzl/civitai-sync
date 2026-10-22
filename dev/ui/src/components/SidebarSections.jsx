@@ -76,14 +76,14 @@ function ResourceIdentityBody ({ name, version, title }) {
   );
 }
 
-function ResourceIdentity ({ name, version, href }) {
+function ResourceIdentity ({ name, version, href, showTitle = true }) {
   const inner = <ResourceIdentityBody name={name} version={version} />;
   if (!href) return inner;
   return (
     <a
       class="meta-resource-link"
       href={href}
-      title={resourceTitle(name, version)}
+      title={showTitle ? resourceTitle(name, version) : undefined}
       onClick={e => onModelsLinkClick(e, href)}
     >
       {inner}
@@ -427,7 +427,7 @@ function WorkflowRow ({ line }) {
   return (
     <div class="resource-item">
       <div class="resource-item-main">
-        <ResourceIdentity name={line.name} version={line.version} href={line.href} />
+        <ResourceIdentity name={line.name} version={line.version} href={line.href} showTitle={false} />
         {chip}
       </div>
     </div>

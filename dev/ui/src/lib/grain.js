@@ -1,7 +1,7 @@
 // Intra-view grain prune. Same-view View toggles do not run Option F;
 // this overlay drops keys that are meaningless on the destination grain.
 // Return only keys to spread into updateUrl — keep q / publication / tag /
-// reaction / type / scope / When by not touching them. A typed `engagement=`
+// reaction / type / scope / Date by not touching them. A typed `engagement=`
 // is a retired key: media grain clears it so it does not sit on the URL.
 
 const HEART_SORT_FIELDS = new Set([

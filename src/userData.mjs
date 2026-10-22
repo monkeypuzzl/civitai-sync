@@ -21,10 +21,9 @@
 // existing CONFIG values are preserved (see H3 / #9).
 
 import { CONFIG } from './cli.mjs';
-import { setConfig, setConfigParam } from './config.mjs';
 import { getCivitaiUser, getMe } from './civitaiApi.mjs';
-import { CIVITAI_DOMAINS } from './civitaiDomain.mjs';
 import { altDomainEligibleOf } from './civitaiWire.mjs';
+import { applyAccountIdentity, resetAccountIdentityMemory } from './accountIdentity.mjs';
 
 let hasRefreshedThisSession = false;
 let inflight = null;
@@ -34,6 +33,7 @@ let inflight = null;
 export function resetUserDataSession () {
   hasRefreshedThisSession = false;
   inflight = null;
+  resetAccountIdentityMemory();
 }
 
 function isValidUser (user) {
@@ -62,43 +62,40 @@ function isValidUser (user) {
 // Note: Civitai caches the SessionUser server-side for up to 4 hours (see
 // getSessionUser in the Civitai source). Recent changes to the flag made in
 // the browser may take a few minutes to propagate to this call.
+function positiveId (value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
+function identityFromSession (user) {
+  if (!isValidUser(user)) return null;
+  const id = positiveId(user.id);
+  if (!id) return null;
+  return { id, username: user.username, eligible: altDomainEligibleOf(user) };
+}
+
+function identityFromMe (me) {
+  if (!me || typeof me !== 'object' || me.error) return null;
+  const id = positiveId(me.id);
+  const username = typeof me.username === 'string' ? me.username : '';
+  if (!id || !username) return null;
+  return { id, username };
+}
+
 export async function getCivitaiUserData ({ secretKey }) {
   if (!secretKey) return null;
 
-  const user = await getCivitaiUser({ secretKey });
-
-  if (isValidUser(user)) {
-    const eligible = altDomainEligibleOf(user);
-    const isFirstAllowAltDomain = CONFIG.allowAltDomain === undefined;
-    const next = {
-      username: user.username,
-      allowAltDomain: eligible
-    };
-    if (isFirstAllowAltDomain) {
-      next.domain = eligible ? CIVITAI_DOMAINS[1] : CIVITAI_DOMAINS[0];
-    }
-    await setConfig(next);
-
-    return { username: user.username, allowAltDomain: eligible };
-  }
-
-  // Fallback: /api/v1/me only returns `username` (no alt-domain flag). Writes
-  // username if present but leaves `allowAltDomain` untouched.
-  const me = await getMe({ secretKey });
-
-  if (me && typeof me.username === 'string' && me.username.length > 0) {
-    await setConfigParam('username', me.username);
-    return { username: me.username, allowAltDomain: CONFIG.allowAltDomain };
-  }
-
-  return null;
+  const session = identityFromSession(await getCivitaiUser({ secretKey }));
+  const identity = session || identityFromMe(await getMe({ secretKey }));
+  if (!identity) return null;
+  return applyAccountIdentity(identity);
 }
 
 // Call getCivitaiUserData only when required fields are missing. Dedups
 // concurrent callers via the inflight promise.
 export async function fillIfMissing ({ secretKey }) {
   if (!secretKey) return null;
-  if (CONFIG.username && CONFIG.allowAltDomain !== undefined) return null;
+  if (CONFIG.username && CONFIG.allowAltDomain !== undefined && positiveId(CONFIG.accountId)) return null;
 
   if (inflight) return inflight;
 

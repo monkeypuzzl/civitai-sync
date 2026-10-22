@@ -4,6 +4,8 @@ import { TimeText } from './TimeText.jsx';
 import { tileLead, tileSlotIso } from '../lib/tile-title.js';
 import { HighlightText } from './HighlightText.jsx';
 import { MediaThumb } from './MediaThumb.jsx';
+import { tileLeadMedia } from '../lib/tile-media.js';
+import { ReactionIndicators } from './ReactionIndicators.jsx';
 
 function HasInputsMark ({ inputKinds }) {
   const kinds = Array.isArray(inputKinds) ? inputKinds : [];
@@ -15,13 +17,9 @@ function HasInputsMark ({ inputKinds }) {
 }
 
 function MediaTile ({ item, onActivate, selected, search, compact, href, grain }) {
-  const first = item.media && item.media[0];
+  const first = tileLeadMedia(item);
   if (!first) return null;
 
-  const tags = reactionMarks(item);
-  const hasFav = tags.includes('favorite');
-  const hasLiked = tags.includes('feedback:liked');
-  const hasDisliked = tags.includes('feedback:disliked');
   const isVideo = first.type === 'video';
   const isAudio = first.type === 'audio';
   const audioCover = isAudio && (first.coverPath || isAudioCover(first));
@@ -64,13 +62,7 @@ function MediaTile ({ item, onActivate, selected, search, compact, href, grain }
       {!compact && !snippetText && dateStr && (
         <div class="hover-info tile-date"><TimeText at={slotIso}>{dateStr}</TimeText></div>
       )}
-      {(hasFav || hasLiked || hasDisliked) && (
-        <div class="tag-indicators">
-          {hasFav && <span class="tag-indicator favorite">{'\u2764\uFE0F'}</span>}
-          {hasLiked && <span class="tag-indicator liked">{'\uD83D\uDC4D'}</span>}
-          {hasDisliked && <span class="tag-indicator disliked">{'\uD83D\uDC4E'}</span>}
-        </div>
-      )}
+      <ReactionIndicators item={item} />
     </Tag>
   );
 }
@@ -78,12 +70,14 @@ function MediaTile ({ item, onActivate, selected, search, compact, href, grain }
 function sameTile (prev, next) {
   const a = prev.item;
   const b = next.item;
+  const la = tileLeadMedia(a) || {};
+  const lb = tileLeadMedia(b) || {};
   return a.id === b.id
     && prev.selected === next.selected
     && prev.compact === next.compact
-    && (a.media && a.media[0] && a.media[0].type) === (b.media && b.media[0] && b.media[0].type)
-    && (a.media && a.media[0] && a.media[0].thumbnailPath) === (b.media && b.media[0] && b.media[0].thumbnailPath)
-    && (a.media && a.media[0] && a.media[0].coverPath) === (b.media && b.media[0] && b.media[0].coverPath)
+    && la.type === lb.type
+    && la.thumbnailPath === lb.thumbnailPath
+    && la.coverPath === lb.coverPath
     && reactionMarks(a).join(',') === reactionMarks(b).join(',')
     && prev.search === next.search
     && prev.grain === next.grain

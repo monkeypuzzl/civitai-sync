@@ -8,6 +8,8 @@
 import { useMemo, useEffect, useCallback, useRef } from 'preact/hooks';
 import { useUrlState } from './url-state.js';
 import { getUiPrefs, patchUiPrefs as patchUiPrefsApi } from './../api.js';
+import { canonicalizeDownloadTypes } from '../../../../src/downloadQueue.mjs';
+import { periodById } from '../../../../src/autoDownload.mjs';
 
 let _prefs = { _version: 1, views: {} };
 let _prefsLoaded = false;
@@ -71,6 +73,64 @@ export async function loadUiPrefs () {
   }
   _prefsLoaded = true;
   return _prefs;
+}
+
+export function readDownloadTypes () {
+  const list = canonicalizeDownloadTypes(_prefs.downloadTypes);
+  return list.length ? list : null;
+}
+
+export function readDownloadAdvancedOpen () {
+  return _prefs.downloadAdvancedOpen === true;
+}
+
+export function rememberDownloadAdvancedOpen (open) {
+  const next = open === true;
+  if (_prefs.downloadAdvancedOpen === next) return;
+  _prefs.downloadAdvancedOpen = next;
+  patchUiPrefsApi({ downloadAdvancedOpen: next }).catch(() => {});
+}
+
+export function readDownloadAuto () {
+  return _prefs.downloadAuto === true;
+}
+
+export function readDownloadEvery () {
+  return periodById(_prefs.downloadEvery).id;
+}
+
+export function readDownloadRecheck () {
+  return _prefs.downloadRecheck === true;
+}
+
+export function rememberDownloadAuto (on) {
+  const next = on === true;
+  if (_prefs.downloadAuto === next) return;
+  _prefs.downloadAuto = next;
+  patchUiPrefsApi({ downloadAuto: next }).catch(() => {});
+}
+
+export function rememberDownloadEvery (id) {
+  const next = periodById(id).id;
+  if (_prefs.downloadEvery === next) return;
+  _prefs.downloadEvery = next;
+  patchUiPrefsApi({ downloadEvery: next }).catch(() => {});
+}
+
+export function rememberDownloadRecheck (on) {
+  const next = on === true;
+  if (_prefs.downloadRecheck === next) return;
+  _prefs.downloadRecheck = next;
+  patchUiPrefsApi({ downloadRecheck: next }).catch(() => {});
+}
+
+export function rememberDownloadTypes (types) {
+  const next = canonicalizeDownloadTypes(types);
+  if (!next.length) return;
+  const prev = canonicalizeDownloadTypes(_prefs.downloadTypes);
+  if (prev.length === next.length && prev.every((id, i) => id === next[i])) return;
+  _prefs.downloadTypes = next;
+  patchUiPrefsApi({ downloadTypes: next }).catch(() => {});
 }
 
 export function rememberMeshViewer (value) {

@@ -45,6 +45,7 @@ export function originNeighbourPath (id, view) {
   if (view === 'generations') return `/generations/${enc}`;
   if (view === 'posts') return `/posts/${enc}`;
   if (view === 'comics') return `/comics/${enc}`;
+  if (view === 'model3ds') return `/model3ds/${enc}`;
   return `/media/${enc}`;
 }
 
@@ -53,6 +54,17 @@ export function originNeighbourPath (id, view) {
  * `from=` with an empty query. Otherwise keeps the current origin query,
  * sets `slot` only when `slotInUrl`, and quiets defaults / container keys.
  */
+// null means leave the address alone. slot null clears a stale token.
+export function quietSlotPatch ({ urlSlot, origin } = {}) {
+  if (!origin || origin.placement === 'fallback') return null;
+  const url = urlSlot == null || urlSlot === '' ? '' : String(urlSlot);
+  if (origin.slotInUrl && origin.slot != null && origin.slot !== '' && url !== String(origin.slot)) {
+    return { slot: String(origin.slot) };
+  }
+  if (!origin.slotInUrl && url) return { slot: null };
+  return null;
+}
+
 export function originNeighbourParams (routeParams, origin, { slot, slotInUrl, path } = {}) {
   if (origin && origin.placement === 'fallback') {
     const scope = origin.scope;

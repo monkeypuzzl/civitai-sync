@@ -14,6 +14,14 @@
 //   sectionLabel('model3d')  // → '3D'
 
 import { CIVITAI_MODEL_FAMILIES } from './vendor/civitai-model-families.mjs';
+import { BASE_MODEL_RESIDUALS, FAMILY_RESIDUALS } from './vendor/civitai-residuals.mjs';
+import { mergeFamilies, mergeRecords } from './residualMerge.mjs';
+
+const mergedFamilies = mergeFamilies(CIVITAI_MODEL_FAMILIES.families, FAMILY_RESIDUALS);
+const mergedBaseModels = mergeRecords(
+  CIVITAI_MODEL_FAMILIES.baseModelToEcosystem,
+  BASE_MODEL_RESIDUALS
+);
 
 const SECTION_LABELS = Object.freeze({
   image: 'Image',
@@ -31,11 +39,11 @@ const ecoKeyLowerToKey = new Map();
 const versionIdToVariantIds = new Map();
 const baseModelToEco = new Map();
 
-for (const [name, ecoKey] of Object.entries(CIVITAI_MODEL_FAMILIES.baseModelToEcosystem || {})) {
+for (const [name, ecoKey] of Object.entries(mergedBaseModels)) {
   baseModelToEco.set(name, ecoKey);
 }
 
-for (const fam of CIVITAI_MODEL_FAMILIES.families || []) {
+for (const fam of mergedFamilies) {
   familyById.set(fam.id, fam);
   const allVariantIds = (fam.variants || []).map(v => v.id);
 

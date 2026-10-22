@@ -1,74 +1,7 @@
-// Client copy of the `scope=` grammar in src/explorerQuery.mjs.
-// Keep parse / serialize in lockstep with the server: prefixes t/b/e/m/v/mn/o/f,
-// `~` between terms, `/` between segments, values encodeURIComponent-ed.
+// Tree helpers for the Models picker. The `models=` grammar lives in
+// src/modelsQuery.mjs. Importers of parse/serialize use that module.
 
-const PREFIX = {
-  t: 'type',
-  b: 'baseModel',
-  e: 'ecosystem',
-  m: 'modelId',
-  v: 'versionId',
-  mn: 'modelName',
-  o: 'familyOutput',
-  f: 'familyId'
-};
-
-const SERIALIZE_ORDER = ['type', 'baseModel', 'ecosystem', 'modelId', 'modelName', 'versionId', 'familyOutput', 'familyId'];
-const SERIALIZE_PREFIX = {
-  type: 't',
-  baseModel: 'b',
-  ecosystem: 'e',
-  modelId: 'm',
-  modelName: 'mn',
-  versionId: 'v',
-  familyOutput: 'o',
-  familyId: 'f'
-};
-
-function parseSegment (raw) {
-  if (!raw) return null;
-  const dot = raw.indexOf('.');
-  if (dot < 1) return null;
-  const field = PREFIX[raw.slice(0, dot)];
-  if (!field) return null;
-  let value = raw.slice(dot + 1);
-  try { value = decodeURIComponent(value); } catch { /* keep raw */ }
-  if (!value) return null;
-  return { field, value };
-}
-
-export function parseScope (param) {
-  if (!param) return [];
-  const terms = [];
-  for (const rawTerm of String(param).split('~')) {
-    if (!rawTerm) continue;
-    const term = {};
-    for (const rawSeg of rawTerm.split('/')) {
-      const seg = parseSegment(rawSeg);
-      if (!seg) continue;
-      term[seg.field] = seg.value;
-    }
-    if (Object.keys(term).length) terms.push(term);
-  }
-  return terms;
-}
-
-function serializeTerm (term) {
-  if (!term || typeof term !== 'object') return '';
-  const segs = [];
-  for (const field of SERIALIZE_ORDER) {
-    const value = term[field];
-    if (value == null || value === '') continue;
-    if (field === 'modelName' && term.modelId) continue;
-    segs.push(`${SERIALIZE_PREFIX[field]}.${encodeURIComponent(String(value))}`);
-  }
-  return segs.join('/');
-}
-
-export function serializeScopeTerms (terms) {
-  if (!Array.isArray(terms) || !terms.length) return '';
-  return terms.map(serializeTerm).filter(Boolean).join('~');
-}
+const SERIALIZE_ORDER = ['type', 'baseModel', 'ecosystem', 'modelId', 'modelName', 'versionId', 'familyOutput', 'familyId', 'variant'];
 
 export function termDepth (term) {
   if (!term) return 0;
@@ -152,10 +85,23 @@ export function ancestorExpandKeys (term) {
   return keys;
 }
 
+/** A branch stays a branch when the holes are few and the inclusion list would not be. */
+export function keepAsException (holes, remainder) {
+  return holes >= 1 && holes <= 3 && remainder > 3;
+}
+
+function ownedTerm (node) {
+  return {
+    type: node.type,
+    baseModel: node.baseModel,
+    modelId: String(node.modelId)
+  };
+}
+
 /**
- * Unchecking one owned model while Mine is on drops the live predicate and
- * writes a model-level term for each other owned node, keeping non-owned terms.
- * Mine off does not invent terms.
+ * Unchecking one owned model while Mine is on. A few holes stay on `mine`.
+ * A short remainder, or a fourth hole, writes the other owned models and
+ * drops mine. Non-owned terms stay. Mine off does not invent terms.
  *
  * @param {{ mine?: boolean, terms?: object[], ownedNodes?: object[], unchecked?: object }} input
  * @returns {{ mine: boolean, terms: object[] }}
@@ -166,15 +112,25 @@ export function narrowOwnSelection ({ mine, terms, ownedNodes, unchecked } = {})
   const owned = Array.isArray(ownedNodes) ? ownedNodes : [];
   const ownedIds = new Set(owned.map(n => String(n.modelId)));
   const dropId = unchecked?.modelId != null ? String(unchecked.modelId) : '';
-  const kept = current.filter(t => !(t?.modelId && ownedIds.has(String(t.modelId))));
-  const next = kept.slice();
-  for (const node of owned) {
-    if (String(node.modelId) === dropId) continue;
-    next.push({
-      type: node.type,
-      baseModel: node.baseModel,
-      modelId: String(node.modelId)
-    });
+  const kept = current.filter(t => !t?.mine && !(t?.modelId && ownedIds.has(String(t.modelId))));
+  const prior = current.filter(t => t?.mine);
+  const seen = new Set();
+  const holes = [];
+  for (const hole of prior.length ? (prior[prior.length - 1].except || []) : []) {
+    const id = hole?.modelId != null ? String(hole.modelId) : '';
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    holes.push(hole);
   }
+  if (dropId && !seen.has(dropId)) {
+    seen.add(dropId);
+    holes.push(unchecked?.type ? ownedTerm(unchecked) : { modelId: dropId });
+  }
+  const remaining = owned.filter(n => !seen.has(String(n.modelId)));
+  if (keepAsException(holes.length, remaining.length)) {
+    return { mine: true, terms: [...kept, { mine: true, except: holes }] };
+  }
+  const next = kept.slice();
+  for (const node of remaining) next.push(ownedTerm(node));
   return { mine: false, terms: next };
 }

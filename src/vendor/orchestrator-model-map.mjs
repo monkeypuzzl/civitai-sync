@@ -8,10 +8,10 @@
 // Upstream path:   civitai-src/src/shared/utils/engine.utils.ts
 // Upstream range:  engine.utils.ts ENGINE_TO_ECOSYSTEM; version-ids.ts wanBaseModelGroupIdMap; form-graph/generation/video/wan.graph.ts wanVersionDefs; basemodel.constants.ts ecosystems key table + ecosystemSettings defaults.model.id (hunyuan.handler.ts has no version-id map — Hunyuan id comes from ECO.HyV1 defaults)
 // Upstream branch: main
-// Upstream commit: f6bbd3ded78ddbddc152bf74abb431ed68504999
+// Upstream commit: 103e59d87ce86c1e30b5c7af103352406f4a682a
 // Fields read:     engine, ecosystem key, wanVersion, t2v/i2v/i2v_480p ecosystem keys, defaults.model.id
 //
-// Refreshed at:    2026-10-12T17:11:44.627Z
+// Refreshed at:    2026-10-22T20:07:15.209Z
 // Refresh by:      node dev/tools/refresh-vendored-civitai.mjs orchestrator-model-map
 // Verify drift:    node dev/tools/refresh-vendored-civitai.mjs verify
 //
@@ -88,6 +88,8 @@ export const ECOSYSTEM_TO_VERSION_ID = Object.freeze({
   "Flux2Klein_9B":        2612554,
   "Flux2Klein_9B_base":   2612548,
   "Flux3":                3376170,
+  "Flux3Klein":           3407486,
+  "Flux3Klein_base":      3407485,
   "Flux3Video":           3204701,
   "FluxKrea":             2068000,
   "Grok":                 2738377,
@@ -97,9 +99,9 @@ export const ECOSYSTEM_TO_VERSION_ID = Object.freeze({
   "HyV1":                 1313562,
   "Ideogram":             3246186,
   "Illustrious":          889818,
-  "Imagen4":              1889632,
   "Kling":                2698632,
   "Krea2":                3072329,
+  "Krea3":                3405360,
   "LTXV":                 1499827,
   "LTXV2":                2578325,
   "LTXV23":               2749908,
@@ -111,10 +113,11 @@ export const ECOSYSTEM_TO_VERSION_ID = Object.freeze({
   "MiniMaxH3":            3216500,
   "MiniMaxMusic3":        3225593,
   "Mochi":                1034189,
+  "MossImage":            3409867,
   "MuseImage":            3291238,
   "NanoBanana":           2154472,
   "NoobAI":               1190596,
-  "OpenAI":               1733399,
+  "OpenAI":               2880272,
   "Other":                164821,
   "Pony":                 290640,
   "PonyV7":               2152373,
@@ -128,7 +131,6 @@ export const ECOSYSTEM_TO_VERSION_ID = Object.freeze({
   "Seedance":             2864671,
   "Seedream":             3110984,
   "Sonilo":               3370181,
-  "Sora2":                2320065,
   "Veo3":                 2827945,
   "Vidu":                 2623839,
   "WanImage27":           2828170,

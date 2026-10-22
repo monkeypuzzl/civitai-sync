@@ -7,23 +7,33 @@
 // A shared label in that segment gains the nearest parent.
 
 import { tagLabel } from './format.js';
-import { formatWhenRange } from './when-label.js';
+import { formatDateRange } from './date-label.js';
 import { modelTypeLabel } from './modelTypeDisplay.js';
 import { PUBLICATION_LABELS, USED_AS_INPUT_FACET } from './publication.js';
-import { parseScope } from './scope.js';
+import { parseModels, stringLiftQuery } from '../../../../src/modelsQuery.mjs';
 import { describeTypeWorkflowQuery } from '../../../../src/workflowVocab.mjs';
 import { aspectTokenLabel } from '../../../../src/mediaAspect.mjs';
 import { getEcosystemDisplayName } from '../../../../src/ecosystemDisplay.mjs';
 import { getModelFamily, sectionLabel } from '../../../../src/modelFamily.mjs';
+import { modelChipGroups } from './model-chip-groups.js';
 
 const MID = ' \u00B7 ';
 const OR = ' or ';
 const SLASH = ' / ';
 
-/** True when the scope string carries a model id or a version id. A `mn.` name is already the label. */
-export function scopeNeedsNames (scope) {
-  const s = scope == null ? '' : String(scope);
-  return /(?:^|[~/])m\./.test(s) || /(?:^|[~/])v\./.test(s);
+function termHasId (term) {
+  if (!term) return false;
+  if (term.modelId != null && term.modelId !== '') return true;
+  if (term.versionId != null && term.versionId !== '') return true;
+  return (term.except || []).some(termHasId);
+}
+
+/** True when the models string carries a model id or a version id. A name term is already the label. */
+export function scopeNeedsNames (value) {
+  const s = value == null ? '' : String(value);
+  if (/(?:^|[~/])m\./.test(s) || /(?:^|[~/])v\./.test(s)) return true;
+  if (/(?:^|[,/])model\./.test(s) || /(?:^|[,/])version\./.test(s)) return true;
+  return parseModels(s).some(termHasId);
 }
 
 /** Id → label index from a `GET /api/facets/model-tree` payload. */
@@ -54,10 +64,6 @@ export function scopeNamesFromTree (tree) {
 function csv (value) {
   if (value == null || value === '') return [];
   return String(value).split(',').map(s => s.trim()).filter(Boolean);
-}
-
-function mineOn (query) {
-  return query?.mine === '1' || query?.mine === 'true' || query?.mine === true;
 }
 
 function modelLabelOf (term, names) {
@@ -137,10 +143,42 @@ function disambiguate (items) {
   return out;
 }
 
-function modelsSegment (query, names) {
+function joinAnd (names) {
+  if (names.length <= 1) return names[0] || '';
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
+}
+
+function groupSentence (groups) {
+  const parts = [];
+  for (let i = 0; i < groups.length; i++) {
+    const group = groups[i];
+    if (group.kind === 'except') continue;
+    if (group.kind === 'cluster') {
+      parts.push(`${group.parentLabel} (${group.count})`);
+      continue;
+    }
+    const holes = [];
+    for (let n = i + 1; n < groups.length && groups[n].kind === 'except'; n++) {
+      holes.push(groups[n].name || group.text);
+    }
+    parts.push(holes.length ? `${group.text} except ${joinAnd(holes)}` : group.text);
+  }
+  return parts.join(OR);
+}
+
+function modelsSegment (query, names, tree) {
+  const terms = parseModels(stringLiftQuery(query).models);
+  if (!terms.length) return '';
+  const hasExcept = terms.some(term => (term.except || []).length);
+  if (!tree && !hasExcept && terms.length > 3) return `Models (${terms.length})`;
+  if (tree || hasExcept) return groupSentence(modelChipGroups(tree, terms));
   const items = [];
-  if (mineOn(query)) items.push({ text: 'Mine', ancestors: [] });
-  for (const term of parseScope(query?.scope)) {
+  for (const term of terms) {
+    if (term.mine) {
+      items.push({ text: 'Mine', ancestors: [] });
+      continue;
+    }
     const presented = termPresentation(term, names);
     if (presented) items.push(presented);
   }
@@ -158,10 +196,11 @@ function rangeSegment (label, min, max) {
 
 /**
  * One-line summary of an export filter.
- * @param {object} [query] Protocol form (comma strings, `mine: '1'`).
+ * @param {object} [query] Protocol form (comma strings). Mine is a `models` term.
  * @param {{ modelById?: object, modelByName?: object, versionById?: object }|null} [names]
+ * @param {object|null} [tree] Model-tree payload. A folded row uses its joined label. Names alone keep the last-segment line.
  */
-export function describeQuery (query = {}, names = null) {
+export function describeQuery (query = {}, names = null, tree = null) {
   const parts = [];
   const reactions = csv(query.reaction);
   if (reactions.length) parts.push(reactions.map(tagLabel).join(', '));
@@ -172,10 +211,10 @@ export function describeQuery (query = {}, names = null) {
   }
   const aspects = csv(query.aspect);
   if (aspects.length) parts.push(aspects.map(aspectTokenLabel).join(', '));
-  const models = modelsSegment(query, names);
+  const models = modelsSegment(query, names, tree);
   if (models) parts.push(models);
-  const when = formatWhenRange(query.dateFrom, query.dateTo);
-  if (when) parts.push(when);
+  const range = formatDateRange(query.dateFrom, query.dateTo);
+  if (range) parts.push(range);
   const cfg = rangeSegment('CFG', query.cfgMin, query.cfgMax);
   if (cfg) parts.push(cfg);
   const steps = rangeSegment('Steps', query.stepsMin, query.stepsMax);

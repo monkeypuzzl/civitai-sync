@@ -1,6 +1,6 @@
 # `src/vendor/` — vendored snapshots from civitai-src
 
-Generated, committed snapshots of small upstream tables that civitai-sync needs at runtime. **Do not edit files in this directory by hand.**
+Generated, committed snapshots of small upstream tables that civitai-sync needs at runtime. **Do not edit the generated files in this directory by hand.** `civitai-residuals.mjs` is the exception: it holds retired keys and is not produced by the refresh.
 
 ## What lives here
 
@@ -10,6 +10,7 @@ Generated, committed snapshots of small upstream tables that civitai-sync needs 
 | `orchestrator-model-map.mjs` | `node dev/tools/refresh-vendored-civitai.mjs orchestrator-model-map` | `engine.utils.ts` + `generation/version-ids.ts` + `form-graph/generation/video/wan.graph.ts` + `ecosystemSettings` defaults |
 | `civitai-workflows.mjs` | `node dev/tools/refresh-vendored-civitai.mjs workflows` | `workflowConfigs`, plus five derived maps (media tokens, mode phrases, mode abbreviations, abbreviation expansions, display labels). A derivation rejection is exit 5 — [Capture failures](../../docs/guides/civitai-sync/internal/vendored-snapshots.md#capture-failures). |
 | `civitai-model-families.mjs` | `node dev/tools/refresh-vendored-civitai.mjs families` | Eco groups + official version pickers + `workflowConfigs` coverage |
+| `civitai-residuals.mjs` | Not generated. Edit when a review keeps a removed token. | Retired keys only. The refresh does not write this file. |
 
 Each file's own header documents its source path, line range, fields read, transformation rules, and the upstream commit SHA at refresh time.
 

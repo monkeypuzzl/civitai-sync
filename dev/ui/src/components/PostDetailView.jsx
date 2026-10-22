@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'preact/hooks';
 import { openFiles } from '../api.js';
 import { OpenFolderButton, OpenJsonButton } from './OpenFolderButton.jsx';
-import { formatDate, copyToClipboard } from '../lib/format.js';
+import { formatDate, copyToClipboard, memberReactionFields } from '../lib/format.js';
 import { mediaFileCopy, postAccessChips } from '../lib/sidebar-links.js';
 import { originMembershipKind } from '../lib/nav-tabs.js';
 import { unionContainerResources } from '../lib/detail-resources.js';
@@ -13,13 +13,18 @@ import { MediaTile } from './MediaTile.jsx';
 import { OriginSiblingNav } from './OriginSiblingNav.jsx';
 import { DetailPage } from './DetailPage.jsx';
 import { EntityHeader } from './EntityHeader.jsx';
+import { containerFilterChips } from '../lib/filter-chips.js';
+import { containerUnfilteredHref } from '../lib/media-href.js';
+import { useScopeChipTree } from '../lib/scope-chip-tree.js';
 import { PublishedAs3d } from './PublishedAs3d.jsx';
 import { memberMediaHref, openPreservingOriginBag } from '../lib/open-origin-node.js';
 import { detailCacheKey, loadContainerDetail, prefetchOriginNeighbours, useHeldDetail } from '../lib/detail-ready.js';
+import { quietSlotPatch } from '../lib/origin-page.js';
+import { useIndexEpoch } from '../lib/index-settle.js';
 import { SafeRichText } from './SafeRichText.jsx';
 import { htmlToSafeTree, treeHasText } from '../../../../src/safeHtml.mjs';
 import { useDocumentTitle } from '../lib/page-title.js';
-import { useOwnModelsRevision } from '../lib/own-models-rev.js';
+import { useOwnModelsKnown, useOwnModelsRevision } from '../lib/own-models-rev.js';
 import { useMagicEscape } from '../hooks/useMagicEscape.js';
 
 // Per Implementation Contract item 3: switching from a detail route back
@@ -55,11 +60,14 @@ function postMediaToTile (m) {
     kinds.push(inp.kind);
   }
   const id = postMemberId(m);
+  const marks = memberReactionFields(m);
   return {
     id,
     type: m.type,
     hasInputs: inputs.length > 0,
     inputKinds: kinds,
+    tags: marks.tags,
+    reactions: marks.reactions,
     media: [{
       mediaId: id,
       type: m.type,
@@ -72,10 +80,13 @@ function postMediaToTile (m) {
 
 export function PostDetailView ({ postId, params }) {
   useMagicEscape();
+  const modelTree = useScopeChipTree(params && params.models);
   const [copied, setCopied] = useState(null);
   const quietAppliedRef = useRef(null);
   const ownRev = useOwnModelsRevision();
-  const cacheKey = detailCacheKey({ view: 'posts', id: postId, params }) + `:own${ownRev}`;
+  const ownKnown = useOwnModelsKnown();
+  const indexEpoch = useIndexEpoch();
+  const cacheKey = detailCacheKey({ view: 'posts', id: postId, params }) + `:own${ownRev}:ix${indexEpoch}`;
   const held = useHeldDetail(cacheKey, () => loadContainerDetail('posts', postId, params));
   const data = held.displayed;
   const onRoute = held.shownKey === cacheKey && data?.index?.id != null
@@ -101,8 +112,10 @@ export function PostDetailView ({ postId, params }) {
       delete nextParams.from;
       changed = true;
     }
-    if (!origin.slotInUrl && nextParams.slot) {
-      delete nextParams.slot;
+    const slotPatch = quietSlotPatch({ urlSlot: nextParams.slot, origin });
+    if (slotPatch) {
+      if (slotPatch.slot) nextParams.slot = slotPatch.slot;
+      else delete nextParams.slot;
       changed = true;
     }
     if (!changed) return;
@@ -186,7 +199,13 @@ export function PostDetailView ({ postId, params }) {
       chrome={<OriginSiblingNav origin={origin} routeParams={params} />}
       sidebar={(
         <>
-          <EntityHeader title={post.title} label="Post" date={dateStr} />
+          <EntityHeader
+            title={post.title}
+            label="Post"
+            date={dateStr}
+            href={containerUnfilteredHref('posts', postId, params)}
+            filters={containerFilterChips('posts', postId, params, { modelTree, ownKnown })}
+          />
           {post.model3d ? <PublishedAs3d model3d={post.model3d} /> : null}
           {reactions.length > 0 && (
             <ul class="post-detail-reactions">
@@ -205,7 +224,7 @@ export function PostDetailView ({ postId, params }) {
           {workflowLines.length > 0 ? <WorkflowSection lines={workflowLines} /> : null}
           {post.tags.length > 0 && (
             <div class="meta-section">
-              <h2 class="meta-label">Tags</h2>
+              <h2 class="meta-label">Post Tags</h2>
               <ul class="meta-tags">
                 {post.tags.map(tag => (
                   <li key={tag.id || tag.name} class="meta-tag">{tag.name}</li>

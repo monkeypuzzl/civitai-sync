@@ -136,15 +136,13 @@ export async function downloadMenu ({ clear = true } = {}) {
     }
 
     case 'comics': {
-      const { downloadComics } = await import('./downloadComicsMenu.mjs');
-      await downloadComics();
-      return downloadMenu({ clear: false });
+      const { downloadComicsMenu } = await import('./downloadComicsMenu.mjs');
+      return downloadComicsMenu();
     }
 
     case 'model3ds': {
-      const { downloadModel3ds } = await import('./downloadModel3dsMenu.mjs');
-      await downloadModel3ds();
-      return downloadMenu({ clear: false });
+      const { downloadModel3dsMenu } = await import('./downloadModel3dsMenu.mjs');
+      return downloadModel3dsMenu();
     }
 
     case 'back':

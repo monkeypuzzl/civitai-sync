@@ -1,16 +1,17 @@
 import chalk from 'chalk';
 import { getModel3ds, getModel3d, getModel3dFiles, readTrpcJson, formatApiError } from './civitaiApi.mjs';
-import { saveModel3d } from './model3ds.mjs';
+import { saveModel3d, model3dFilepath } from './model3ds.mjs';
 import { setConfigParam } from './config.mjs';
-import { upsertIndexEntries } from './serverIndex.mjs';
+import { upsertIndexEntries, ensureIndexLoaded, downloadOpenIds } from './serverIndex.mjs';
 import { listenForEscKeyPress, plural, formatElapsed, formatActivity } from './downloadActions.mjs';
-import { wait } from './utils.mjs';
+import { readFile, writeFile, fileExists } from './utils.mjs';
+import { withinLatestWindow } from './latestWindow.mjs';
 import { CONFIG } from './cli.mjs';
 import { fillIfMissing } from './userData.mjs';
+import { WIRE } from './civitaiWire.mjs';
 
 export { listenForEscKeyPress };
 
-const DATA_RATE_LIMIT = 100;
 const FEED_CLOSED = '3D is not available on this account.';
 
 function isAborted (signal) {
@@ -38,28 +39,194 @@ async function resolveUsername (secretKey) {
   return CONFIG.username || null;
 }
 
-async function listIds ({ username, secretKey, signal, pass }) {
-  const ids = [];
+async function saveListedId ({ id, report, withImages, secretKey, signal, progress, index, total }) {
+  if (isAborted(signal)) {
+    report.aborted = true;
+    return 'stop';
+  }
+  if (isAborted(signal)) {
+    report.aborted = true;
+    return 'stop';
+  }
+
+  progress({ phase: 'saving', index, total });
+  const detail = await getModel3d({ id, secretKey, signal });
+  if (detail?.error) {
+    if (feedClosed(detail.error)) {
+      report.feedUnavailable = true;
+      report.errors.push(closedError());
+      return 'stop';
+    }
+    report.errors.push(detail.error);
+    return 'next';
+  }
+
+  if (!detail || detail.status === 'Deleted') {
+    report.skipped.push({ id, reason: 'deleted' });
+    return 'next';
+  }
+
+  if (!detail.createdAt) {
+    report.skipped.push({ id, reason: 'missing-createdAt' });
+    return 'next';
+  }
+
+  const signed = await getModel3dFiles({ id, secretKey, signal });
+  if (signed?.error) {
+    if (feedClosed(signed.error)) {
+      report.feedUnavailable = true;
+      report.errors.push(closedError());
+      return 'stop';
+    }
+    report.errors.push(signed.error);
+  }
+
+  const merged = {
+    ...detail,
+    files: mergeFiles(detail.files, signed && !signed.error ? signed.files : [])
+  };
+  report.model3dsDownloaded += 1;
+
+  const saveReport = await saveModel3d(merged, { withImages, signal, secretKey });
+  report.model3dsNew += saveReport.model3dNew || 0;
+  report.model3dsSaved += saveReport.model3dSaved || 0;
+  report.filesSaved += saveReport.filesSaved || 0;
+  if (!(saveReport.model3dNew > 0) && ((saveReport.model3dSaved || 0) > 0 || (saveReport.filesSaved || 0) > 0)) {
+    report.model3dsUpdated += 1;
+  }
+
+  if (saveReport.skipped && saveReport.skipReason) {
+    report.skipped.push({ id, reason: saveReport.skipReason });
+  }
+  if (saveReport.fault) report.fault = saveReport.fault;
+  if (saveReport.aborted) {
+    report.aborted = true;
+    return 'stop';
+  }
+  if (saveReport.error) report.errors.push(saveReport.error);
+  if (saveReport.savedItem) report.savedItems.push(saveReport.savedItem);
+  return 'next';
+}
+
+const LIST_OVERLAY_KEYS = ['name', 'status', 'availability', 'publishedAt', WIRE.browsingLevel, 'unlisted'];
+
+async function overlayListCard (filepath, item, report) {
+  let saved;
+  try {
+    saved = JSON.parse(await readFile(filepath));
+  } catch {
+    return;
+  }
+  let changed = false;
+  for (const key of LIST_OVERLAY_KEYS) {
+    if (item[key] === undefined || item[key] === saved[key]) continue;
+    saved[key] = item[key];
+    changed = true;
+  }
+  if (!changed) return;
+  try {
+    await writeFile(filepath, JSON.stringify(saved, null, 2));
+  } catch {
+    report.errors.push({ message: 'Could not save 3D data' });
+    return;
+  }
+  report.model3dsSaved += 1;
+  report.model3dsUpdated += 1;
+  report.savedItems.push(saved);
+}
+
+async function refreshOpenModel3ds ({ secretKey, signal, withImages, report, progress }) {
+  try {
+    await ensureIndexLoaded();
+  } catch {
+    return;
+  }
+  const open = downloadOpenIds().model3ds;
+  for (const row of open) {
+    const outcome = await saveListedId({
+      id: row.id,
+      report,
+      withImages,
+      secretKey,
+      signal,
+      progress,
+      index: 1,
+      total: open.length
+    });
+    if (outcome === 'stop') return;
+  }
+}
+
+async function walkPass ({ username, secretKey, signal, pass, stopWhenQuiet, report, withImages, progress }) {
   let cursor;
   let guard = 0;
+  let coveredNewest = false;
   while (guard < 10000) {
     guard += 1;
-    if (isAborted(signal)) return { ids, aborted: true };
+    if (isAborted(signal)) {
+      report.aborted = true;
+      return 'stop';
+    }
     const page = await getModel3ds({ username, cursor, secretKey, signal, ...pass });
     if (page?.error) {
-      if (feedClosed(page.error)) return { ids, forbidden: true, error: closedError() };
-      return { ids, error: page.error };
+      if (feedClosed(page.error)) {
+        report.feedUnavailable = true;
+        report.errors.push(closedError());
+        return 'stop';
+      }
+      report.errors.push(page.error);
+      return 'done';
     }
     const parsed = readTrpcJson(page);
-    if (!parsed) return { ids, error: { message: 'Unexpected model3d.getInfinite shape' } };
-    for (const item of parsed.items) {
-      if (item && item.id != null) ids.push(item.id);
+    if (!parsed) {
+      report.errors.push({ message: 'Unexpected model3d.getInfinite shape' });
+      return 'done';
     }
+    const beforeNew = report.model3dsNew;
+    const beforeSaved = report.model3dsSaved;
+    const beforeFiles = report.filesSaved;
+    const items = Array.isArray(parsed.items) ? parsed.items : [];
+    let crossed = false;
+    let dated = false;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const id = item && item.id;
+      if (id == null) continue;
+      if (item.publishedAt) {
+        dated = true;
+        if (!withinLatestWindow(item.publishedAt)) crossed = true;
+      }
+      const savedPath = item.createdAt ? model3dFilepath({ id, createdAt: item.createdAt }) : '';
+      const exists = !!(savedPath && await fileExists(savedPath));
+      const outside = !!(item.publishedAt && !withinLatestWindow(item.publishedAt));
+      const newestSaved = exists && !coveredNewest;
+      if (exists) coveredNewest = true;
+      const detail = !stopWhenQuiet || !exists || !outside || newestSaved;
+      if (!detail) {
+        await overlayListCard(savedPath, item, report);
+        continue;
+      }
+      const outcome = await saveListedId({
+        id,
+        report,
+        withImages,
+        secretKey,
+        signal,
+        progress,
+        index: i + 1,
+        total: items.length
+      });
+      if (outcome === 'stop') return 'stop';
+    }
+    const quiet = report.model3dsNew === beforeNew
+      && report.model3dsSaved === beforeSaved
+      && report.filesSaved === beforeFiles;
+    if (stopWhenQuiet && dated && crossed) return 'done';
+    if (stopWhenQuiet && !dated && quiet) return 'done';
     if (parsed.nextCursor == null || parsed.nextCursor === cursor) break;
     cursor = parsed.nextCursor;
-    await wait(DATA_RATE_LIMIT);
   }
-  return { ids };
+  return 'done';
 }
 
 function mergeFiles (detailFiles, signedFiles) {
@@ -82,13 +249,15 @@ export async function fetchModel3ds (options = {}) {
     username: usernameOption,
     log = console.log,
     onProgress,
-    signal
+    signal,
+    latest = false
   } = options;
 
   const report = {
     time: (new Date()).toISOString(),
     model3dsDownloaded: 0,
     model3dsNew: 0,
+    model3dsUpdated: 0,
     model3dsSaved: 0,
     filesSaved: 0,
     activity: null,
@@ -108,14 +277,13 @@ export async function fetchModel3ds (options = {}) {
 
   function reportText ({ esc = true } = {}) {
     const elapsed = formatElapsed(Date.now() - new Date(report.time).getTime());
-    const activityText = formatActivity(report.activity, { itemNoun: '3D' });
+    const activityText = formatActivity(report.activity);
     const title = chalk.hex('#a5d8ff')('Downloading 3D');
-    const line1 = activityText
-      ? `${title} ${chalk.dim('·')} ${chalk.dim(activityText)}`
-      : title;
-    const newText = report.model3dsNew > 0 ? chalk.green(`${report.model3dsNew} new 3D`) : '';
+    const line1 = `${title} ${chalk.dim('·')} ${chalk.dim(activityText)}`;
+    const newText = report.model3dsNew > 0 ? chalk.green(`${report.model3dsNew} new`) : '';
+    const updatedText = report.model3dsUpdated > 0 ? chalk.green(`${report.model3dsUpdated} updated`) : '';
     const filesText = report.filesSaved > 0 ? plural(report.filesSaved, 'file') : '';
-    const resultParts = [filesText, newText, `elapsed ${elapsed}`].filter(Boolean);
+    const resultParts = [newText, updatedText, filesText, `elapsed ${elapsed}`].filter(Boolean);
     const line2 = chalk.dim(`  ${resultParts.join(' · ')}`);
     let line3;
     if (isAborted(signal)) {
@@ -145,124 +313,43 @@ export async function fetchModel3ds (options = {}) {
     }
 
     progress({ phase: 'listing' });
-    const published = await listIds({
+    if (latest === true) {
+      await refreshOpenModel3ds({ secretKey, signal, withImages, report, progress });
+      if (report.aborted || report.feedUnavailable) {
+        if (onProgress) onProgress({ ...report });
+        return report;
+      }
+    }
+    const publishedPass = await walkPass({
       username,
       secretKey,
       signal,
-      pass: { status: 'Published' }
+      pass: { status: 'Published', sort: 'Newest' },
+      stopWhenQuiet: latest === true,
+      report,
+      withImages,
+      progress
     });
-    if (published.forbidden) {
-      report.feedUnavailable = true;
-      report.errors.push(published.error);
-      if (onProgress) onProgress({ ...report });
-      return report;
-    }
-    if (published.error) report.errors.push(published.error);
-    if (published.aborted || isAborted(signal)) {
-      report.aborted = true;
-      return report;
-    }
-
-    await wait(DATA_RATE_LIMIT);
-    const drafts = await listIds({
-      username,
-      secretKey,
-      signal,
-      pass: { includeDrafts: true }
-    });
-    if (drafts.forbidden) {
-      report.feedUnavailable = true;
-      report.errors.push(drafts.error);
-      if (onProgress) onProgress({ ...report });
-      return report;
-    }
-    if (drafts.error) report.errors.push(drafts.error);
-    if (drafts.aborted || isAborted(signal)) {
-      report.aborted = true;
-      return report;
-    }
-
-    const seen = new Set();
-    const ids = [];
-    for (const id of [...published.ids, ...drafts.ids]) {
-      if (seen.has(id)) continue;
-      seen.add(id);
-      ids.push(id);
-    }
-
-    if (!ids.length) {
-      report.complete = true;
-      await setConfigParam('lastDownloadModel3ds', new Date().toISOString()).catch(() => {});
+    if (publishedPass === 'stop') {
       if (onProgress) onProgress({ ...report });
       return report;
     }
 
-    for (let i = 0; i < ids.length; i++) {
-      if (isAborted(signal)) {
-        report.aborted = true;
-        break;
+    if (!report.aborted && !report.feedUnavailable) {
+      const draftPass = await walkPass({
+        username,
+        secretKey,
+        signal,
+        pass: { includeDrafts: true, sort: 'Newest' },
+        stopWhenQuiet: false,
+        report,
+        withImages,
+        progress
+      });
+      if (draftPass === 'stop') {
+        if (onProgress) onProgress({ ...report });
+        return report;
       }
-
-      await wait(DATA_RATE_LIMIT);
-      if (isAborted(signal)) {
-        report.aborted = true;
-        break;
-      }
-
-      const id = ids[i];
-      progress({ phase: 'saving', index: i + 1, total: ids.length });
-      const detail = await getModel3d({ id, secretKey, signal });
-      if (detail?.error) {
-        if (feedClosed(detail.error)) {
-          report.feedUnavailable = true;
-          report.errors.push(closedError());
-          break;
-        }
-        report.errors.push(detail.error);
-        continue;
-      }
-
-      if (!detail || detail.status === 'Deleted') {
-        report.skipped.push({ id, reason: 'deleted' });
-        continue;
-      }
-
-      if (!detail.createdAt) {
-        report.skipped.push({ id, reason: 'missing-createdAt' });
-        continue;
-      }
-
-      await wait(DATA_RATE_LIMIT);
-      const signed = await getModel3dFiles({ id, secretKey, signal });
-      if (signed?.error) {
-        if (feedClosed(signed.error)) {
-          report.feedUnavailable = true;
-          report.errors.push(closedError());
-          break;
-        }
-        report.errors.push(signed.error);
-      }
-
-      const merged = {
-        ...detail,
-        files: mergeFiles(detail.files, signed && !signed.error ? signed.files : [])
-      };
-      report.model3dsDownloaded += 1;
-
-      const saveReport = await saveModel3d(merged, { withImages, signal, secretKey });
-      report.model3dsNew += saveReport.model3dNew || 0;
-      report.model3dsSaved += saveReport.model3dSaved || 0;
-      report.filesSaved += saveReport.filesSaved || 0;
-
-      if (saveReport.skipped && saveReport.skipReason) {
-        report.skipped.push({ id, reason: saveReport.skipReason });
-      }
-      if (saveReport.aborted) {
-        report.aborted = true;
-        break;
-      }
-      if (saveReport.error) report.errors.push(saveReport.error);
-      if (saveReport.savedItem) report.savedItems.push(saveReport.savedItem);
     }
 
     if (isAborted(signal) && !report.aborted) report.aborted = true;
@@ -272,7 +359,7 @@ export async function fetchModel3ds (options = {}) {
       await upsertIndexEntries({ model3ds: report.savedItems }).catch(() => {});
     }
 
-    const hasData = (report.model3dsNew || 0) > 0 || (report.filesSaved || 0) > 0;
+    const hasData = (report.model3dsNew || 0) > 0 || (report.model3dsUpdated || 0) > 0 || (report.filesSaved || 0) > 0;
     if (!report.feedUnavailable && (hasData || report.complete)) {
       await setConfigParam('lastDownloadModel3ds', new Date().toISOString()).catch(() => {});
     }
@@ -288,7 +375,7 @@ export function formatModel3dCompletion (report) {
   if (!report || typeof report !== 'object') return '';
 
   const elapsed = formatElapsed(Date.now() - new Date(report.time).getTime());
-  const hasNewData = (report.model3dsNew || 0) > 0 || (report.filesSaved || 0) > 0;
+  const hasNewData = (report.model3dsNew || 0) > 0 || (report.model3dsUpdated || 0) > 0 || (report.filesSaved || 0) > 0;
 
   if (report.feedUnavailable) {
     return `${chalk.red(FEED_CLOSED)}\n`;
@@ -312,8 +399,9 @@ export function formatModel3dCompletion (report) {
   }
 
   const filesText = (report.filesSaved || 0) > 0 ? plural(report.filesSaved, 'file') : '';
-  const newText = (report.model3dsNew || 0) > 0 ? chalk.green(`${report.model3dsNew} new 3D`) : '';
-  const contentParts = [filesText, newText].filter(Boolean);
+  const newText = (report.model3dsNew || 0) > 0 ? chalk.green(`${report.model3dsNew} new`) : '';
+  const updatedText = (report.model3dsUpdated || 0) > 0 ? chalk.green(`${report.model3dsUpdated} updated`) : '';
+  const contentParts = [newText, updatedText, filesText].filter(Boolean);
   const line1 = contentParts.length
     ? `${label} ${chalk.dim('·')} ${contentParts.join(` ${chalk.dim('·')} `)}`
     : label;

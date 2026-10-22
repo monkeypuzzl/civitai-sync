@@ -3,14 +3,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG, CURRENT_VERSION } from './cli.mjs';
-import { getIndex, buildIndex, rebuildIndex, collectVersionIdsFromIndex, collectTagIdsFromIndex, upsertIndexEntries, reprojectIndexTagNames, reprojectIndexMediaItems, getMediaItemById, aggregateModelCatalog, aggregateModelPage, computeOverview, computeFacetValues, computeListOffer, warmListOffers, refillListOffersWhenIdle, computeModelHierarchy, computeDateBounds, computeAspectTree, computeTypeWorkflowTree, isProduced, isGenerationBacked, isPostBacked, isComicBacked, model3dForGeneration, model3dForImageId } from './serverIndex.mjs';
+import { getIndex, buildIndex, rebuildIndex, collectVersionIdsFromIndex, collectTagIdsFromIndex, upsertIndexEntries, reprojectIndexTagNames, reprojectIndexMediaItems, getMediaItemById, aggregateModelCatalog, aggregateModelPage, computeOverview, computeFacetValues, computeListOffer, computeTagFacet, warmListOffers, refillListOffersWhenIdle, computeModelHierarchy, computeDateBounds, computeAspectTree, computeTypeWorkflowTree, isProduced, isGenerationBacked, isPostBacked, isComicBacked, model3dForGeneration, model3dForImageId, hasDownloadOpen } from './serverIndex.mjs';
 import { inputsMediaDir } from './inputMedia.mjs';
 import { parseByteRange } from './httpRange.mjs';
-import { generationsDataDir, generationsMediaDir, getGeneration, repairIndexedModel3dJpegs } from './generations.mjs';
-import { postsMediaDir, postsDataDir, postFilepath, postsNeedGenerationData } from './posts.mjs';
+import { generationsDataDir, generationsMediaDir, getGeneration } from './generations.mjs';
+import { repairModel3dOnce } from './model3dRepair.mjs';
+import { postsMediaDir, postsDataDir, postFilepath, postsNeedGenerationData, postsNeedImageResources, postsNeedGenerationResponse } from './posts.mjs';
 import { comicsMediaDir, comicsDataDir, comicFilepath } from './comics.mjs';
 import { model3dsMediaDir, model3dsDataDir, model3dFilepath } from './model3ds.mjs';
 import { imageBrowsingLevel } from './imageBrowsingLevel.mjs';
+import { isRatingTagName } from '../dev/ui/src/lib/browsing-level.js';
 import { readFile } from './utils.mjs';
 import { normalizeMediaId, MEDIA_FILE_EXTS } from './mediaId.mjs';
 import {
@@ -28,9 +30,12 @@ import {
   projectUsedInPreview,
   usedInConsumers,
   earliestUsedInDate,
-  isInputOnlyItem
+  isInputOnlyItem,
+  ownerReactionsForMember,
+  ownerReactionsForStill
 } from './explorerQuery.mjs';
-import { buildDetailOrigin, originArgsFromSearchParams } from './originList.mjs';
+import { buildDetailOrigin, containerListTile, originArgsFromSearchParams } from './originList.mjs';
+import { model3dNeighbourOrigin } from './model3dNeighbours.mjs';
 import {
   ensureTagCacheLoaded,
   getMissingTagIds,
@@ -43,9 +48,13 @@ import {
   clearMediaOverride,
   readServerReactions,
   reactionsToTags,
-  reactionsEqual
+  reactionsEqual,
+  mergeOccurrenceReactions
 } from './overrides.mjs';
 import { loadUiPrefs, patchUiPrefs } from './explorerUiPrefs.mjs';
+import { buildAutoSpec, classifyDownloadFinish, worsenQueueClass } from './autoDownload.mjs';
+import { createAutoRunner } from './autoDownloadRun.mjs';
+import { isAuthFault, isStorageFault } from './downloadFault.mjs';
 import {
   notifyReactionChanged,
   notifyReactionsChanged,
@@ -56,8 +65,10 @@ import {
   updateExport,
   deleteExport,
   deleteExportWithFiles,
+  countRemovalFiles,
   startBulkSync,
   planExport,
+  planExportDraft,
   getSyncJob,
   subscribeSyncJob,
   cancelSyncJob,
@@ -78,7 +89,9 @@ import os from 'node:os';
 import { decryptAES } from './crypto.mjs';
 import { fillIfMissing, refreshOnce } from './userData.mjs';
 import { getAvailableSecretKey, setMemoizedSecretKey } from './keyActions.mjs';
-import { generationDownloadTags, rememberGenerationDownload, rememberPostDownload, normalizeGenerationReactions } from './downloadTypes.mjs';
+import { requireLibraryAccount, onBeforeAccountCachePurge } from './accountIdentity.mjs';
+import { applyDownloadModes, generationDownloadTags, rememberGenerationDownload, rememberPostDownload, rememberComicDownload, rememberModel3dDownload, settleRememberedMode, normalizeGenerationReactions } from './downloadTypes.mjs';
+import { acceptQueueBody, stepDownloadQueue, queueSnapshot } from './downloadQueue.mjs';
 import { CIVITAI_DOMAINS, getCivitaiDomain, civitaiUrl } from './civitaiDomain.mjs';
 import { composeModelLeafCard } from './modelLeafCard.mjs';
 import {
@@ -107,6 +120,13 @@ import {
   setMeasurementWalksSuspended,
   waitForExplorerIdle
 } from './explorerIdle.mjs';
+import {
+  armLibraryPreparation,
+  settleLibraryPreparation,
+  libraryPreparationActive,
+  libraryPreparationPhase,
+  onLibraryPreparationChange
+} from './libraryPreparation.mjs';
 
 export { buildOpenFolderLaunch };
 
@@ -118,12 +138,59 @@ const DEFAULT_PORT = 3456;
 
 const downloadState = {
   active: false,
+  starting: false,
+  userStop: false,
   type: null,
   mode: null,
   abortController: null,
   progress: null,
-  startedAt: null
+  startedAt: null,
+  queue: null
 };
+
+async function readAutoSpec () {
+  const prefs = await loadUiPrefs();
+  let postsNeedUpdate = false;
+  try {
+    postsNeedUpdate = (await postsNeedGenerationData())
+      || (await postsNeedImageResources())
+      || (await postsNeedGenerationResponse());
+  } catch {
+    postsNeedUpdate = false;
+  }
+  return buildAutoSpec({
+    downloadTypes: prefs.downloadTypes,
+    downloadRecheck: prefs.downloadRecheck === true,
+    generationDownload: CONFIG.generationDownload,
+    generationReactions: CONFIG.generationReactions,
+    postDownload: CONFIG.postDownload,
+    comicDownload: CONFIG.comicDownload,
+    model3dDownload: CONFIG.model3dDownload,
+    postsNeedUpdate
+  });
+}
+
+const autoRunner = createAutoRunner({
+  schedule (fn, ms, opts) {
+    if (opts && opts.repeat) return setInterval(fn, ms);
+    return setTimeout(fn, ms);
+  },
+  clear (handle) {
+    clearTimeout(handle);
+    clearInterval(handle);
+  },
+  startQueue (spec) {
+    return startDownloadQueue(spec);
+  },
+  readSpec: readAutoSpec,
+  onPhase (snap) {
+    broadcastSSE({ type: 'auto', ...snap });
+  }
+});
+
+function autoSnapshot () {
+  return autoRunner.snapshot();
+}
 
 // --- Model-cache Manager ---
 //
@@ -173,6 +240,10 @@ function broadcastSSE (data) {
   }
 }
 
+onLibraryPreparationChange(({ active, phase }) => {
+  broadcastSSE({ type: 'preparation', active, phase });
+});
+
 const NETWORK_ERROR_CODES = ['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'FETCH_ERROR'];
 
 function friendlyErrorMessage (errors) {
@@ -210,13 +281,339 @@ function finishExplorerDownload () {
   setMeasurementWalksSuspended(false);
 }
 
-async function startDownloadGenerations (mode) {
-  if (downloadState.active) return { error: 'A download is already in progress' };
+function runAfterDownloadHooks (secretKey) {
+  if (!secretKey) return;
+  triggerModelCacheAfterDownload(secretKey);
+  triggerTagCacheAfterDownload(secretKey);
+  triggerExportsAfterDownload();
+  triggerOwnModelsAfterDownload(secretKey);
+}
 
-  const secretKey = getAvailableSecretKey();
-  if (!secretKey) return { error: 'API key not available. If encrypted, unlock via CLI first.' };
+function downloadWrote (report) {
+  if (!report) return false;
+  return [
+    'generationsNew', 'generationsUpdated',
+    'postsNew', 'postsUpdated',
+    'comicsNew', 'comicsUpdated',
+    'model3dsNew', 'model3dsUpdated',
+    'imagesSaved', 'videosSaved', 'audioSaved', 'model3dSaved', 'filesSaved'
+  ].some((key) => (report[key] || 0) > 0);
+}
+
+function slimDownloadProgress (report) {
+  if (!report) return null;
+  return {
+    generationsNew: report.generationsNew || 0,
+    generationsUpdated: report.generationsUpdated || 0,
+    postsNew: report.postsNew || 0,
+    postsUpdated: report.postsUpdated || 0,
+    comicsNew: report.comicsNew || 0,
+    comicsUpdated: report.comicsUpdated || 0,
+    model3dsNew: report.model3dsNew || 0,
+    model3dsUpdated: report.model3dsUpdated || 0,
+    imagesSaved: report.imagesSaved || 0,
+    videosSaved: report.videosSaved || 0,
+    audioSaved: report.audioSaved || 0,
+    model3dSaved: report.model3dSaved || 0,
+    filesSaved: report.filesSaved || 0,
+    activity: report.activity || null
+  };
+}
+
+function liveQueueSnapshot () {
+  const queued = downloadState.queue;
+  if (!queued) return null;
+  return queueSnapshot({
+    types: queued.types,
+    results: queued.results,
+    current: downloadState.type,
+    startedAt: queued.startedAt,
+    progress: slimDownloadProgress(downloadState.progress),
+    spec: queued.spec,
+    closed: false
+  });
+}
+
+function downloadElapsed () {
+  const started = downloadState.queue
+    ? downloadState.queue.startedAt
+    : downloadState.startedAt;
+  return started ? Date.now() - started : 0;
+}
+
+function emitDownload (event) {
+  const body = { ...event, elapsed: downloadElapsed() };
+  const queue = liveQueueSnapshot();
+  if (queue) body.queue = queue;
+  broadcastSSE(body);
+}
+
+function endQueue () {
+  downloadState.queue = null;
+  downloadState.active = false;
+  downloadState.type = null;
+  downloadState.mode = null;
+  downloadState.abortController = null;
+  downloadState.progress = null;
+  setMeasurementWalksSuspended(false);
+}
+
+function outcomeFromEvent (event) {
+  return {
+    type: event.type,
+    status: event.status,
+    message: event.message,
+    errors: event.errors || 0,
+    generationsNew: event.generationsNew || 0,
+    generationsUpdated: event.generationsUpdated || 0,
+    postsNew: event.postsNew || 0,
+    postsUpdated: event.postsUpdated || 0,
+    comicsNew: event.comicsNew || 0,
+    comicsUpdated: event.comicsUpdated || 0,
+    model3dsNew: event.model3dsNew || 0,
+    model3dsUpdated: event.model3dsUpdated || 0,
+    imagesSaved: event.imagesSaved || 0,
+    videosSaved: event.videosSaved || 0,
+    audioSaved: event.audioSaved || 0,
+    model3dSaved: event.model3dSaved || 0,
+    filesSaved: event.filesSaved || 0
+  };
+}
+
+function rememberedForPortion (type) {
+  if (type === 'generations') {
+    if (downloadState.mode === 'missing-all') return 'all';
+    if (downloadState.mode === 'missing-tags') return 'reactions';
+    if (downloadState.mode === 'latest') return 'latest';
+    return null;
+  }
+  if (type === 'posts' || type === 'comics' || type === 'model3ds') {
+    return downloadState.mode === 'all' || downloadState.mode === 'latest' ? downloadState.mode : null;
+  }
+  return null;
+}
+
+function finishKind (event) {
+  return classifyDownloadFinish({
+    status: event && event.status,
+    fault: event && event.fault,
+    userStop: downloadState.userStop === true
+  });
+}
+
+function clearRecheckIfClean (queued) {
+  if (!queued || !queued.spec || queued.spec.recheck !== true) return;
+  const watched = (queued.types || []).filter(id => id === 'posts' || id === 'comics');
+  if (!watched.length) return;
+  const results = queued.results || [];
+  const clean = watched.every(id => results.some(item => (
+    item && item.type === id && item.status === 'complete' && !item.errors
+  )));
+  if (!clean) return;
+  patchUiPrefs({ downloadRecheck: false }).catch(() => {});
+}
+
+function finishType (event) {
+  const remembered = rememberedForPortion(event && event.type);
+  if (remembered) {
+    settleRememberedMode(event.type, remembered, event).catch(() => {});
+  }
+  const queued = downloadState.queue;
+  if (!queued) {
+    emitDownload(event);
+    finishExplorerDownload();
+    autoRunner.noteFinish(finishKind(event));
+    downloadState.userStop = false;
+    if (event.status === 'complete') runAfterDownloadHooks(getAvailableSecretKey());
+    return;
+  }
+
+  queued.class = worsenQueueClass(queued.class, finishKind(event));
+
+  const step = stepDownloadQueue(queued, outcomeFromEvent(event));
+  queued.results = step.results;
+  queued.cursor = step.cursor;
+  const terminal = step.done;
+  downloadState.abortController = null;
+  if (terminal) downloadState.progress = null;
+
+  const queue = queueSnapshot({
+    types: queued.types,
+    results: queued.results,
+    current: terminal ? null : downloadState.type,
+    startedAt: queued.startedAt,
+    progress: terminal ? null : slimDownloadProgress(downloadState.progress),
+    spec: queued.spec,
+    closed: terminal
+  });
+  broadcastSSE({ ...event, elapsed: Date.now() - queued.startedAt, final: true, queue });
+
+  if (!terminal && step.startType) {
+    const next = step.startType;
+    runQueuedType(next).then(result => {
+      if (result && result.error && downloadState.queue) {
+        finishType({
+          type: next,
+          status: 'error',
+          message: result.error,
+          errors: 1,
+          final: true
+        });
+      }
+    }).catch(err => {
+      if (downloadState.queue) {
+        finishType({
+          type: next,
+          status: 'error',
+          message: friendlyErrorMessage([err]),
+          errors: 1,
+          final: true
+        });
+      }
+    });
+    return;
+  }
+
+  const hooks = step.hooks;
+  const secretKey = queued.secretKey;
+  const finalKind = queued.class || 'steady';
+  const finished = {
+    spec: queued.spec,
+    types: queued.types,
+    results: queued.results
+  };
+  endQueue();
+  downloadState.userStop = false;
+  autoRunner.noteFinish(finalKind);
+  if (finalKind === 'steady') clearRecheckIfClean(finished);
+  if (hooks) runAfterDownloadHooks(secretKey);
+}
+
+function closeQueueIdle () {
+  const queued = downloadState.queue;
+  if (!queued) return;
+  const type = downloadState.type || queued.types[0];
+  const hooks = queued.results.some(result => result && result.status === 'complete');
+  const secretKey = queued.secretKey;
+  const queue = queueSnapshot({
+    types: queued.types,
+    results: queued.results,
+    current: null,
+    startedAt: queued.startedAt,
+    progress: null,
+    spec: queued.spec,
+    closed: true
+  });
+  broadcastSSE({
+    type,
+    status: 'aborted',
+    final: true,
+    queue,
+    elapsed: queued.startedAt ? Date.now() - queued.startedAt : 0
+  });
+  endQueue();
+  downloadState.userStop = false;
+  autoRunner.noteFinish('aborted');
+  if (hooks) runAfterDownloadHooks(secretKey);
+}
+
+function queueHalted () {
+  return !downloadState.queue || downloadState.queue.halt === true;
+}
+
+async function runQueuedType (type) {
+  if (queueHalted()) return { stopped: true };
+  const spec = downloadState.queue.spec || {};
+  if (type === 'generations') {
+    return startDownloadGenerations(spec.generations && spec.generations.mode, { fromQueue: true });
+  }
+  if (type === 'posts') {
+    const posts = spec.posts || {};
+    return startDownloadPosts(posts.mode, { checkAllMedia: posts.checkAllMedia === true, fromQueue: true });
+  }
+  if (type === 'comics') {
+    const comics = spec.comics || {};
+    return startDownloadComics({
+      mode: comics.mode === 'all' ? 'all' : 'latest',
+      checkAllMedia: comics.checkAllMedia === true,
+      fromQueue: true
+    });
+  }
+  if (type === 'model3ds') {
+    const model3ds = spec.model3ds || {};
+    return startDownloadModel3ds({
+      mode: model3ds.mode === 'all' ? 'all' : 'latest',
+      fromQueue: true
+    });
+  }
+  return { error: 'No download type selected' };
+}
+
+export async function startDownloadQueue (body) {
+  const accepted = acceptQueueBody(body);
+  if (accepted.error) return accepted;
+  if (downloadState.active || downloadState.queue || downloadState.starting) {
+    return { error: 'A download is already in progress', code: 'busy' };
+  }
+  downloadState.starting = true;
+  const gated = await gateDownloadKey();
+  if (gated.error) {
+    downloadState.starting = false;
+    return { error: gated.error, fatal: true, code: 'auth' };
+  }
+  const secretKey = gated.secretKey;
+
+  const now = Date.now();
+  downloadState.queue = {
+    types: accepted.types,
+    spec: accepted.spec,
+    results: [],
+    cursor: 0,
+    startedAt: now,
+    halt: false,
+    class: 'steady',
+    secretKey
+  };
+  downloadState.active = true;
+  downloadState.starting = false;
+  downloadState.startedAt = now;
+
+  let result;
+  try {
+    result = await runQueuedType(accepted.types[0]);
+  } catch (err) {
+    result = { error: friendlyErrorMessage([err]) };
+  }
+  if (result && result.stopped) {
+    if (downloadState.queue) closeQueueIdle();
+    return { ok: true, queue: null };
+  }
+  if (result && result.error) {
+    if (downloadState.queue) {
+      finishType({
+        type: accepted.types[0],
+        status: 'error',
+        message: result.error,
+        errors: 1,
+        final: true
+      });
+    }
+    return { error: result.error };
+  }
+  return { ok: true, queue: liveQueueSnapshot() };
+}
+
+async function startDownloadGenerations (mode, { fromQueue = false } = {}) {
+  if (!fromQueue && (downloadState.active || downloadState.queue)) {
+    return { error: 'A download is already in progress' };
+  }
+
+  const gated = await gateDownloadKey();
+  if (gated.error) return gated;
+  const secretKey = gated.secretKey;
 
   await rememberGenerationDownload(mode);
+  if (fromQueue && queueHalted()) return { stopped: true };
 
   // If a model-cache / tag-cache refresh is running, abort it so the
   // download has the full network rate-limit budget. The after-download
@@ -235,7 +632,7 @@ async function startDownloadGenerations (mode) {
   downloadState.startedAt = Date.now();
   downloadState.progress = null;
 
-  broadcastSSE({ type: 'generations', status: 'downloading', mode });
+  emitDownload({ type: 'generations', status: 'downloading', mode });
 
   fetchGenerations({
     secretKey,
@@ -247,68 +644,69 @@ async function startDownloadGenerations (mode) {
     log: () => {},
     onProgress: (report) => {
       downloadState.progress = report;
-      broadcastSSE({
+      emitDownload({
         type: 'generations',
         status: report.aborted ? 'aborted' : report.complete ? 'complete' : 'downloading',
         generationsNew: report.generationsNew || 0,
+        generationsUpdated: report.generationsUpdated || 0,
         imagesSaved: report.imagesSaved || 0,
         videosSaved: report.videosSaved || 0,
         audioSaved: report.audioSaved || 0,
         model3dSaved: report.model3dSaved || 0,
         batchDate: report.batchDate || '',
         activity: report.activity || null,
-        elapsed: Date.now() - downloadState.startedAt,
         errors: (report.errors || []).length
       });
     },
     signal: downloadState.abortController.signal
   }).then(async (report) => {
-    const status = report?.aborted ? 'aborted' : (report?.errors?.length && !report?.generationsNew) ? 'error' : 'complete';
-    broadcastSSE({
+    let status = report?.aborted ? 'aborted' : (report?.errors?.length && !downloadWrote(report)) ? 'error' : 'complete';
+    const fault = report?.fault;
+    if (!report?.aborted && (fault === 'storage' || fault === 'auth' || fault === 'network')) status = 'error';
+    finishType({
       type: 'generations',
       status,
+      fault,
       message: status === 'error' ? friendlyErrorMessage(report?.errors) : undefined,
       generationsNew: report?.generationsNew || 0,
+      generationsUpdated: report?.generationsUpdated || 0,
       imagesSaved: report?.imagesSaved || 0,
       videosSaved: report?.videosSaved || 0,
       audioSaved: report?.audioSaved || 0,
       model3dSaved: report?.model3dSaved || 0,
-      elapsed: Date.now() - downloadState.startedAt,
       errors: (report?.errors || []).length,
       final: true
     });
-    finishExplorerDownload();
-    if (status === 'complete') {
-      triggerModelCacheAfterDownload(secretKey);
-      triggerTagCacheAfterDownload(secretKey);
-      triggerExportsAfterDownload();
-      triggerOwnModelsAfterDownload(secretKey);
-    }
   }).catch((err) => {
-    broadcastSSE({ type: 'generations', status: 'error', message: friendlyErrorMessage([err]), final: true });
-    finishExplorerDownload();
+    const fault = isStorageFault(err) ? 'storage' : isAuthFault(err) ? 'auth' : 'network';
+    finishType({ type: 'generations', status: 'error', fault, message: friendlyErrorMessage([err]), errors: 1, final: true });
   });
 
   return { ok: true, type: 'generations', mode };
 }
 
-async function startDownloadPosts (mode) {
-  if (downloadState.active) return { error: 'A download is already in progress' };
+async function startDownloadPosts (mode, { checkAllMedia = false, fromQueue = false } = {}) {
+  if (!fromQueue && (downloadState.active || downloadState.queue)) {
+    return { error: 'A download is already in progress' };
+  }
 
-  const secretKey = getAvailableSecretKey();
-  if (!secretKey) return { error: 'API key not available. If encrypted, unlock via CLI first.' };
+  const gated = await gateDownloadKey();
+  if (gated.error) return gated;
+  const secretKey = gated.secretKey;
 
   preemptModelCacheForDownload();
   preemptTagCacheForDownload();
   abortOwnModelsCheck();
 
   const username = await resolveUsername(secretKey);
+  if (fromQueue && queueHalted()) return { stopped: true };
   if (username && typeof username === 'object' && username.error) {
     return { error: `Civitai service unavailable. Try again shortly. (${username.error})` };
   }
   if (!username) return { error: 'Could not resolve username. Check your API key.' };
 
   await rememberPostDownload(mode);
+  if (fromQueue && queueHalted()) return { stopped: true };
 
   setMeasurementWalksSuspended(true);
 
@@ -319,134 +717,142 @@ async function startDownloadPosts (mode) {
   downloadState.startedAt = Date.now();
   downloadState.progress = null;
 
-  broadcastSSE({ type: 'posts', status: 'downloading', mode });
+  emitDownload({ type: 'posts', status: 'downloading', mode });
 
   fetchPostsAllKinds({
     secretKey,
     username,
     latest: mode === 'latest',
+    checkAllMedia: mode === 'all' && checkAllMedia === true,
     withImages: CONFIG.downloadMedia !== false,
     log: () => {},
     onProgress: (report) => {
       downloadState.progress = report;
-      broadcastSSE({
+      emitDownload({
         type: 'posts',
         status: report.aborted ? 'aborted' : report.complete ? 'complete' : 'downloading',
         postsNew: report.postsNew || 0,
+        postsUpdated: report.postsUpdated || 0,
         imagesSaved: report.imagesSaved || 0,
         videosSaved: report.videosSaved || 0,
         audioSaved: report.audioSaved || 0,
         batchDate: report.batchDate || '',
         activity: report.activity || null,
-        elapsed: Date.now() - downloadState.startedAt,
         errors: (report.errors || []).length
       });
     },
     signal: downloadState.abortController.signal
   }).then(async (report) => {
-    const status = report?.aborted ? 'aborted' : (report?.errors?.length && !report?.postsNew) ? 'error' : 'complete';
-    broadcastSSE({
+    let status = report?.aborted ? 'aborted' : (report?.errors?.length && !downloadWrote(report)) ? 'error' : 'complete';
+    const fault = report?.fault;
+    if (!report?.aborted && (fault === 'storage' || fault === 'auth' || fault === 'network')) status = 'error';
+    finishType({
       type: 'posts',
       status,
+      fault,
       message: status === 'error' ? friendlyErrorMessage(report?.errors) : undefined,
       postsNew: report?.postsNew || 0,
+      postsUpdated: report?.postsUpdated || 0,
       imagesSaved: report?.imagesSaved || 0,
       videosSaved: report?.videosSaved || 0,
       audioSaved: report?.audioSaved || 0,
-      elapsed: Date.now() - downloadState.startedAt,
       errors: (report?.errors || []).length,
       final: true
     });
-    finishExplorerDownload();
-    if (status === 'complete') {
-      triggerModelCacheAfterDownload(secretKey);
-      triggerTagCacheAfterDownload(secretKey);
-      triggerExportsAfterDownload();
-      triggerOwnModelsAfterDownload(secretKey);
-    }
   }).catch((err) => {
-    broadcastSSE({ type: 'posts', status: 'error', message: friendlyErrorMessage([err]), final: true });
-    finishExplorerDownload();
+    const fault = isStorageFault(err) ? 'storage' : isAuthFault(err) ? 'auth' : 'network';
+    finishType({ type: 'posts', status: 'error', fault, message: friendlyErrorMessage([err]), errors: 1, final: true });
   });
 
   return { ok: true, type: 'posts', mode };
 }
 
-async function startDownloadComics () {
-  if (downloadState.active) return { error: 'A download is already in progress' };
+async function startDownloadComics ({ mode = 'latest', checkAllMedia = false, fromQueue = false } = {}) {
+  if (!fromQueue && (downloadState.active || downloadState.queue)) {
+    return { error: 'A download is already in progress' };
+  }
 
-  const secretKey = getAvailableSecretKey();
-  if (!secretKey) return { error: 'API key not available. If encrypted, unlock via CLI first.' };
+  const gated = await gateDownloadKey();
+  if (gated.error) return gated;
+  const secretKey = gated.secretKey;
+  if (fromQueue && queueHalted()) return { stopped: true };
 
   preemptModelCacheForDownload();
   preemptTagCacheForDownload();
   abortOwnModelsCheck();
+  if (fromQueue && queueHalted()) return { stopped: true };
   setMeasurementWalksSuspended(true);
+
+  const comicMode = mode === 'all' ? 'all' : 'latest';
+  await rememberComicDownload(comicMode);
+  if (fromQueue && queueHalted()) return { stopped: true };
 
   downloadState.active = true;
   downloadState.type = 'comics';
-  downloadState.mode = null;
+  downloadState.mode = comicMode;
   downloadState.abortController = new AbortController();
   downloadState.startedAt = Date.now();
   downloadState.progress = null;
 
-  broadcastSSE({ type: 'comics', status: 'downloading' });
+  emitDownload({ type: 'comics', status: 'downloading' });
 
   fetchComics({
     secretKey,
+    latest: comicMode !== 'all',
+    checkAllMedia: checkAllMedia === true,
     withImages: CONFIG.downloadMedia !== false,
     log: () => {},
     onProgress: (report) => {
       downloadState.progress = report;
-      broadcastSSE({
+      emitDownload({
         type: 'comics',
         status: report.aborted ? 'aborted' : report.complete ? 'complete' : 'downloading',
         comicsNew: report.comicsNew || 0,
+        comicsUpdated: report.comicsUpdated || 0,
         imagesSaved: report.imagesSaved || 0,
         activity: report.activity || null,
-        elapsed: Date.now() - downloadState.startedAt,
         errors: (report.errors || []).length
       });
     },
     signal: downloadState.abortController.signal
   }).then(async (report) => {
-    const status = report?.aborted ? 'aborted' : (report?.errors?.length && !report?.comicsNew) ? 'error' : 'complete';
-    broadcastSSE({
+    let status = report?.aborted ? 'aborted' : (report?.errors?.length && !downloadWrote(report)) ? 'error' : 'complete';
+    const fault = report?.fault;
+    if (!report?.aborted && (fault === 'storage' || fault === 'auth' || fault === 'network')) status = 'error';
+    finishType({
       type: 'comics',
       status,
+      fault,
       message: status === 'error' ? friendlyErrorMessage(report?.errors) : undefined,
       comicsNew: report?.comicsNew || 0,
+      comicsUpdated: report?.comicsUpdated || 0,
       imagesSaved: report?.imagesSaved || 0,
-      elapsed: Date.now() - downloadState.startedAt,
       errors: (report?.errors || []).length,
       final: true
     });
-    finishExplorerDownload();
-    if (status === 'complete') {
-      triggerModelCacheAfterDownload(secretKey);
-      triggerTagCacheAfterDownload(secretKey);
-      triggerExportsAfterDownload();
-      triggerOwnModelsAfterDownload(secretKey);
-    }
   }).catch((err) => {
-    broadcastSSE({ type: 'comics', status: 'error', message: friendlyErrorMessage([err]), final: true });
-    finishExplorerDownload();
+    const fault = isStorageFault(err) ? 'storage' : isAuthFault(err) ? 'auth' : 'network';
+    finishType({ type: 'comics', status: 'error', fault, message: friendlyErrorMessage([err]), errors: 1, final: true });
   });
 
   return { ok: true, type: 'comics' };
 }
 
-async function startDownloadModel3ds () {
-  if (downloadState.active) return { error: 'A download is already in progress' };
+async function startDownloadModel3ds ({ mode = 'latest', fromQueue = false } = {}) {
+  if (!fromQueue && (downloadState.active || downloadState.queue)) {
+    return { error: 'A download is already in progress' };
+  }
 
-  const secretKey = getAvailableSecretKey();
-  if (!secretKey) return { error: 'API key not available. If encrypted, unlock via CLI first.' };
+  const gated = await gateDownloadKey();
+  if (gated.error) return gated;
+  const secretKey = gated.secretKey;
 
   preemptModelCacheForDownload();
   preemptTagCacheForDownload();
   abortOwnModelsCheck();
 
   const username = await resolveUsername(secretKey);
+  if (fromQueue && queueHalted()) return { stopped: true };
   if (username && typeof username === 'object' && username.error) {
     return { error: `Civitai service unavailable. Try again shortly. (${username.error})` };
   }
@@ -454,59 +860,60 @@ async function startDownloadModel3ds () {
 
   setMeasurementWalksSuspended(true);
 
+  const model3dMode = mode === 'all' ? 'all' : 'latest';
+  await rememberModel3dDownload(model3dMode);
+  if (fromQueue && queueHalted()) return { stopped: true };
+
   downloadState.active = true;
   downloadState.type = 'model3ds';
-  downloadState.mode = null;
+  downloadState.mode = model3dMode;
   downloadState.abortController = new AbortController();
   downloadState.startedAt = Date.now();
   downloadState.progress = null;
 
-  broadcastSSE({ type: 'model3ds', status: 'downloading' });
+  emitDownload({ type: 'model3ds', status: 'downloading' });
 
   fetchModel3ds({
     username,
     secretKey,
+    latest: model3dMode !== 'all',
     withImages: CONFIG.downloadMedia !== false,
     log: () => {},
     onProgress: (report) => {
       downloadState.progress = report;
-      broadcastSSE({
+      emitDownload({
         type: 'model3ds',
         status: report.aborted ? 'aborted' : report.complete ? 'complete' : 'downloading',
         model3dsNew: report.model3dsNew || 0,
+        model3dsUpdated: report.model3dsUpdated || 0,
         filesSaved: report.filesSaved || 0,
         activity: report.activity || null,
-        elapsed: Date.now() - downloadState.startedAt,
         errors: (report.errors || []).length
       });
     },
     signal: downloadState.abortController.signal
   }).then(async (report) => {
-    const status = report?.feedUnavailable
+    let status = report?.feedUnavailable
       ? 'error'
       : report?.aborted
         ? 'aborted'
-        : (report?.errors?.length && !report?.model3dsNew) ? 'error' : 'complete';
-    broadcastSSE({
+        : (report?.errors?.length && !downloadWrote(report)) ? 'error' : 'complete';
+    const fault = report?.fault;
+    if (!report?.aborted && (fault === 'storage' || fault === 'auth' || fault === 'network')) status = 'error';
+    finishType({
       type: 'model3ds',
       status,
+      fault,
       message: status === 'error' ? friendlyErrorMessage(report?.errors) : undefined,
       model3dsNew: report?.model3dsNew || 0,
+      model3dsUpdated: report?.model3dsUpdated || 0,
       filesSaved: report?.filesSaved || 0,
-      elapsed: Date.now() - downloadState.startedAt,
       errors: (report?.errors || []).length,
       final: true
     });
-    finishExplorerDownload();
-    if (status === 'complete') {
-      triggerModelCacheAfterDownload(secretKey);
-      triggerTagCacheAfterDownload(secretKey);
-      triggerExportsAfterDownload();
-      triggerOwnModelsAfterDownload(secretKey);
-    }
   }).catch((err) => {
-    broadcastSSE({ type: 'model3ds', status: 'error', message: friendlyErrorMessage([err]), final: true });
-    finishExplorerDownload();
+    const fault = isStorageFault(err) ? 'storage' : isAuthFault(err) ? 'auth' : 'network';
+    finishType({ type: 'model3ds', status: 'error', fault, message: friendlyErrorMessage([err]), errors: 1, final: true });
   });
 
   return { ok: true, type: 'model3ds' };
@@ -542,12 +949,16 @@ function triggerOwnModelsAfterDownload (secretKey) {
 }
 
 function triggerOwnModelsIfMissing (secretKey) {
-  scheduleOwnModelsCheck({
+  const pending = scheduleOwnModelsCheck({
     secretKey,
     onlyIfMissing: true,
     isBlocked: () => downloadState.active,
     onReady: () => broadcastSSE({ type: 'own-models', status: 'ready' })
-  }).catch(() => {});
+  });
+  // A download already in progress does not start the walk. Do not arm.
+  if (downloadState.active) return;
+  armLibraryPreparation('own-models');
+  pending.finally(() => { settleLibraryPreparation('own-models'); });
 }
 
 function triggerModelCacheAfterDownload (secretKey) {
@@ -555,11 +966,14 @@ function triggerModelCacheAfterDownload (secretKey) {
   // Don't block; failures are surfaced to the client via the SSE stream
   // but never propagate to the download flow.
   startModelCacheRefresh({ force: false, secretKey, trigger: 'after-download' })
-    .catch(() => {});
+    .catch(err => {
+      if (isStorageFault(err)) autoRunner.noteStop();
+    });
 }
 
 async function startModelCacheRefresh ({ force = false, secretKey, trigger = 'manual' } = {}) {
-  if (!secretKey) return { error: 'API key not available. If encrypted, unlock via CLI first.' };
+  const gated = await requireLibraryAccount(secretKey);
+  if (!gated.ok) return { error: gated.message };
   if (downloadState.active) return { error: 'A download is in progress', code: 'download-active' };
   if (modelCacheState.active) return { error: 'Model-cache refresh already running', code: 'cache-active' };
 
@@ -724,6 +1138,25 @@ function cancelModelCacheRefresh () {
   return { ok: true };
 }
 
+onBeforeAccountCachePurge(() => {
+  if (modelCacheState.active && modelCacheState.abortController) {
+    modelCacheState.abortController.abort();
+  }
+});
+
+async function gateDownloadKey () {
+  const gate = await requireLibraryAccount(getAvailableSecretKey());
+  if (!gate.ok) return { error: gate.message };
+  return { secretKey: getAvailableSecretKey() };
+}
+
+export function explorerDownloadRun () {
+  return {
+    active: downloadState.active,
+    queue: downloadState.queue
+  };
+}
+
 // Called by `startDownloadGenerations` / `startDownloadPosts` (and any
 // future download surface) when a new download begins. Cancels any active
 // model-cache run so the new download has the full network budget.
@@ -746,7 +1179,9 @@ function preemptModelCacheForDownload () {
 const tagCacheState = { active: false, abortController: null };
 
 function triggerTagCacheAfterDownload (secretKey) {
-  startTagCacheRefresh({ secretKey }).catch(() => {});
+  startTagCacheRefresh({ secretKey }).catch(err => {
+    if (isStorageFault(err)) autoRunner.noteStop();
+  });
 }
 
 // New downloads add canonical files that existing exports may now match
@@ -758,12 +1193,17 @@ function triggerExportsAfterDownload () {
 }
 
 async function startTagCacheRefresh ({ secretKey } = {}) {
+  const gated = await requireLibraryAccount(secretKey);
+  if (!gated.ok) return;
   if (downloadState.active) return;
   if (tagCacheState.active) return;
 
   await ensureTagCacheLoaded();
   const missing = getMissingTagIds(collectTagIdsFromIndex());
-  if (!missing.length) return;
+  if (!missing.length) {
+    broadcastSSE({ type: 'tag-cache', final: true });
+    return;
+  }
 
   tagCacheState.active = true;
   tagCacheState.abortController = new AbortController();
@@ -778,6 +1218,7 @@ async function startTagCacheRefresh ({ secretKey } = {}) {
     tagCacheState.active = false;
     // Re-derive content-tag names + mediaItems from the now-fuller cache.
     reprojectIndexTagNames();
+    broadcastSSE({ type: 'tag-cache', final: true });
   }
 }
 
@@ -839,6 +1280,21 @@ let aceAudioBackfillInFlight = false;
 
 let measurementPassQueued = false;
 let measurementPassActive = false;
+let measurementHeld = false;
+
+// One arm for the whole refill span. A second walk that finishes while the
+// pass is running must not increment the count: one finally settles it.
+function holdMeasurement () {
+  if (measurementHeld) return;
+  measurementHeld = true;
+  armLibraryPreparation('measurement');
+}
+
+function releaseMeasurement () {
+  if (!measurementHeld) return;
+  measurementHeld = false;
+  settleLibraryPreparation('measurement');
+}
 
 function scheduleMeasurementMaintenance () {
   measurementPassQueued = true;
@@ -864,52 +1320,78 @@ async function runMeasurementPasses () {
   } finally {
     measurementPassActive = false;
     if (measurementPassQueued) scheduleMeasurementMaintenance();
+    else releaseMeasurement();
   }
 }
 
 function queueContentHashBackfill () {
   if (contentHashBackfillInFlight) return;
   contentHashBackfillInFlight = true;
+  armLibraryPreparation('content-hash');
   const index = getIndex() || {};
   backfillContentHashes({
     generations: index.generations,
     posts: index.posts,
     comics: index.comics || []
   })
-    .then(() => { scheduleMeasurementMaintenance(); })
+    .then((result) => {
+      if (!result?.wrote) return;
+      holdMeasurement();
+      scheduleMeasurementMaintenance();
+    })
     .catch(() => {})
-    .finally(() => { contentHashBackfillInFlight = false; });
+    .finally(() => {
+      contentHashBackfillInFlight = false;
+      settleLibraryPreparation('content-hash');
+    });
 }
 
 function queueAspectDimBackfill () {
   if (aspectDimBackfillInFlight) return;
   aspectDimBackfillInFlight = true;
+  armLibraryPreparation('file-dims');
   const mediaItems = getIndex()?.mediaItems;
   backfillAspectFileDims({ mediaItems })
-    .then(() => { scheduleMeasurementMaintenance(); })
+    .then((result) => {
+      if (!result?.wrote) return;
+      holdMeasurement();
+      scheduleMeasurementMaintenance();
+    })
     .catch(() => {})
-    .finally(() => { aspectDimBackfillInFlight = false; });
+    .finally(() => {
+      aspectDimBackfillInFlight = false;
+      settleLibraryPreparation('file-dims');
+    });
 }
 
 function queueAceAudioBackfill () {
   if (aceAudioBackfillInFlight) return;
   aceAudioBackfillInFlight = true;
+  armLibraryPreparation('ace');
   const mediaItems = getIndex()?.mediaItems;
   backfillAceAudio({ mediaItems, secretKey: getAvailableSecretKey() })
-    .then(() => { scheduleMeasurementMaintenance(); })
+    .then((result) => {
+      if (!result?.wrote) return;
+      holdMeasurement();
+      scheduleMeasurementMaintenance();
+    })
     .catch(() => {})
-    .finally(() => { aceAudioBackfillInFlight = false; });
+    .finally(() => {
+      aceAudioBackfillInFlight = false;
+      settleLibraryPreparation('ace');
+    });
 }
 
-let model3dJpegRepairInFlight = false;
-
-function queueModel3dJpegRepair () {
-  if (model3dJpegRepairInFlight) return;
-  model3dJpegRepairInFlight = true;
-  const generations = getIndex()?.generations;
-  repairIndexedModel3dJpegs(generations)
-    .catch(() => {})
-    .finally(() => { model3dJpegRepairInFlight = false; });
+function queueModel3dRepairOnce () {
+  if (CONFIG.model3dRepairOnce === true) return;
+  armLibraryPreparation('model3d-repair');
+  repairModel3dOnce({
+    generations: getIndex()?.generations || [],
+    readGeneration: (entry) => getGeneration(entry.date, entry.id),
+    upsert: (generation) => upsertIndexEntries({ generations: [generation] })
+  }).catch(() => {}).finally(() => {
+    settleLibraryPreparation('model3d-repair');
+  });
 }
 
 // One export walk per process. Started from the listen callback so the gallery
@@ -919,9 +1401,11 @@ let exportReconcilePromise = null;
 
 function exportReconcileReady () {
   if (!exportReconcilePromise) {
+    armLibraryPreparation('exports');
     exportReconcilePromise = reconcileExports()
       .catch(() => {})
       .finally(() => {
+        settleLibraryPreparation('exports');
         broadcastSSE({ type: 'exports', event: 'reconciled' });
       });
   }
@@ -940,6 +1424,11 @@ export async function startServer ({ port = DEFAULT_PORT, host = '127.0.0.1' } =
   ]);
   warmListOffers(getModelVersionFromCache);
   await backfillDownloadTimestamps();
+  const autoPrefs = await loadUiPrefs();
+  autoRunner.hydrate({
+    autoOn: autoPrefs.downloadAuto === true,
+    every: autoPrefs.downloadEvery
+  });
   armExplorerIdle();
 
   return new Promise((resolve, reject) => {
@@ -959,13 +1448,16 @@ export async function startServer ({ port = DEFAULT_PORT, host = '127.0.0.1' } =
       // number. The EADDRINUSE retry path above never triggers when `0` is
       // requested — the OS always returns a free port.
       resolve({ server, port: server.address().port, host });
+      if (autoPrefs.downloadAuto === true) {
+        autoRunner.noteBoot({ open: hasDownloadOpen() });
+      }
       // Content-hash join, file-dim hole-fill, and ACE ID3 / getWorkflow
       // hole-fill are identity/pixel/audio backfill, not listen preconditions.
       // Export reconcile is the same: one walk, not awaited by startServer.
       queueContentHashBackfill();
       queueAspectDimBackfill();
       queueAceAudioBackfill();
-      queueModel3dJpegRepair();
+      queueModel3dRepairOnce();
       exportReconcileReady();
       if (CONFIG.username) triggerOwnModelsIfMissing(getAvailableSecretKey());
     });
@@ -1312,7 +1804,19 @@ async function handleApi (req, res, pathname, url) {
 
   if (pathname === '/api/ui-prefs' && req.method === 'PATCH') {
     const body = await readBody(req);
-    return sendJson(res, await patchUiPrefs(body));
+    const saved = await patchUiPrefs(body);
+    if (body && Object.prototype.hasOwnProperty.call(body, 'downloadAuto')) {
+      autoRunner.noteSwitch(saved.downloadAuto === true);
+    }
+    if (body && body.downloadEvery && saved.downloadEvery === body.downloadEvery) {
+      autoRunner.notePeriod(saved.downloadEvery);
+    }
+    return sendJson(res, saved);
+  }
+
+  if (pathname === '/api/download/modes' && req.method === 'POST') {
+    const body = await readBody(req);
+    return sendJson(res, await applyDownloadModes(body));
   }
 
   // Overview activity dashboard. Computed per request over the index
@@ -1323,7 +1827,7 @@ async function handleApi (req, res, pathname, url) {
   }
 
   if (pathname === '/api/generations' && req.method === 'GET') {
-    return handlePaginated(res, url, index.generations, 'prompt');
+    return handlePaginated(res, url, index.generations, 'prompt', { listScope: 'generations' });
   }
 
   if (pathname === '/api/posts' && req.method === 'GET') {
@@ -1332,14 +1836,14 @@ async function handleApi (req, res, pathname, url) {
     // stored status is the binary draft/published) so the served status, the
     // `publication` facet, sort, and `itemDate` all see the live value.
     const postsWithStatus = index.posts.map(p => ({ ...p, status: derivePostStatus(p.publishedAt) }));
-    return handlePaginated(res, url, postsWithStatus, 'title', { publicationScope: 'post' });
+    return handlePaginated(res, url, postsWithStatus, 'title', { publicationScope: 'post', listScope: 'posts' });
   }
 
   if (pathname === '/api/comics' && req.method === 'GET') {
     // Derived comic status from chapter enums (published > scheduled > draft).
     // Re-stamped per request so the `publication` facet matches the gallery.
     const comicsWithStatus = (index.comics || []).map(c => ({ ...c, status: deriveComicStatus(c) }));
-    return handlePaginated(res, url, comicsWithStatus, 'name', { publicationScope: 'comic' });
+    return handlePaginated(res, url, comicsWithStatus, 'name', { publicationScope: 'comic', listScope: 'comics' });
   }
 
   if (pathname === '/api/model3ds' && req.method === 'GET') {
@@ -1392,7 +1896,7 @@ async function handleApi (req, res, pathname, url) {
 
   const model3dMatch = pathname.match(/^\/api\/model3ds\/(\d+)$/);
   if (model3dMatch && req.method === 'GET') {
-    return await handleModel3dDetail(res, model3dMatch[1]);
+    return await handleModel3dDetail(res, model3dMatch[1], url);
   }
 
   if (pathname === '/api/index/rebuild' && req.method === 'POST') {
@@ -1405,10 +1909,16 @@ async function handleApi (req, res, pathname, url) {
 
   if (pathname === '/api/config' && req.method === 'GET') {
     let needGenerationData = false;
+    let needImageResources = false;
+    let needGenerationResponse = false;
     try {
       needGenerationData = await postsNeedGenerationData();
+      needImageResources = await postsNeedImageResources();
+      needGenerationResponse = await postsNeedGenerationResponse();
     } catch {
       needGenerationData = false;
+      needImageResources = false;
+      needGenerationResponse = false;
     }
     return sendJson(res, {
       hasKey: !!CONFIG.secretKey,
@@ -1421,6 +1931,8 @@ async function handleApi (req, res, pathname, url) {
       generationReactions: normalizeGenerationReactions(CONFIG.generationReactions),
       generationDownload: CONFIG.generationDownload || null,
       postDownload: CONFIG.postDownload || null,
+      comicDownload: CONFIG.comicDownload || null,
+      model3dDownload: CONFIG.model3dDownload || null,
       version: CURRENT_VERSION || '',
       lastDownloadGenerations: CONFIG.lastDownloadGenerations || null,
       lastDownloadPosts: CONFIG.lastDownloadPosts || null,
@@ -1429,7 +1941,9 @@ async function handleApi (req, res, pathname, url) {
       domain: getCivitaiDomain(),
       allowAltDomain: CONFIG.allowAltDomain === true,
       availableDomains: CIVITAI_DOMAINS,
-      postsNeedGenerationData: needGenerationData
+      postsNeedGenerationData: needGenerationData,
+      postsNeedImageResources: needImageResources,
+      postsNeedGenerationResponse: needGenerationResponse
     });
   }
 
@@ -1442,15 +1956,39 @@ async function handleApi (req, res, pathname, url) {
     if (!secretKey) {
       return sendJson(res, { ok: false, error: 'API key not available' }, 400);
     }
-    // refreshOnce dedups concurrent callers and enforces once-per-process.
-    await refreshOnce({ secretKey }).catch(() => {});
-    if (CONFIG.username && !currentOwnModels().known) triggerOwnModelsIfMissing(secretKey);
-    return sendJson(res, {
+    const applied = await refreshOnce({ secretKey }).catch(() => null);
+    const blocked = applied && applied.kind === 'blocked';
+    if (!blocked && CONFIG.username && !currentOwnModels().known) triggerOwnModelsIfMissing(secretKey);
+    const body = {
       ok: true,
+      kind: applied && applied.kind,
       username: CONFIG.username || '',
       allowAltDomain: CONFIG.allowAltDomain === true,
       domain: getCivitaiDomain()
-    });
+    };
+    if (blocked) {
+      body.libraryUsername = applied.libraryUsername;
+      body.keyUsername = applied.keyUsername;
+    }
+    return sendJson(res, body);
+  }
+
+  if (pathname === '/api/key' && req.method === 'POST') {
+    return await handleKeySave(req, res);
+  }
+
+  if (pathname === '/api/key/delete' && req.method === 'POST') {
+    const { removeKey } = await import('./keyActions.mjs');
+    await removeKey();
+    return sendJson(res, { ok: true, hasKey: false });
+  }
+
+  if (pathname === '/api/key/password' && req.method === 'POST') {
+    return await handleKeyPassword(req, res);
+  }
+
+  if (pathname === '/api/key/unprotect' && req.method === 'POST') {
+    return await handleKeyUnprotect(req, res);
   }
 
   if (pathname === '/api/unlock' && req.method === 'POST') {
@@ -1470,10 +2008,23 @@ async function handleApi (req, res, pathname, url) {
       // Store in the shared in-memory memo so CLI and Explorer share the
       // unlocked state for the remainder of the process.
       setMemoizedSecretKey(decrypted);
+      await requireLibraryAccount(decrypted);
       return sendJson(res, { ok: true });
     } catch {
       return sendJson(res, { ok: false, error: 'Wrong password' }, 401);
     }
+  }
+
+  if (pathname === '/api/download/queue' && req.method === 'POST') {
+    const body = await readBody(req);
+    autoRunner.noteClick(body && body.auto === true);
+    const result = await startDownloadQueue(body);
+    if (result && result.error && result.code !== 'busy') {
+      autoRunner.noteFinish(result.fatal ? 'fatal' : 'transient');
+    } else if (result && result.ok && body && body.auto === true) {
+      patchUiPrefs({ downloadRecheck: body.recheck === true }).catch(() => {});
+    }
+    return sendJson(res, result, result.error ? 400 : 202);
   }
 
   if (pathname === '/api/download/generations' && req.method === 'POST') {
@@ -1486,23 +2037,41 @@ async function handleApi (req, res, pathname, url) {
   if (pathname === '/api/download/posts' && req.method === 'POST') {
     const body = await readBody(req);
     const mode = body.mode || 'latest';
-    const result = await startDownloadPosts(mode);
+    const result = await startDownloadPosts(mode, { checkAllMedia: body.checkAllMedia === true });
     return sendJson(res, result, result.error ? 400 : 202);
   }
 
   if (pathname === '/api/download/comics' && req.method === 'POST') {
-    const result = await startDownloadComics();
+    const body = await readBody(req);
+    const result = await startDownloadComics({
+      mode: body.mode === 'all' ? 'all' : 'latest',
+      checkAllMedia: body.mode === 'all' && body.checkAllMedia === true
+    });
     return sendJson(res, result, result.error ? 400 : 202);
   }
 
   if (pathname === '/api/download/model3ds' && req.method === 'POST') {
-    const result = await startDownloadModel3ds();
+    const body = await readBody(req);
+    const result = await startDownloadModel3ds({
+      mode: body.mode === 'all' ? 'all' : 'latest'
+    });
     return sendJson(res, result, result.error ? 400 : 202);
   }
 
   if (pathname === '/api/download/abort' && req.method === 'POST') {
-    if (downloadState.active && downloadState.abortController) {
+    if (!downloadState.active && !downloadState.queue && !downloadState.starting) {
+      autoRunner.noteStop();
+      return sendJson(res, { ok: false, message: 'No active download' });
+    }
+    downloadState.userStop = true;
+    autoRunner.noteStop();
+    if (downloadState.queue) downloadState.queue.halt = true;
+    if (downloadState.abortController) {
       downloadState.abortController.abort();
+      return sendJson(res, { ok: true });
+    }
+    if (downloadState.queue) {
+      closeQueueIdle();
       return sendJson(res, { ok: true });
     }
     return sendJson(res, { ok: false, message: 'No active download' });
@@ -1513,8 +2082,10 @@ async function handleApi (req, res, pathname, url) {
       active: downloadState.active,
       type: downloadState.type,
       mode: downloadState.mode,
-      elapsed: downloadState.startedAt ? Date.now() - downloadState.startedAt : 0,
-      progress: downloadState.progress
+      elapsed: downloadElapsed(),
+      progress: downloadState.progress,
+      queue: liveQueueSnapshot(),
+      auto: autoSnapshot()
     });
   }
 
@@ -1647,6 +2218,27 @@ async function handleApi (req, res, pathname, url) {
     return sendJson(res, rec, 201);
   }
 
+  if (pathname === '/api/exports/plan' && req.method === 'POST') {
+    const body = await readBody(req);
+    const result = await planExportDraft(body || {}, { slug: body?.slug });
+    if (result.error === 'not-found') return sendError(res, 404, 'Not found');
+    if (result.error === 'name-required') return sendJson(res, { error: 'name required' }, 400);
+    if (result.failSoft) return sendJson(res, { pending: true, reason: result.code });
+    if (result.error) return sendJson(res, { error: result.error }, 400);
+    return sendJson(res, {
+      dryRun: true,
+      mode: result.classification,
+      linkMode: result.linkMode,
+      add: result.add,
+      remove: result.remove,
+      bytesNeeded: result.bytesNeeded,
+      estimatedSeconds: result.estimatedSeconds,
+      warnings: result.warnings,
+      slug: result.slug,
+      path: result.path
+    });
+  }
+
   const exportSyncEventsMatch = pathname.match(/^\/api\/exports\/([^/]+)\/sync\/([^/]+)\/events$/);
   if (exportSyncEventsMatch && req.method === 'GET') {
     return handleExportSyncEvents(req, res, exportSyncEventsMatch[2]);
@@ -1663,6 +2255,14 @@ async function handleApi (req, res, pathname, url) {
     const body = await readBody(req);
     if (body?.dryRun) return await handleExportPlan(res, exportSyncMatch[1]);
     return await handleExportSync(res, exportSyncMatch[1]);
+  }
+
+  const exportRemovalMatch = pathname.match(/^\/api\/exports\/([^/]+)\/removal$/);
+  if (exportRemovalMatch && req.method === 'GET') {
+    const result = await countRemovalFiles(exportRemovalMatch[1]);
+    if (result.error === 'not-found') return sendError(res, 404, 'Not found');
+    if (result.error) return sendJson(res, result, 400);
+    return sendJson(res, { files: result.files });
   }
 
   const exportItemMatch = pathname.match(/^\/api\/exports\/([^/]+)$/);
@@ -1725,12 +2325,15 @@ function paramsObject (url) {
 // per member. `now` keeps scheduled vs published a read-time fact.
 function facetQueryCtx (extra = {}) {
   const index = getIndex();
+  const postsById = new Map();
+  for (const post of index.posts || []) postsById.set(String(post.id), post);
   return {
     normalizeId: normalizeMediaId,
     getModelVersion: getModelVersionFromCache,
     now: Date.now(),
     mediaById: index.mediaById || new Map(),
     getMediaItemById,
+    getPostById: (id) => postsById.get(String(id)) || null,
     ownModels: currentOwnModels(),
     ...extra
   };
@@ -1776,13 +2379,16 @@ function handlePaginated (res, url, items, searchField, extra = {}) {
   const params = paramsObject(url);
   const ctx = facetQueryCtx(extra);
   const filtered = applyFacets(items, params, searchField, ctx);
+  const listScope = extra.listScope;
   respondPaginated(res, filtered, params, {
-    mapItem: e => toTile(e, {
-      q: params.q,
-      mediaById: ctx.mediaById,
-      normalizeId: ctx.normalizeId,
-      getMediaItemById: ctx.getMediaItemById
-    }),
+    mapItem: listScope
+      ? (e => containerListTile(e, params, listScope, ctx))
+      : (e => toTile(e, {
+          q: params.q,
+          mediaById: ctx.mediaById,
+          normalizeId: ctx.normalizeId,
+          getMediaItemById: ctx.getMediaItemById
+        })),
     getModelVersion: getModelVersionFromCache
   });
 }
@@ -1803,7 +2409,21 @@ function handlePaginated (res, url, items, searchField, extra = {}) {
 // unscoped (no container filter, no facets). Unknown id is an empty page.
 function projectMediaItem (entry) {
   const mi = entry._source || entry;
-  const out = { ...mi, contentTags: (mi.contentTagIds || []).map(id => formatTagName(id)) };
+  const contentTags = [];
+  const seen = new Set();
+  const push = (name) => {
+    if (!name || isRatingTagName(name) || seen.has(name)) return;
+    seen.add(name);
+    contentTags.push(name);
+  };
+  if (Array.isArray(mi.contentTags)) {
+    for (const name of mi.contentTags) push(name);
+  }
+  for (const id of mi.contentTagIds || []) {
+    const formatted = formatTagName(id);
+    if (typeof formatted === 'string' && formatted.startsWith('tag-')) push(formatted);
+  }
+  const out = { ...mi, contentTags };
   delete out.contentTagIds;
   return out;
 }
@@ -1908,36 +2528,11 @@ function handleFacetValues (res, kind, url) {
   }
 
   if (kind === 'tags') {
-    const counts = new Map();
-    let total = 0;
-    const bump = (name) => {
-      if (!name) return;
-      const e = counts.get(name) || { value: name, label: name, count: 0 };
-      e.count++;
-      counts.set(name, e);
-    };
-    if (hasComic) {
-      for (const mi of index.mediaItems || []) {
-        if (!isProduced(mi) || !isComicBacked(mi)) continue;
-        total++;
-        if (Array.isArray(mi.contentTagIds) && mi.contentTagIds.length) {
-          for (const id of mi.contentTagIds) bump(formatTagName(id));
-        } else if (Array.isArray(mi.tags)) {
-          for (const t of mi.tags) {
-            if (typeof t === 'string' && t !== 'favorite' && !t.startsWith('feedback:')) bump(t);
-          }
-        }
-      }
-    } else {
-      for (const p of index.posts || []) {
-        if (!p.media?.length) continue;
-        total++;
-        for (const name of p.contentTags || []) bump(name);
-      }
-    }
-    const values = [...counts.values()]
-      .sort((a, b) => b.count - a.count || String(a.label).localeCompare(String(b.label)));
-    return sendJson(res, { values, total });
+    return sendJson(res, computeTagFacet(index, {
+      comicBacked: hasComic,
+      dateSource,
+      rating: url.searchParams.get('rating') || ''
+    }));
   }
 
   const all = computeFacetValues(index, getModelVersionFromCache, walkOpts);
@@ -2026,7 +2621,8 @@ function stampMemberDisplay (entry) {
     ...entry,
     media: entry.media.map(member => ({
       ...member,
-      ...stampOwnResources(memberDisplaySlots(member, getMediaItemById, getModelVersionFromCache))
+      ...stampOwnResources(memberDisplaySlots(member, getMediaItemById, getModelVersionFromCache)),
+      reactions: ownerReactionsForMember(member, { getMediaItemById })
     }))
   };
 }
@@ -2053,10 +2649,10 @@ async function handleGenerationDetail (res, id, url) {
     return sendError(res, 404, 'Generation not found');
   }
 
-  const withOrigin = attachContainerOrigin(item, url, {
+  const withOrigin = stampMemberDisplay(attachContainerOrigin(item, url, {
     defaultScope: 'generations',
     id
-  });
+  }));
   const indexEntry = stampOwnResources(hydrateItemForDisplay(withOrigin, getModelVersionFromCache));
   const resolvedInputs = index.generationInputs?.get(item.id) || [];
   const detailIndex = {
@@ -2240,7 +2836,7 @@ function model3dJsonPath (item) {
   return '';
 }
 
-async function handleModel3dDetail (res, idStr) {
+async function handleModel3dDetail (res, idStr, url) {
   const id = parseInt(idStr, 10);
   const index = getIndex();
   const item = (index.model3ds || []).find(row => row.id === id);
@@ -2256,7 +2852,14 @@ async function handleModel3dDetail (res, idStr) {
       raw = null;
     }
   }
-  sendJson(res, { index: item, raw });
+  sendJson(res, {
+    index: {
+      ...item,
+      stillReactions: ownerReactionsForStill(item, { getMediaItemById }),
+      origin: model3dNeighbourOrigin(index.model3ds || [], paramsObject(url), id)
+    },
+    raw
+  });
 }
 
 // A `/media/generations/…` path, joined the same way serveMedia joins
@@ -2420,35 +3023,47 @@ async function handleMediaDetail (res, id, url) {
     }
   }
   sendJson(res, {
-    index: detailIndex,
+    index: projectMediaItem(detailIndex),
     raw
   });
 }
 
 // --- Media ---
 
-async function serveMedia (req, res, pathname) {
-  let filepath;
+function mediaRelative (pathname, prefix, { single = false } = {}) {
+  if (!pathname.startsWith(prefix)) return null;
+  const rel = pathname.slice(prefix.length);
+  if (!rel) return null;
+  const parts = rel.split(/[/\\]/);
+  if (parts.some(part => part === '' || part === '.' || part === '..')) return null;
+  if (single && parts.length !== 1) return null;
+  return rel;
+}
 
-  if (pathname.startsWith('/media/generations/')) {
-    const rel = pathname.slice('/media/generations/'.length);
-    filepath = path.join(generationsMediaDir(), rel);
-  } else if (pathname.startsWith('/media/posts/')) {
-    const rel = pathname.slice('/media/posts/'.length);
-    filepath = path.join(postsMediaDir(), rel);
-  } else if (pathname.startsWith('/media/inputs/')) {
-    const rel = pathname.slice('/media/inputs/'.length);
-    filepath = path.join(inputsMediaDir(), rel);
-  } else if (pathname.startsWith('/media/comics/')) {
-    const rel = pathname.slice('/media/comics/'.length);
-    filepath = path.join(comicsMediaDir(), rel);
-  } else if (pathname.startsWith('/media/model3ds/')) {
-    const rel = pathname.slice('/media/model3ds/'.length);
-    filepath = path.join(model3dsMediaDir(), rel);
-  } else {
-    return sendError(res, 404, 'Not found');
+// Filepath for a media URL, or null when the URL is not one file inside a
+// media root. Inputs are a single segment. Every prefix rejects `.` and `..`.
+export function resolveMediaFile (pathname) {
+  const routes = [
+    ['/media/generations/', generationsMediaDir(), false],
+    ['/media/posts/', postsMediaDir(), false],
+    ['/media/inputs/', inputsMediaDir(), true],
+    ['/media/comics/', comicsMediaDir(), false],
+    ['/media/model3ds/', model3dsMediaDir(), false]
+  ];
+  for (const [prefix, root, single] of routes) {
+    const rel = mediaRelative(pathname, prefix, { single });
+    if (rel == null) continue;
+    if (!root) return null;
+    const full = path.join(root, rel);
+    if (!isInsideRoot(root, full)) return null;
+    return full;
   }
+  return null;
+}
 
+async function serveMedia (req, res, pathname) {
+  const filepath = resolveMediaFile(pathname);
+  if (!filepath) return sendError(res, 404, 'Not found');
   return serveFile(res, filepath, { acceptRanges: true, range: req.headers.range });
 }
 
@@ -2491,46 +3106,79 @@ async function serveStatic (res, pathname) {
   return serveFile(res, resolved);
 }
 
+// A byte stream is not a page gesture. The promise settles when the status
+// is sent and the file is piped, not when the bytes finish. The browser
+// closing the response destroys the file stream, so a dropped video does
+// not stay open at byte 0 and does not keep the idle gate held.
+function releaseStreamOnClose (res, stream, done) {
+  res.on('close', () => {
+    if (!stream.destroyed) stream.destroy();
+    done();
+  });
+}
+
 function serveFile (res, filepath, { acceptRanges = false, range } = {}) {
   const ext = path.extname(filepath).toLowerCase();
   const mime = MIME_TYPES[ext] || 'application/octet-stream';
 
-  if (!acceptRanges) {
-    return new Promise((resolve) => {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    const fail = (err) => {
+      if (!res.headersSent) {
+        if (err?.code === 'ENOENT') sendError(res, 404, 'Not found');
+        else sendError(res, 500, err?.message || 'Read failed');
+      } else if (!res.destroyed) {
+        res.destroy();
+      }
+      done();
+    };
+
+    const attach = (stream) => {
+      stream.on('error', fail);
+      releaseStreamOnClose(res, stream, done);
+      if (res.closed || res.destroyed) {
+        stream.destroy();
+        done();
+        return;
+      }
+      stream.pipe(res);
+      done();
+    };
+
+    if (!acceptRanges) {
       const stream = fs.createReadStream(filepath);
-
-      stream.on('error', (err) => {
-        if (err.code === 'ENOENT') {
-          sendError(res, 404, 'Not found');
-        } else {
-          sendError(res, 500, err.message);
-        }
-        resolve();
-      });
-
+      stream.on('error', fail);
+      releaseStreamOnClose(res, stream, done);
       stream.on('open', () => {
+        if (res.headersSent || res.closed || res.destroyed) {
+          if (!stream.destroyed) stream.destroy();
+          done();
+          return;
+        }
         res.writeHead(200, {
           'Content-Type': mime,
           'Cache-Control': 'no-cache'
         });
         stream.pipe(res);
+        done();
       });
+      return;
+    }
 
-      stream.on('end', resolve);
-    });
-  }
-
-  return new Promise((resolve) => {
     fs.stat(filepath, (err, st) => {
       if (err) {
-        if (err.code === 'ENOENT') sendError(res, 404, 'Not found');
-        else sendError(res, 500, err.message);
-        resolve();
+        fail(err);
         return;
       }
       if (!st.isFile()) {
         sendError(res, 404, 'Not found');
-        resolve();
+        done();
         return;
       }
 
@@ -2543,7 +3191,7 @@ function serveFile (res, filepath, { acceptRanges = false, range } = {}) {
           'Content-Range': `bytes */${total}`
         });
         res.end();
-        resolve();
+        done();
         return;
       }
 
@@ -2565,28 +3213,93 @@ function serveFile (res, filepath, { acceptRanges = false, range } = {}) {
       if (total === 0 || (parsed && headers['Content-Length'] === 0)) {
         res.writeHead(parsed ? 206 : 200, headers);
         res.end();
-        resolve();
+        done();
         return;
       }
 
       const stream = fs.createReadStream(filepath, streamOpts);
-      stream.on('error', (streamErr) => {
-        if (!res.headersSent) {
-          if (streamErr.code === 'ENOENT') sendError(res, 404, 'Not found');
-          else sendError(res, 500, streamErr.message);
-        } else {
-          res.destroy();
-        }
-        resolve();
-      });
+      if (res.destroyed) {
+        stream.destroy();
+        done();
+        return;
+      }
       res.writeHead(parsed ? 206 : 200, headers);
-      stream.pipe(res);
-      stream.on('end', resolve);
+      attach(stream);
     });
   });
 }
 
 // --- Config Update ---
+
+function passwordsDisagree (body) {
+  const password = body && body.password;
+  const confirm = body && body.confirmPassword;
+  const left = typeof password === 'string' ? password : '';
+  const right = typeof confirm === 'string' ? confirm : '';
+  if (!left && !right) return null;
+  if (!left || !right || left !== right) return 'Passwords do not match.';
+  return null;
+}
+
+async function handleKeySave (req, res) {
+  const body = await readBody(req);
+  const mismatch = passwordsDisagree(body);
+  if (mismatch) return sendJson(res, { ok: false, message: mismatch }, 400);
+  const password = body && body.password ? body.password : null;
+  const { saveTestedKey } = await import('./keyActions.mjs');
+  const result = await saveTestedKey({ key: body && body.key, password });
+  if (!result.ok) return sendJson(res, { ok: false, message: result.message }, 400);
+  const payload = {
+    ok: true,
+    kind: result.kind,
+    hasKey: true,
+    keyEncrypted: CONFIG.keyEncrypt === true,
+    keyUnlocked: true,
+    username: CONFIG.username || ''
+  };
+  if (result.kind === 'blocked') {
+    payload.libraryUsername = result.libraryUsername;
+    payload.keyUsername = result.keyUsername;
+  }
+  return sendJson(res, payload);
+}
+
+async function handleKeyPassword (req, res) {
+  const body = await readBody(req);
+  const mismatch = passwordsDisagree(body);
+  if (mismatch) return sendJson(res, { ok: false, message: mismatch }, 400);
+  const secretKey = getAvailableSecretKey();
+  if (!secretKey) return sendJson(res, { ok: false, message: 'Unlock the API key to download.' }, 400);
+  const { encryptAES } = await import('./crypto.mjs');
+  let stored;
+  try {
+    stored = encryptAES(secretKey, body.password);
+  } catch {
+    return sendJson(res, { ok: false, message: 'Could not encrypt key' }, 400);
+  }
+  if (!stored) return sendJson(res, { ok: false, message: 'Could not encrypt key' }, 400);
+  await setConfig({ secretKey: stored, keyEncrypt: true });
+  setMemoizedSecretKey(secretKey);
+  return sendJson(res, { ok: true, keyEncrypted: true, keyUnlocked: true });
+}
+
+async function handleKeyUnprotect (req, res) {
+  const body = await readBody(req);
+  const password = body && body.password;
+  if (!password || !CONFIG.keyEncrypt) {
+    return sendJson(res, { ok: false, message: 'Password required' }, 400);
+  }
+  let decrypted;
+  try {
+    decrypted = decryptAES(CONFIG.secretKey, password);
+  } catch {
+    decrypted = null;
+  }
+  if (!decrypted) return sendJson(res, { ok: false, message: 'Wrong password' }, 401);
+  await setConfig({ secretKey: decrypted, keyEncrypt: false });
+  setMemoizedSecretKey(decrypted);
+  return sendJson(res, { ok: true, keyEncrypted: false, keyUnlocked: true });
+}
 
 const CONFIG_WHITELIST = ['downloadMedia', 'generationReactions', 'dataPath', 'mediaPath', 'domain'];
 
@@ -2672,13 +3385,38 @@ async function resolveGenerationForMedia (id) {
   return { kind: 'input', mediaItem: mi };
 }
 
-// Apply one media-item's edit against its parent generation, writing or
-// clearing the override per the converge-on-server rule. Does NOT refresh the
-// index or notify Exports — the caller batches those so a multi-item edit
-// collapses to one index refresh per affected generation. Returns the
-// effective reaction tags + whether an override now exists.
-async function applyReactionEdit (generation, id, edit) {
-  const serverReactions = readServerReactions(generation, id);
+// Server baseline for one media item: the union of every saved occurrence's
+// tag block. A job with no block contributes nothing. Post-only and
+// input-only items have no generation file, so the baseline is empty.
+// Index entry tags are not this baseline — an upsert may already have
+// baked an override into them.
+async function serverUnionForMedia (mediaItem, id) {
+  const occs = Array.isArray(mediaItem?.containers?.generations)
+    ? mediaItem.containers.generations
+    : [];
+  if (!occs.length) return { favorite: false, feedback: null };
+  const rows = [];
+  for (const occ of occs) {
+    if (!occ || occ.id == null || occ.batchDate == null) continue;
+    const gen = await getGeneration(occ.batchDate, occ.id);
+    const server = readServerReactions(gen, id);
+    rows.push({
+      sortKey: occ.sortKey || '',
+      favorite: server.favorite,
+      feedback: server.feedback
+    });
+  }
+  return mergeOccurrenceReactions(rows);
+}
+
+// Apply one media-item's edit, writing or clearing the override per the
+// converge-on-server rule. The server state is the occurrence union, not
+// the primary job alone. Does NOT refresh the index or notify Exports —
+// the caller batches those so a multi-item edit collapses to one index
+// refresh per affected generation. Returns the effective reaction tags +
+// whether an override now exists.
+async function applyReactionEdit (mediaItem, id, edit) {
+  const serverReactions = await serverUnionForMedia(mediaItem, id);
   const currentLocal = getMediaOverride(id) || serverReactions;
   const nextLocal = { ...currentLocal, ...edit };
 
@@ -2713,8 +3451,7 @@ async function handleReactionPatch (req, res, rawId) {
   const body = await readBody(req);
   const edit = pickReactionEdit(body);
   const canonicalId = resolved.mediaItem.id;
-  const generation = resolved.kind === 'generation' ? resolved.generation : null;
-  const { tags, hasOverride } = await applyReactionEdit(generation, canonicalId, edit);
+  const { tags, hasOverride } = await applyReactionEdit(resolved.mediaItem, canonicalId, edit);
 
   if (resolved.kind === 'generation') {
     await upsertIndexEntries({ generations: [resolved.generation] });
@@ -2788,7 +3525,7 @@ async function handleReactionsBatch (req, res) {
         resultById.set(r.lookupId, { mediaItemId: r.id, tags: [], hasOverride: false });
         continue;
       }
-      const { tags, hasOverride } = await applyReactionEdit(generation, r.id, r.edit);
+      const { tags, hasOverride } = await applyReactionEdit(getMediaItemById(r.id), r.id, r.edit);
       affectedIds.push(r.id);
       if (!touchedGenKeys.has(key)) {
         touchedGenKeys.add(key);
@@ -2799,7 +3536,7 @@ async function handleReactionsBatch (req, res) {
     }
 
     if (r.postRef) {
-      const { tags, hasOverride } = await applyReactionEdit(null, r.id, r.edit);
+      const { tags, hasOverride } = await applyReactionEdit(getMediaItemById(r.id), r.id, r.edit);
       affectedIds.push(r.id);
       const rawPost = postCache.get(r.postRef.id);
       if (rawPost && !touchedPostIds.has(r.postRef.id)) {
@@ -2810,7 +3547,7 @@ async function handleReactionsBatch (req, res) {
       continue;
     }
 
-    const { tags, hasOverride } = await applyReactionEdit(null, r.id, r.edit);
+    const { tags, hasOverride } = await applyReactionEdit(getMediaItemById(r.id), r.id, r.edit);
     affectedIds.push(r.id);
     anyInputOnly = true;
     resultById.set(r.lookupId, { mediaItemId: r.id, tags, hasOverride });
@@ -2912,7 +3649,7 @@ function handleSSE (req, res) {
     'Access-Control-Allow-Origin': '*'
   });
 
-  res.write(`data: ${JSON.stringify({ type: 'connected', active: downloadState.active, downloadType: downloadState.type })}\n\n`);
+  res.write(`data: ${JSON.stringify({ type: 'connected', active: downloadState.active, downloadType: downloadState.type, preparation: libraryPreparationActive(), phase: libraryPreparationPhase(), queue: liveQueueSnapshot(), auto: autoSnapshot() })}\n\n`);
   sseClients.add(res);
 
   req.on('close', () => { sseClients.delete(res); });

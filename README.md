@@ -4,9 +4,10 @@
 
 ---
 
-* Download Civitai generations (image, video, audio, 3D)
-* Download posts and comics
+* Download generations, posts, comics, and 3D
+* Auto download, on a delay from 5 minutes to 1 day
 * Explore your library in an offline website
+* Filter by rating, post tags, and content tags
 * Media and data saved to the file system, sorted by date
 * Export media for re-use
 * Auto-updates for new versions
@@ -58,7 +59,9 @@ npm run setup
 
 
 *Create a Civitai API key* in your account:  
-https://civitai.com/user/account
+https://civitai.com/user/account/security
+
+Save it in the CLI, or on the Explorer's Download page.
 
 
 ## Open the civitai-sync CLI
@@ -113,12 +116,12 @@ civitai-sync bob
 This is an alias for:
 
 ```
-npm run cli bob
+npm run cli -- bob
 ```
 
-Or give a full path to anywhere on the file system, and the config file will be loaded from or created there.
+A new name starts with its own folders, `data-bob` and `media-bob`. The default config stays on `data` and `media`. An existing named config keeps its folders.
 
-_Set each account's download *folder* to be different_, unless you want the data and media for the accounts to be merged.
+Or give a full path to anywhere on the file system, and the config file will be loaded from or created there.
 
 
 **Network access**

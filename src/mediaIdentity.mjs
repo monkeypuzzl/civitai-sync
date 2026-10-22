@@ -113,6 +113,21 @@ export function contentKey (hex) {
   return 'content:' + String(hex).toLowerCase();
 }
 
+// Stable hash of every content: key currently stored. A posted-file or
+// input sweep that already ran against this set has nothing new to match.
+export function contentKeyEpoch () {
+  const keys = [];
+  const canonical = _store.canonical || {};
+  for (const entry of Object.values(canonical)) {
+    if (!Array.isArray(entry?.keys)) continue;
+    for (const key of entry.keys) {
+      if (typeof key === 'string' && key.startsWith('content:')) keys.push(key);
+    }
+  }
+  keys.sort();
+  return createHash('sha256').update(keys.join('\n')).digest('hex');
+}
+
 export function imageKey (id) {
   return 'image:' + normalizeMediaId(id);
 }

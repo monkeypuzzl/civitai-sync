@@ -186,6 +186,42 @@ export function readServerReactions (generation, normalizedId) {
   return { favorite: false, feedback: null };
 }
 
+function occurrenceMarks (occ) {
+  const sortKey = typeof occ?.sortKey === 'string' ? occ.sortKey : '';
+  if (Array.isArray(occ?.tags)) {
+    const tags = occ.tags;
+    let feedback = null;
+    if (tags.includes('feedback:disliked')) feedback = 'disliked';
+    else if (tags.includes('feedback:liked')) feedback = 'liked';
+    return { sortKey, favorite: tags.includes('favorite'), feedback };
+  }
+  const feedback = occ?.feedback === 'liked' || occ?.feedback === 'disliked' ? occ.feedback : null;
+  return { sortKey, favorite: occ?.favorite === true, feedback };
+}
+
+// Server reaction record across every saved occurrence of one media item.
+// Favorite is on if any row has it. Feedback is the newest row that carries
+// liked or disliked. A row with no marks contributes nothing. An empty
+// sortKey does not beat a dated row. Does not apply a local override.
+// Each row is `{ sortKey, tags }` or `{ sortKey, favorite, feedback }`.
+export function mergeOccurrenceReactions (occurrences) {
+  const rows = (Array.isArray(occurrences) ? occurrences : []).map(occurrenceMarks);
+  rows.sort((a, b) => {
+    const aDated = a.sortKey !== '';
+    const bDated = b.sortKey !== '';
+    if (aDated !== bDated) return aDated ? -1 : 1;
+    if (a.sortKey === b.sortKey) return 0;
+    return a.sortKey < b.sortKey ? 1 : -1;
+  });
+  let favorite = false;
+  let feedback = null;
+  for (const row of rows) {
+    if (row.favorite) favorite = true;
+    if (feedback == null && row.feedback) feedback = row.feedback;
+  }
+  return { favorite, feedback };
+}
+
 // Render canonical reactions as the workflow-tag array the index entry and
 // the gallery indicators consume (e.g. ["favorite", "feedback:liked"]).
 // Sorted to match getGeneratedMediaInfo's sorted tag output.

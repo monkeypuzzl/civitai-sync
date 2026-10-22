@@ -7,6 +7,7 @@ import { wait } from './utils.mjs';
 import getHeaders from './headers.mjs';
 import { apiBase } from './civitaiDomain.mjs';
 import { WIRE, modelFlagOf } from './civitaiWire.mjs';
+import { scheduledText, scheduledStream } from './requestScheduler.mjs';
 
 // Endpoints are computed lazily from the current Civitai domain. Every call
 // site reads the base at invocation time so a user-triggered domain change
@@ -18,6 +19,7 @@ function endpoints () {
     API_GET_WORKFLOW: `${base}/trpc/orchestrator.getWorkflow`,
     API_POSTS: `${base}/trpc/post.getInfinite`,
     API_POST_GET: `${base}/trpc/post.get`,
+    API_POST_EDIT: `${base}/trpc/post.getEdit`,
     API_COMICS_MY_PROJECTS: `${base}/trpc/comics.getMyProjects`,
     API_COMICS_PROJECT_SHELL: `${base}/trpc/comics.getProjectShell`,
     API_COMICS_CHAPTER: `${base}/trpc/comics.getChapter`,
@@ -26,6 +28,7 @@ function endpoints () {
     API_MODEL3D_BY_POST: `${base}/trpc/model3d.getByPostId`,
     API_MODEL3D_FILES: `${base}/trpc/model3d.getFiles`,
     API_IMAGE_GET_GENERATION_DATA: `${base}/trpc/image.getGenerationData`,
+    API_IMAGE_INFINITE: `${base}/trpc/image.getInfinite`,
     API_ME: `${base}/v1/me`,
     API_IMAGES: `${base}/v1/images`,
     API_MODELS: `${base}/v1/models`,
@@ -42,16 +45,18 @@ function endpoints () {
 const AUTH_GET_USER_URL = 'https://civitai.com/api/trpc/auth.getUser';
 const AUTH_GET_USER_DOMAIN = 'civitai.com';
 
-const DATA_RATE_LIMIT = 100;
-const IMAGE_RATE_LIMIT = 100;
 const MAX_ATTEMPTS = 10;
+const GENERATION_TAKE = 100;
+let generationTake = GENERATION_TAKE;
 
 // Known-good fallback used if the resolution API call fails
 const FALLBACK_IMAGE_CDN_BASE = 'https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA';
 let _imageCdnBase = null;
 
 function getGenerationsUrl (cursor, tags = []) {
-  const inputParams = { json: { authed: true, tags: ["gen", ...tags], cursor } };
+  const json = { authed: true, tags: ["gen", ...tags], cursor };
+  if (generationTake) json.take = generationTake;
+  const inputParams = { json };
   const inputQuery = encodeURIComponent(JSON.stringify(inputParams));
   const url = `${endpoints().API_QUERY_GENERATED_IMAGES}?input=${inputQuery}`;
 
@@ -413,16 +418,19 @@ async function paginateOnError (err, options, retry) {
   return { error: normalized, aborted: false, complete: false };
 }
 
-async function fetchTrpcJson (url, { secretKey, signal, path }) {
+async function fetchTrpcJson (url, { secretKey, signal, path, heavy = false }) {
   const headers = getHeaders();
 
   try {
-    const response = await fetch(url, {
+    const response = await scheduledText(url, {
       headers: { ...headers.sharedHeaders, ...headers.jsonHeaders, Authorization: `Bearer ${secretKey}` },
       signal
-    });
-    return await parseTrpcFetchResponse(response, { url });
+    }, { heavy, signal });
+    const parsed = await parseTrpcFetchResponse(response, { url });
+    if (parsed?.error && response.retrySpent) parsed.error.retryable = false;
+    return parsed;
   } catch (error) {
+    if (error?.name === 'AbortError') throw error;
     return {
       error: normalizeCivitaiError({
         error: {
@@ -444,16 +452,21 @@ export async function getGenerations ({cursor, tags, secretKey, signal }) {
  * `queryGeneratedImages`, this is not run through `formatStep` /
  * `normalizeStepOutput`, so ACE simple-mode `chatCompletion.output.parsed`
  * is still present while the job is within the ~30-day retention window.
- * 404 after expiry is terminal — callers stamp a sidecar miss.
+ * 404 after expiry is terminal — callers record it on the fetch-miss store.
  * Input `{ workflowId: string }`. `TokenScope.AIServicesRead`.
  */
-export async function getWorkflow ({ workflowId, secretKey, signal } = {}) {
+export function workflowFetchUrl (workflowId) {
   const id = workflowId == null ? '' : String(workflowId);
-  if (!id) {
+  if (!id) return '';
+  const inputQuery = encodeURIComponent(JSON.stringify({ json: { workflowId: id } }));
+  return `${endpoints().API_GET_WORKFLOW}?input=${inputQuery}`;
+}
+
+export async function getWorkflow ({ workflowId, secretKey, signal } = {}) {
+  const url = workflowFetchUrl(workflowId);
+  if (!url) {
     return { error: { message: 'Missing workflowId' } };
   }
-  const inputQuery = encodeURIComponent(JSON.stringify({ json: { workflowId: id } }));
-  const url = `${endpoints().API_GET_WORKFLOW}?input=${inputQuery}`;
   const body = await fetchTrpcJson(url, { secretKey, signal, path: 'orchestrator.getWorkflow' });
   if (body?.error) return body;
   const json = unwrapTrpcData(body);
@@ -476,6 +489,10 @@ export async function getAllRequests (options, iterator) {
 
   if (data?.error) {
     const err = normalizeCivitaiError(data.error, { url });
+    if (err.httpStatus === 400 && generationTake && !options.takeFallback) {
+      generationTake = 0;
+      return getAllRequests({ ...options, takeFallback: true }, iterator);
+    }
     return paginateOnError(err, options, () => getAllRequests({ ...options, attempts: attempts + 1 }, iterator));
   }
 
@@ -499,7 +516,6 @@ export async function getAllRequests (options, iterator) {
   }
 
   if (nextCursor) {
-    await wait(DATA_RATE_LIMIT);
     return await getAllRequests({ ...options, cursor: nextCursor, previousCursor: cursor }, iterator);
   }
 
@@ -512,7 +528,7 @@ export async function getMe ({ secretKey }) {
   const headers = getHeaders();
 
   try {
-    const response = await fetch(API_ME, {
+    const response = await scheduledText(API_ME, {
       headers: { ...headers.sharedHeaders, ...headers.jsonHeaders, Authorization: `Bearer ${secretKey}` }
     });
     return await response.json();
@@ -539,7 +555,7 @@ export async function getCivitaiUser ({ secretKey }) {
   const headers = getHeaders({ forceDomain: AUTH_GET_USER_DOMAIN });
 
   try {
-    const response = await fetch(AUTH_GET_USER_URL, {
+    const response = await scheduledText(AUTH_GET_USER_URL, {
       headers: { ...headers.sharedHeaders, ...headers.jsonHeaders, Authorization: `Bearer ${secretKey}` }
     });
 
@@ -565,9 +581,9 @@ async function getImages ({ secretKey, limit = 1 }) {
   const headers = getHeaders();
 
   try {
-    const response = await fetch(url, {
+    const response = await scheduledText(url, {
       headers: { ...headers.sharedHeaders, ...headers.jsonHeaders, Authorization: `Bearer ${secretKey}` }
-    });
+    }, { heavy: true });
     return await response.json();
   }
 
@@ -599,7 +615,7 @@ export async function getCivitaiImageBase ({ secretKey }) {
 }
 
 function getPostsUrl (username, cursor, { draftOnly = false, scheduled = false } = {}) {
-  const json = { username, limit: 100, sort: 'Newest', period: 'AllTime', cursor };
+  const json = { username, limit: 200, sort: 'Newest', period: 'AllTime', cursor };
 
   // Phase 5c: `draftOnly` makes post.getInfinite return ONLY the user's drafts
   // (`publishedAt: null`); the service then date-ranges on `createdAt` rather
@@ -625,21 +641,59 @@ export async function getPosts ({ username, cursor, secretKey, signal, draftOnly
   return fetchTrpcJson(url, { secretKey, signal, path: 'post.getInfinite' });
 }
 
+// Newest published images for this account. sortAt puts a new image row first
+// even when its post is old. The search index can lag a new publish; the post
+// listing is the timely source. This feed is the backstop for an older post.
+export async function getImageFeed ({ username, cursor, secretKey, signal, limit = 200 } = {}) {
+  const json = { username, limit, sort: 'Newest', period: 'AllTime' };
+  if (cursor != null) json.cursor = cursor;
+  const inputQuery = encodeURIComponent(JSON.stringify({ json }));
+  const url = `${endpoints().API_IMAGE_INFINITE}?input=${inputQuery}`;
+  return fetchTrpcJson(url, { secretKey, signal, path: 'image.getInfinite', heavy: true });
+}
+
 export async function getPost ({ id, secretKey, signal }) {
   const inputQuery = encodeURIComponent(JSON.stringify({ json: { id } }));
   const url = `${endpoints().API_POST_GET}?input=${inputQuery}`;
   const headers = getHeaders();
 
   try {
-    const response = await fetch(url, {
+    const response = await scheduledText(url, {
       headers: { ...headers.sharedHeaders, ...headers.jsonHeaders, Authorization: `Bearer ${secretKey}` },
       signal
-    });
+    }, { signal });
     return await response.json();
   }
 
   catch (error) {
     return errorResponse({ httpStatus: 500, path: 'post.get', message: error.message, url });
+  }
+}
+
+// Owner editor read. Uncapped images, description, and post tags.
+// A non-200 is an error object so the caller can continue the walk.
+export async function getPostEdit ({ id, secretKey, signal }) {
+  const inputQuery = encodeURIComponent(JSON.stringify({ json: { id } }));
+  const url = `${endpoints().API_POST_EDIT}?input=${inputQuery}`;
+  const headers = getHeaders();
+
+  try {
+    const response = await scheduledText(url, {
+      headers: { ...headers.sharedHeaders, ...headers.jsonHeaders, Authorization: `Bearer ${secretKey}` },
+      signal
+    }, { signal });
+
+    if (!response.ok) {
+      return { error: { httpStatus: response.status, message: `HTTP ${response.status}` } };
+    }
+
+    const body = await response.json();
+    if (body?.error) return { error: body.error };
+    return body;
+  }
+
+  catch (error) {
+    return errorResponse({ httpStatus: 500, path: 'post.getEdit', message: error.message, url });
   }
 }
 
@@ -668,10 +722,11 @@ export async function getProjectShell ({ id, secretKey, signal } = {}) {
   return { error: { message: 'Unexpected comics.getProjectShell shape', url } };
 }
 
-export function model3dInfiniteInput (username, cursor, { status, includeDrafts } = {}) {
+export function model3dInfiniteInput (username, cursor, { status, includeDrafts, sort } = {}) {
   const json = { username, limit: 100, cursor };
   if (status) json.status = status;
   if (includeDrafts === true) json.includeDrafts = true;
+  if (sort) json.sort = sort;
   return json;
 }
 
@@ -687,8 +742,8 @@ export function getModel3dsUrl (username, cursor, pass = {}) {
   );
 }
 
-export async function getModel3ds ({ username, cursor, secretKey, signal, status, includeDrafts } = {}) {
-  const url = getModel3dsUrl(username, cursor, { status, includeDrafts });
+export async function getModel3ds ({ username, cursor, secretKey, signal, status, includeDrafts, sort } = {}) {
+  const url = getModel3dsUrl(username, cursor, { status, includeDrafts, sort });
   return fetchTrpcJson(url, { secretKey, signal, path: 'model3d.getInfinite' });
 }
 
@@ -788,14 +843,11 @@ export async function getAllPostRequests (options, iterator) {
   }
 
   if (nextCursor) {
-    await wait(DATA_RATE_LIMIT);
     return await getAllPostRequests({ ...options, cursor: nextCursor, previousCursor: cursor }, iterator);
   }
 
   return false;
 }
-
-let previousFetch;
 
 // Integer Content-Length when the body is not content-encoded. A gzip
 // Content-Length is the compressed size, so the caller must not compare it
@@ -813,43 +865,26 @@ function declaredByteLength (response) {
 
 // Headers: Requirement is
 // "Referer": "https://<civitai-host>" or path of domain.
-// Returns { ok, status, body, contentLength }. Throws on transport failure
-// (the media helper retries those). Non-200 is ok:false — a removed blob,
-// not a short body. No total deadline: an idle watch in mediaDownload.mjs
-// aborts a stall, and a slow body that keeps arriving is left alone.
+// Returns { ok, status, body, contentLength }. Throws on abort.
+// A non-200 is ok:false — a removed blob, not a short body. The scheduler
+// already retried rate limits, busy sheds, and transport failures.
+// No total deadline: an idle watch in mediaDownload.mjs aborts a stall.
 export async function fetchCivitaiImage (url, { signal } = {}) {
-  let now = Date.now();
-
-  if (previousFetch && (now - previousFetch) < IMAGE_RATE_LIMIT) {
-    await wait(IMAGE_RATE_LIMIT - (now - previousFetch));
-    now = Date.now();
-  }
-
   if (signal?.aborted) {
     throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
   }
 
-  previousFetch = Date.now();
-
   const headers = getHeaders();
-  const response = await fetch(url, {
+  const response = await scheduledStream(url, {
     headers: { ...headers.sharedHeaders, ...headers.imageHeaders },
     signal
-  });
+  }, { lane: 'media', signal });
 
-  const contentLength = declaredByteLength(response);
-
-  if (response.status !== 200) {
-    if (response.body && typeof response.body.cancel === 'function') {
-      try {
-        await response.body.cancel();
-      } catch (ignoreErr) {
-        // Body already closed.
-      }
-    }
+  if (!response.ok) {
     return { ok: false, status: response.status, body: null, contentLength: null };
   }
 
+  const contentLength = declaredByteLength(response);
   return { ok: true, status: 200, body: response.body, contentLength };
 }
 
@@ -857,7 +892,7 @@ export async function fetchModel (modelId) {
   const url = `${endpoints().API_MODELS}/${modelId}`;
 
   try {
-    const response = await fetch(url);
+    const response = await scheduledText(url);
     const data = await response.json();
     return data;
   }
@@ -934,7 +969,7 @@ export async function getModelVersionTrpc ({ id, secretKey, signal } = {}) {
   if (secretKey) requestHeaders.Authorization = `Bearer ${secretKey}`;
 
   try {
-    const response = await fetch(url, { headers: requestHeaders, signal });
+    const response = await scheduledText(url, { headers: requestHeaders, signal }, { signal });
 
     if (response.status === 404) {
       return { notFound: true, status: 404, url };
@@ -1026,7 +1061,7 @@ export async function getModelVersion ({ id, secretKey, signal } = {}) {
   if (secretKey) requestHeaders.Authorization = `Bearer ${secretKey}`;
 
   try {
-    const response = await fetch(url, { headers: requestHeaders, signal });
+    const response = await scheduledText(url, { headers: requestHeaders, signal }, { signal });
 
     if (response.status === 404) {
       return { notFound: true, status: 404, url };
@@ -1085,7 +1120,7 @@ export async function getTag ({ id, secretKey, signal } = {}) {
   if (secretKey) requestHeaders.Authorization = `Bearer ${secretKey}`;
 
   try {
-    const response = await fetch(url, { headers: requestHeaders, signal });
+    const response = await scheduledText(url, { headers: requestHeaders, signal }, { signal });
 
     if (response.status === 404) {
       return { notFound: true, status: 404, url };
@@ -1132,7 +1167,7 @@ export async function fetchFile (url, filepath, { secretKey }) {
   }
 
   try {
-    const response = await fetch(url, { headers });
+    const response = await scheduledStream(url, { headers }, { lane: 'media' });
 
     if (response.status !== 200) {
       console.error('Unexpected software fetch response', response);
@@ -1142,6 +1177,9 @@ export async function fetchFile (url, filepath, { secretKey }) {
     // e.g. error page response
     const contentType = response.headers.get('content-type');
     if (contentType && contentType.startsWith('text/plain')) {
+      if (response.body && typeof response.body.cancel === 'function') {
+        try { await response.body.cancel(); } catch { /* already closed */ }
+      }
       return false;
     }
 
@@ -1176,7 +1214,7 @@ export async function getModelsByUsernamePage ({ username, cursor, secretKey, si
   const requestHeaders = { ...headers.sharedHeaders, ...headers.jsonHeaders };
   if (secretKey) requestHeaders.Authorization = `Bearer ${secretKey}`;
 
-  const response = await fetch(url, { headers: requestHeaders, signal });
+  const response = await scheduledText(url, { headers: requestHeaders, signal }, { signal });
   if (!response.ok) {
     const err = new Error(`HTTP ${response.status}`);
     err.httpStatus = response.status;

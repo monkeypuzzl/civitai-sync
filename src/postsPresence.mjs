@@ -30,3 +30,18 @@ export async function postsNeedGenerationData () {
   if (CONFIG.postsGenerationDataFilled === true) return false;
   return hasSavedPosts();
 }
+
+// Settings / CLI: show the resource All prompt when this account has posts
+// and has not completed a posts All since imageResources capture shipped.
+// Same one-shot as postsNeedGenerationData. Not a disk scan of the stamp.
+export async function postsNeedImageResources () {
+  if (CONFIG.postsImageResourcesFilled === true) return false;
+  return hasSavedPosts();
+}
+
+// Settings / CLI: same one-shot for the untrimmed generation-data body.
+// Another capture adds a flag, not a second warning line.
+export async function postsNeedGenerationResponse () {
+  if (CONFIG.postsGenerationResponseFilled === true) return false;
+  return hasSavedPosts();
+}

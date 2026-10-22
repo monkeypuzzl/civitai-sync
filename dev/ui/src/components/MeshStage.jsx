@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { LARGE_MESH_BYTES, MESH_VIEWER_COPY } from '../lib/mesh-viewer-messages.js';
 import { loadMeshViewer } from './load-mesh-viewer.js';
+import { ReactionIndicators } from './ReactionIndicators.jsx';
 
 export function useMeshHost () {
   const [host, setHost] = useState(null);
@@ -99,7 +100,8 @@ export function MeshViewport ({
   notice,
   large,
   slotRef,
-  onStillClick
+  onStillClick,
+  reactions
 }) {
   const options = Array.isArray(viewable) ? viewable : [];
   // A viewable file with the control on is about to cover this frame. The
@@ -150,6 +152,9 @@ export function MeshViewport ({
               <span class="model3d-mark">3D</span>
             </div>
           )}
+        {holdForMesh ? null : (
+          <ReactionIndicators item={{ reactions: Array.isArray(reactions) ? reactions : [] }} />
+        )}
         {notice ? <p class="mesh-viewer-notice">{notice}</p> : null}
       </div>
     </div>

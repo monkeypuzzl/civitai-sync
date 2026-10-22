@@ -18,10 +18,12 @@ import {
   mediaFilepath
 } from './generations.mjs';
 import { postsDataDir, POST_DRAFTS_DIR, postMediaTargets } from './posts.mjs';
+import { postedGenerationView } from './checkpointResolution.mjs';
 import { comicsDataDir, comicMediaTargets } from './comics.mjs';
 import { extractInputDescriptors, blobIdFromUrl, inputMediaFilepath } from './inputMedia.mjs';
 import { getCivitaiImageBase } from './civitaiApi.mjs';
 import { downloadMediaFile } from './mediaDownload.mjs';
+import { flushFetchMiss } from './fetchMiss.mjs';
 import { readMediaComplete } from './mediaIntegrity.mjs';
 import { listExports, resolveExportRoot } from './exports.mjs';
 
@@ -164,7 +166,7 @@ async function collectTargets ({ secretKey, nowMs, includeComics }) {
     const images = Array.isArray(post?.images) ? post.images : [];
     for (const image of images) {
       if (!inWindow(image?.createdAt, nowMs)) continue;
-      for (const descriptor of extractInputDescriptors(image?.meta || image, 'post-image')) {
+      for (const descriptor of extractInputDescriptors(postedGenerationView(image).meta || image, 'post-image')) {
         push(inputTarget(descriptor, true));
       }
     }
@@ -232,6 +234,7 @@ export async function healMedia ({
 } = {}) {
   const nowMs = now().getTime();
   const report = { healed: 0, unrecoverable: 0, failed: 0, unchanged: 0, aborted: false };
+  try {
   const sidecar = await readSidecar();
   const targets = await collectTargets({ secretKey, nowMs, includeComics });
   const exports = await listExports();
@@ -318,4 +321,7 @@ export async function healMedia ({
 
   if (dirty) await writeFile(sidecarPath(), sidecar);
   return report;
+  } finally {
+    await flushFetchMiss();
+  }
 }

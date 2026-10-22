@@ -18,6 +18,19 @@ export function exportRowKind (status, job) {
   return 'idle';
 }
 
+// Slugs whose row offers Sync, in the list order the page already shows.
+// A live job, an unchecked row, an idle row, and an error row are not offers.
+export function syncAllSlugs (rows, jobs) {
+  const list = Array.isArray(rows) ? rows : [];
+  const bySlug = jobs && typeof jobs === 'object' ? jobs : {};
+  const slugs = [];
+  for (const row of list) {
+    if (!row?.slug) continue;
+    if (exportRowKind(row.status, bySlug[row.slug]) === 'pending') slugs.push(row.slug);
+  }
+  return slugs;
+}
+
 // Filesystem failure copy. Drift counts do not replace this. The code is the
 // stored reason code (an errno, or insufficient-space), not the Node message.
 const FAILURE_SENTENCE = {

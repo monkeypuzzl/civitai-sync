@@ -8,10 +8,10 @@
 // Upstream path:   civitai-src/packages/civitai-shared/src/basemodel.constants.ts
 // Upstream range:  the `ecosystems` EcosystemRecord[] export
 // Upstream branch: main
-// Upstream commit: f6bbd3ded78ddbddc152bf74abb431ed68504999
+// Upstream commit: 103e59d87ce86c1e30b5c7af103352406f4a682a
 // Fields read:     key, displayName (and parentEcosystemId, used to filter)
 //
-// Refreshed at:    2026-10-12T17:11:44.575Z
+// Refreshed at:    2026-10-22T17:10:22.953Z
 // Refresh by:      node dev/tools/refresh-vendored-civitai.mjs ecosystems
 // Verify drift:    node dev/tools/refresh-vendored-civitai.mjs verify
 //
@@ -41,6 +41,8 @@ export const ECOSYSTEM_DISPLAY_NAMES = Object.freeze({
   "flux1kontext":         "Flux.1 Kontext",
   "flux2":                "Flux.2",
   "flux3":                "Flux.3",
+  "flux3klein":           "Flux.3 Klein",
+  "flux3klein_base":      "Flux.3 Klein Base",
   "flux3video":           "Flux 3 Video",
   "fluxkrea":             "Flux.1 Krea",
   "happyhorse":           "HappyHorse",
@@ -51,6 +53,7 @@ export const ECOSYSTEM_DISPLAY_NAMES = Object.freeze({
   "hyv1":                 "Hunyuan Video",
   "imagen4":              "Imagen 4",
   "krea2":                "Krea 2",
+  "krea3":                "Krea 3",
   "ltxv":                 "LTX Video",
   "ltxv2":                "LTX Video 2",
   "ltxv23":               "LTX Video 2.3",
@@ -61,6 +64,7 @@ export const ECOSYSTEM_DISPLAY_NAMES = Object.freeze({
   "minglayer":            "Ming Image Design Layer",
   "minimaxh3":            "MiniMax H3",
   "minimaxmusic3":        "MiniMax Music 3",
+  "mossimage":            "MOSS Image",
   "museimage":            "Muse Image",
   "nanobanana":           "Nano Banana",
   "odor":                 "ODOR",

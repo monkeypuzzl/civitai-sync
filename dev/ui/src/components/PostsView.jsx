@@ -6,6 +6,7 @@ import { useStickyUrlState } from '../lib/sticky-ui.js';
 import { useGalleryData } from '../hooks/useGalleryData.js';
 import { useDebouncedUrlParam } from '../hooks/useDebouncedUrlParam.js';
 import { publicationFacet, publicationFromStatus, USED_AS_INPUT_FACET } from '../lib/publication.js';
+import { galleryRequestQuery } from '../lib/gallery-query.js';
 import { pruneGrainParams } from '../lib/grain.js';
 import { useDocumentTitle } from '../lib/page-title.js';
 import { PostStatsBar } from './PostStatsBar.jsx';
@@ -19,6 +20,8 @@ import {
   shouldLoadFocusPrefix,
   readHistoryFocus
 } from '../lib/open-origin-node.js';
+import { resolveFocusId } from '../lib/gallery-focus.js';
+import { useIndexEpoch } from '../lib/index-settle.js';
 
 // Module-scope schema (stable memo key; reusable as a saved export query).
 // Post views share Generations membership filters (type/scope/workflow/
@@ -31,17 +34,12 @@ import {
 export const URL_SCHEMA = {
   sort: { type: 'string', default: 'date:desc' },
   tag: { type: 'csv', default: [] },
+  postTag: { type: 'csv', default: [] },
+  rating: { type: 'csv', default: [] },
   q: { type: 'string', default: '' },
   title: { type: 'string', default: '' },
-  type: { type: 'csv', default: [] },
-  ecosystem: { type: 'csv', default: [] },
-  model: { type: 'csv', default: [] },
-  version: { type: 'csv', default: [] },
-  resourceType: { type: 'csv', default: [] },
-  resource: { type: 'csv', default: [] },
-  versionId: { type: 'csv', default: [] },
-  scope: { type: 'string', default: '' },
-  mine: { type: 'boolean', default: null },
+  mediaType: { type: 'csv', default: [] },
+  models: { type: 'string', default: '' },
   publication: { type: 'csv', default: [] },
   aspect: { type: 'csv', default: [] },
   dateFrom: { type: 'string', default: '' },
@@ -67,10 +65,10 @@ const GRAIN_OPTIONS = [
 const FACETS = [
   { key: 'reaction', kind: 'chips', source: 'reaction', valuesSource: 'reactionTags', options: ['favorite', 'feedback:liked', 'feedback:disliked'], label: 'Reactions' },
   { key: 'tag', kind: 'multi', source: 'tags', label: 'Tags' },
-  { key: 'type', kind: 'nested-tree', tree: 'type-workflow', label: 'Media Type' },
+  { key: 'mediaType', kind: 'nested-tree', tree: 'type-workflow', label: 'Media Type' },
   { key: 'aspect', kind: 'nested-tree', tree: 'aspect', label: 'Aspect Ratio', alwaysShowRoots: true },
-  { key: 'scope', kind: 'tree', label: 'Models' },
-  { key: 'dateFrom', key2: 'dateTo', kind: 'date-range', label: 'When' },
+  { key: 'models', kind: 'tree', label: 'Models' },
+  { key: 'dateFrom', key2: 'dateTo', kind: 'date-range', label: 'Date' },
   { key: 'cfgMin', key2: 'cfgMax', kind: 'number-range', label: 'CFG' },
   { key: 'stepsMin', key2: 'stepsMax', kind: 'number-range', label: 'Steps' },
   publicationFacet({ unposted: false }),
@@ -134,11 +132,12 @@ export function PostsView () {
   const [searchInput, setSearchInput] = useDebouncedUrlParam(urlState.q, updateUrl, 'q');
   const [titleInput, setTitleInput] = useDebouncedUrlParam(urlState.title, updateUrl, 'title');
 
-  const facetParams = useMemo(() => (
-    isMediaGrain
-      ? { hasPost: true }
-      : { hasPost: true, dateSource: 'container' }
-  ), [isMediaGrain]);
+  const facetParams = useMemo(() => {
+    const rating = urlState.rating?.length ? urlState.rating : undefined;
+    return isMediaGrain
+      ? { hasPost: true, rating }
+      : { hasPost: true, dateSource: 'container', rating };
+  }, [isMediaGrain, urlState.rating]);
 
   const toggleReaction = useCallback((token) => {
     const next = urlState.reaction.includes(token)
@@ -155,23 +154,13 @@ export function PostsView () {
     if (sp.has('status') || sp.get('groupBy') === 'status') replaceState({});
   }, []);
 
-  // `granularity` keys the refetch; the fetcher strips it.
-  const query = useMemo(() => ({
-    tag: urlState.tag, reaction: urlState.reaction, q: urlState.q, title: urlState.title, sort: urlState.sort,
-    type: urlState.type, ecosystem: urlState.ecosystem, model: urlState.model,
-    version: urlState.version, resourceType: urlState.resourceType, resource: urlState.resource,
-    versionId: urlState.versionId, scope: urlState.scope,
+  // `granularity` keys the refetch; the fetcher strips it. `mine` rides
+  // with the other membership keys.
+  const query = useMemo(() => galleryRequestQuery(urlState, {
+    title: urlState.title,
     publication: urlState.publication.length
       ? urlState.publication
-      : publicationFromStatus(getRoute()?.params?.status),
-    aspect: urlState.aspect,
-    dateFrom: urlState.dateFrom, dateTo: urlState.dateTo,
-    cfgMin: urlState.cfgMin, cfgMax: urlState.cfgMax, stepsMin: urlState.stepsMin, stepsMax: urlState.stepsMax,
-    usedAsInput: urlState.usedAsInput === true ? true : null,
-    workflow: urlState.workflow,
-    workflowMode: urlState.workflowMode,
-    groupBy: urlState.groupBy, groupSort: urlState.groupSort,
-    granularity: urlState.granularity
+      : publicationFromStatus(getRoute()?.params?.status)
   }), [urlState]);
 
   const galleryFetcher = useCallback((params) => {
@@ -181,17 +170,19 @@ export function PostsView () {
       : getPosts(rest);
   }, []);
 
+  const reloadEpoch = useIndexEpoch();
   const {
     items, groupsMeta, total, loading, sentinelRef, setItems, hasMore, loadMore, pending
-  } = useGalleryData({ fetcher: galleryFetcher, query });
+  } = useGalleryData({ fetcher: galleryFetcher, query, reloadEpoch });
 
   const grain = isMediaGrain ? 'media' : 'post';
 
   useEffect(() => {
-    if (shouldLoadFocusPrefix(readHistoryFocus(), { loading, itemCount: items.length, hasMore })) {
+    const focus = readHistoryFocus();
+    if (shouldLoadFocusPrefix(focus, { loading, hasMore, idFound: resolveFocusId(items, focus) != null })) {
       loadMore();
     }
-  }, [loading, items.length, hasMore, loadMore]);
+  }, [loading, items, hasMore, loadMore]);
 
   const queryKey = JSON.stringify(query);
   useEffect(() => { setSelectedIds(new Set()); }, [queryKey]);

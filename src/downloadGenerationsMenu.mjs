@@ -3,7 +3,7 @@ import select, { Separator } from '@inquirer/select';
 import { mainMenu } from './mainMenu.mjs';
 import { downloadMenu } from './downloadMenu.mjs';
 import { CONFIG, customTheme, clearTerminal } from './cli.mjs';
-import { getDownloadTypes, generationDownloadTags, generationMenuChoice, rememberGenerationDownload } from './downloadTypes.mjs';
+import { getDownloadTypes, generationDownloadTags, generationMenuChoice, rememberGenerationDownload, settleRememberedMode } from './downloadTypes.mjs';
 
 function withFilesNote (description) {
   if (CONFIG.downloadMedia === false) return `${description}\nFiles are not saved.`;
@@ -24,6 +24,12 @@ export async function downloadGenerations (mode = 'latest') {
   ]);
 
   const secretKey = await getSecretKey();
+  const { requireLibraryAccount } = await import('./accountIdentity.mjs');
+  const gate = await requireLibraryAccount(secretKey);
+  if (!gate.ok) {
+    console.log(chalk.red(gate.message));
+    return;
+  }
   if (secretKey) await rememberGenerationDownload(mode);
 
   const tags = generationDownloadTags(mode);
@@ -65,6 +71,10 @@ export async function downloadGenerations (mode = 'latest') {
     result = await fetchGenerations(options);
 
     log(formatCompletion(result));
+    const errors = (result?.errors || []).length;
+    const status = result?.aborted ? 'aborted' : (errors && !result?.generationsNew) ? 'error' : 'complete';
+    const remembered = mode === 'missing-all' ? 'all' : mode === 'missing-tags' ? 'reactions' : 'latest';
+    await settleRememberedMode('generations', remembered, { status, errors });
     import('./ownModels.mjs').then(m => m.scheduleOwnModelsCheck({ secretKey })).catch(() => {});
   }
 

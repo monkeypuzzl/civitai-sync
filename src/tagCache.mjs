@@ -23,13 +23,12 @@
 //   { tagId: number, name: string, fetchedAt: ISO }
 
 import fs from 'node:fs';
-import { readFile, writeFile, wait } from './utils.mjs';
+import { readFile, writeFile } from './utils.mjs';
 import { CONFIG } from './cli.mjs';
 import { getTag } from './civitaiApi.mjs';
+import { runAsBackground } from './requestScheduler.mjs';
 
 export const CACHE_VERSION = 1;
-
-const DATA_RATE_LIMIT = 100;
 
 // ---------------------------------------------------------------------------
 // Factory.
@@ -158,7 +157,7 @@ export function createTagCache (options) {
 
   /**
    * Resolve the ids in `tagIds` that aren't cached yet. Sequential fetch
-   * with `DATA_RATE_LIMIT` (100ms) between calls. A `notFound` response
+   * Calls run one at a time as background work. A `notFound` response
    * leaves the id unresolved (no tombstone); other errors flow into
    * `report.errors`. Optional `onProgress({ index, total, currentId,
    * status })` fires after each fetch (status: 'cached' | 'unresolved' |
@@ -177,11 +176,10 @@ export function createTagCache (options) {
       if (signal && signal.aborted) { report.aborted = true; break; }
 
       const id = targets[i];
-      if (i > 0) await wait(DATA_RATE_LIMIT);
 
       let response;
       try {
-        response = await fetcher({ id, secretKey, signal });
+        response = await runAsBackground(() => fetcher({ id, secretKey, signal }));
       } catch (err) {
         report.errors.push({ id, error: err.message });
         if (onProgress) onProgress({ index: i + 1, total, currentId: id, status: 'error' });
@@ -250,6 +248,13 @@ function defaultCache () {
  * tests that mutate `CONFIG.dataPath`.
  */
 export function _resetDefaultTagCacheForTest () { _defaultCache = null; }
+
+// Drop the loaded cache and the ndjson. The next read starts empty.
+export async function clearTagCache () {
+  _defaultCache = null;
+  const file = `${CONFIG.dataPath}/tag-cache/tags.ndjson`;
+  await fs.promises.unlink(file).catch(() => {});
+}
 
 // Backwards-compatible named exports — runtime callers go through these.
 export async function ensureTagCacheLoaded () { return defaultCache().ensureLoaded(); }

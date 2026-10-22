@@ -1,7 +1,15 @@
 // Tile click destinations vs grain-remapped ‹ › hrefs. Callers add origin
-// query (`originQuery`) on hops from an origin gallery. Graph edges stay bare.
+// query (`originQuery`) on hops from an origin gallery. An origin-scope
+// container row keeps that list. Other graph edges stay bare.
 
 import { normalizeMediaId } from './format.js';
+import { originMembershipKind } from './nav-tabs.js';
+import { formatUrl } from './url-state.js';
+import { VIEW_PARAM_KEYS } from './view-params.js';
+
+const UNFILTERED_VIEWS = new Set(['generations', 'posts', 'comics', 'model3ds']);
+const UNFILTERED_SKIP = new Set(['from', 'slot', 'generation', 'engagement']);
+const UNFILTERED_SEARCH = new Set(['generations', 'posts', 'comics']);
 
 function mediaHref (id) {
   return `/media/${normalizeMediaId(id)}`;
@@ -107,9 +115,9 @@ export function galleryClickSlot (item, path, { grain, index, groupsMeta, groupB
   return `g:${group.key}:${i - group.offset}`;
 }
 
-/** True for `/posts/<id>`, `/generations/<id>`, `/comics/<id>`. */
+/** True for `/posts/<id>`, `/generations/<id>`, `/comics/<id>`, `/model3ds/<id>`. */
 export function isContainerNodePath (path) {
-  return typeof path === 'string' && /^\/(posts|generations|comics)\//.test(path);
+  return typeof path === 'string' && /^\/(posts|generations|comics|model3ds)\//.test(path);
 }
 
 /**
@@ -167,10 +175,90 @@ export function originFetchQuery (routeParams) {
 }
 
 /**
- * Sidebar container link: bare path — no from, granularity, or facets.
+ * Bare query for a sidebar container link that is not the origin list.
  */
 export function containerResetQuery (_kind) {
   return {};
+}
+
+const MEMBERSHIP_VIEW = {
+  generation: 'generations',
+  post: 'posts',
+  comic: 'comics'
+};
+
+/**
+ * Sidebar container row. The origin membership section keeps the list
+ * (`originQuery` toward that container path). Every other section is a
+ * bare path. Empty id or an unknown kind returns ''.
+ */
+export function membershipContainerHref (kind, id, routeParams, origin) {
+  if (id == null || id === '') return '';
+  const view = MEMBERSHIP_VIEW[kind];
+  if (!view) return '';
+  const entityId = String(id);
+  const from = routeParams && routeParams.from;
+  const scope = (from != null && String(from) !== '')
+    ? String(from)
+    : (origin && origin.scope) || '';
+  const params = originMembershipKind(scope) === kind
+    ? originQuery(routeParams, null, { path: `/${view}/${entityId}` })
+    : containerResetQuery(kind);
+  return formatUrl({
+    view,
+    entityId,
+    modelTrail: null,
+    params
+  });
+}
+
+function filterValuePresent (key, value) {
+  if (key === 'mine') return value === '1' || value === 'true' || value === true;
+  if (value == null || value === '') return false;
+  if (Array.isArray(value) && value.length === 0) return false;
+  return true;
+}
+
+/**
+ * One address key the header link counts as a filter.
+ * `mine` counts only for `1`, `true`, or boolean true. `q` counts on a
+ * batch, post, or comic. Arrange keys, `from`, `slot`, `generation`, and
+ * `engagement` do not. A view that is not a container counts nothing.
+ */
+export function containerFilterKeyActive (view, key, value) {
+  if (!UNFILTERED_VIEWS.has(view)) return false;
+  if (UNFILTERED_SKIP.has(key)) return false;
+  if (key === 'q') return UNFILTERED_SEARCH.has(view) && filterValuePresent(key, value);
+  const keys = VIEW_PARAM_KEYS[view];
+  if (!keys || !keys.has(key)) return false;
+  return filterValuePresent(key, value);
+}
+
+/**
+ * True when the address carries a gallery filter the header link clears.
+ * Same key walk as {@link containerFilterKeyActive}.
+ */
+export function containerHasActiveFilter (view, params) {
+  if (!UNFILTERED_VIEWS.has(view)) return false;
+  const src = params || {};
+  const keys = VIEW_PARAM_KEYS[view];
+  if (keys) {
+    for (const key of keys) {
+      if (containerFilterKeyActive(view, key, src[key])) return true;
+    }
+  }
+  return containerFilterKeyActive(view, 'q', src.q);
+}
+
+/**
+ * Bare container path while the address carries a gallery filter.
+ * Empty when the page is already bare, or the only extra keys are arrange
+ * or non-filters. Media is not a container view.
+ */
+export function containerUnfilteredHref (view, id, params) {
+  if (id == null || id === '') return '';
+  if (!containerHasActiveFilter(view, params)) return '';
+  return `/${view}/${encodeURIComponent(String(id))}`;
 }
 
 /**
@@ -180,8 +268,8 @@ export function containerResetQuery (_kind) {
  */
 export function modelsOriginQuery (versionId, { sort, familyId } = {}) {
   const out = { from: 'models' };
-  if (versionId != null && versionId !== '') out.versionId = String(versionId);
-  else if (familyId != null && familyId !== '') out.familyId = String(familyId);
+  if (versionId != null && versionId !== '') out.models = `version.${encodeURIComponent(String(versionId))}`;
+  else if (familyId != null && familyId !== '') out.models = `family.${encodeURIComponent(String(familyId))}`;
   if (sort != null && sort !== '' && sort !== 'date:desc') out.sort = String(sort);
   return out;
 }
