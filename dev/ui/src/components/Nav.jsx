@@ -36,7 +36,8 @@ export function Nav ({
   stats = null,
   statsStatus = 'loading',
   mediaScope = null,
-  modelReturn = null
+  modelReturn = null,
+  nodeNotice = null
 }) {
   const r = asRoute(route);
   const hist = historyBag();
@@ -105,9 +106,19 @@ export function Nav ({
           })}
         </div>
         <LibraryPreparationLine />
+        <NodeNoticeLine notice={nodeNotice} />
       </div>
       {username && <div class="nav-username">{username}</div>}
     </nav>
+  );
+}
+
+function NodeNoticeLine ({ notice }) {
+  if (!notice || !notice.current) return null;
+  return (
+    <p class="node-notice">
+      Node {notice.current}. Tested on Node {notice.supported} and newer.
+    </p>
   );
 }
 

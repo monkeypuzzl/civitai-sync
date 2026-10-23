@@ -5,6 +5,7 @@ import { Separator } from '@inquirer/select';
 import liveSelect from './liveSelect.mjs';
 import { fileExists } from './utils.mjs';
 import { CONFIG, CURRENT_VERSION, customTheme, getAppHeader, SOFTWARE } from './cli.mjs';
+import { nodeGate, nodeNoticeText } from './nodeGate.mjs';
 import { getBrowseState, getBrowseDisplayUrl, startBrowseServerAndOpen, stopBrowseServer, isPromptForceClose, requestShutdown, resolveExplorerHost, normalizeExplorerAccess, explorerAccessDescription, EXPLORER_ACCESS_LAN, EXPLORER_LAN_SUFFIX } from './explorerServer.mjs';
 
 function formatTimeAgo (timestamp) {
@@ -48,6 +49,9 @@ function attachMenuRefresh (refresh) {
 
 function mainMenuPreamble () {
   let text = `${getAppHeader()}\n\n`;
+  if (nodeGate(process.version) === 'notice') {
+    text += `  ${chalk.dim(nodeNoticeText(process.version))}\n\n`;
+  }
   if (getBrowseState()) {
     text += `  ${chalk.green('\u25CF')} ${chalk.dim('Explorer:')} ${chalk.hex('#a5d8ff').underline(getBrowseDisplayUrl())}\n\n`;
   }
@@ -236,6 +240,8 @@ export async function mainMenu ({ clear = true, defaultValue = '' } = {}) {
       secretKey = CONFIG.secretKey ? await getSecretKey() : undefined;
 
       if (await updateSoftware({ secretKey }) === true) {
+        const { holdForEnter } = await import('./startupReport.mjs');
+        await holdForEnter();
         return;
       }
       break;

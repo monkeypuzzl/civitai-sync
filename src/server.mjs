@@ -1,8 +1,11 @@
 import http from 'node:http';
+import process from 'node:process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG, CURRENT_VERSION } from './cli.mjs';
+import { nodeNoticeFor } from './nodeGate.mjs';
+import { isCloudSyncPath } from './exports.mjs';
 import { getIndex, buildIndex, rebuildIndex, collectVersionIdsFromIndex, collectTagIdsFromIndex, upsertIndexEntries, reprojectIndexTagNames, reprojectIndexMediaItems, getMediaItemById, aggregateModelCatalog, aggregateModelPage, computeOverview, computeFacetValues, computeListOffer, computeTagFacet, warmListOffers, refillListOffersWhenIdle, computeModelHierarchy, computeDateBounds, computeAspectTree, computeTypeWorkflowTree, isProduced, isGenerationBacked, isPostBacked, isComicBacked, model3dForGeneration, model3dForImageId, hasDownloadOpen } from './serverIndex.mjs';
 import { inputsMediaDir } from './inputMedia.mjs';
 import { parseByteRange } from './httpRange.mjs';
@@ -1325,6 +1328,13 @@ async function runMeasurementPasses () {
 }
 
 function queueContentHashBackfill () {
+  // A cloud-sync folder hydrates a placeholder when the hash opens it.
+  // Settle without reading. Settings → Rebuild index still hashes.
+  if (isCloudSyncPath(CONFIG?.mediaPath)) {
+    armLibraryPreparation('content-hash');
+    settleLibraryPreparation('content-hash');
+    return;
+  }
   if (contentHashBackfillInFlight) return;
   contentHashBackfillInFlight = true;
   armLibraryPreparation('content-hash');
@@ -1943,7 +1953,8 @@ async function handleApi (req, res, pathname, url) {
       availableDomains: CIVITAI_DOMAINS,
       postsNeedGenerationData: needGenerationData,
       postsNeedImageResources: needImageResources,
-      postsNeedGenerationResponse: needGenerationResponse
+      postsNeedGenerationResponse: needGenerationResponse,
+      nodeNotice: nodeNoticeFor(process.version)
     });
   }
 

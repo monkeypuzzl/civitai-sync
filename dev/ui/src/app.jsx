@@ -208,6 +208,7 @@ function useCorpusStats (view) {
 function App () {
   const [route, setRoute] = useState(getRoute);
   const [username, setUsername] = useState('');
+  const [nodeNotice, setNodeNotice] = useState(null);
   const [prefsStatus, setPrefsStatus] = useState('loading');
   const [mediaOriginScope, setMediaOriginScope] = useState(null);
   const [modelReturn, setModelReturn] = useState(null);
@@ -239,7 +240,11 @@ function App () {
   useEffect(() => {
     let cancelled = false;
     getConfig()
-      .then(cfg => { if (!cancelled && cfg.username) setUsername(cfg.username); })
+      .then(cfg => {
+        if (cancelled) return;
+        if (cfg.username) setUsername(cfg.username);
+        setNodeNotice(cfg.nodeNotice || null);
+      })
       .catch(() => {});
     // refreshOnce on the server; a missing key or downed Civitai must not
     // clear a username already shown from getConfig.
@@ -264,6 +269,7 @@ function App () {
         statsStatus={statsStatus}
         mediaScope={mediaOriginScope}
         modelReturn={modelReturn}
+        nodeNotice={nodeNotice}
       />
       {viewReady
         ? renderView(ViewComponent, route, {

@@ -14,6 +14,7 @@ import { setConfigParam } from './config.mjs';
 import { upsertIndexEntries } from './serverIndex.mjs';
 import { listenForEscKeyPress, plural, formatElapsed, formatActivity } from './downloadActions.mjs';
 import { CONFIG } from './cli.mjs';
+import { comparableDownloadJson } from './signedUrl.mjs';
 
 export { listenForEscKeyPress };
 
@@ -139,9 +140,7 @@ export async function fetchComics (options = {}) {
 
       if (latest === true && !comicNeedsChapters(shell, saved) && saved?.downloadOpen !== true) {
         const next = applyComicShell(saved, shell);
-        const willWrite = JSON.stringify(next, null, 2);
-        const current = JSON.stringify(saved, null, 2);
-        if (willWrite !== current) {
+        if (comparableDownloadJson(next) !== comparableDownloadJson(saved)) {
           const written = await saveComicData(next);
           if (!written) {
             report.errors.push({ message: 'Could not save comic data' });

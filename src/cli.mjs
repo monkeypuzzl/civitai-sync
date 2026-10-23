@@ -5,6 +5,8 @@ import { dirname } from 'node:path';
 import chalk from 'chalk';
 import { readFile } from './utils.mjs';
 import { getCurrentConfig, DEFAULT_CONFIG } from './config.mjs';
+import { nodeGate, nodeNoticeText, nodeUpdateSection } from './nodeGate.mjs';
+import { reportAndHold } from './startupReport.mjs';
 
 const KNOWN_COMMANDS = ['explorer'];
 
@@ -146,13 +148,32 @@ function preloadDownloadMenus () {
   }
 }
 
+export function applyCurrentVersion (version) {
+  CURRENT_VERSION = version || '';
+}
+
 export async function launchCLI () {
   // Before the version read and before migration. explorerServer imports
   // this module, so this import stays inside the function.
   const { enableInteractiveShutdown } = await import('./explorerServer.mjs');
   enableInteractiveShutdown();
 
-  CURRENT_VERSION = await readCurrentVersion();
+  applyCurrentVersion(await readCurrentVersion());
+
+  const gate = nodeGate(process.version);
+  if (gate === 'stop') {
+    console.log(nodeUpdateSection());
+    await reportAndHold({
+      version: CURRENT_VERSION,
+      node: process.version,
+      platform: process.platform,
+      phase: 'node',
+      operation: 'read',
+      code: 'below-18'
+    });
+    process.exit(0);
+  }
+
   await useConfig(CONFIG_PATH);
 
   // The download-choice rewrite does not wait on the version stamp.
@@ -163,8 +184,31 @@ export async function launchCLI () {
     .some(key => Object.prototype.hasOwnProperty.call(CONFIG, key));
 
   if (migrationRequired(CONFIG, CURRENT_VERSION) || downloadChoicesPending) {
-    const { migrate } = await import('./migrate.mjs');
-    await migrate();
+    try {
+      const { migrate } = await import('./migrate.mjs');
+      await migrate();
+    } catch (err) {
+      const { layoutTooLongNote } = await import('./migrate.mjs');
+      const note = layoutTooLongNote(err);
+      if (note) console.log(note);
+      await reportAndHold({
+        version: CURRENT_VERSION,
+        node: process.version,
+        platform: process.platform,
+        phase: 'library-layout',
+        operation: err?.operation || 'rename',
+        code: err?.code || err?.name || 'Error',
+        where: err?.path,
+        dataPath: CONFIG?.dataPath,
+        mediaPath: CONFIG?.mediaPath,
+        note
+      });
+      process.exit(0);
+    }
+  }
+
+  if (gate === 'notice') {
+    console.log(nodeNoticeText(process.version));
   }
 
   const identityFilled = scheduleIdentityFill();

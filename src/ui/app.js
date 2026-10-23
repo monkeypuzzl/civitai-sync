@@ -211,7 +211,8 @@ function Nav({
   stats = null,
   statsStatus = "loading",
   mediaScope = null,
-  modelReturn = null
+  modelReturn = null,
+  nodeNotice = null
 }) {
   const r = asRoute(route);
   const hist = historyBag();
@@ -268,9 +269,20 @@ function Nav({
           tab.id
         );
       }) }),
-      /* @__PURE__ */ u(LibraryPreparationLine, {})
+      /* @__PURE__ */ u(LibraryPreparationLine, {}),
+      /* @__PURE__ */ u(NodeNoticeLine, { notice: nodeNotice })
     ] }),
     username && /* @__PURE__ */ u("div", { class: "nav-username", children: username })
+  ] });
+}
+function NodeNoticeLine({ notice }) {
+  if (!notice || !notice.current) return null;
+  return /* @__PURE__ */ u("p", { class: "node-notice", children: [
+    "Node ",
+    notice.current,
+    ". Tested on Node ",
+    notice.supported,
+    " and newer."
   ] });
 }
 function LibraryPreparationLine() {
@@ -495,6 +507,7 @@ function useCorpusStats(view) {
 function App() {
   const [route, setRoute] = d(getRoute);
   const [username, setUsername] = d("");
+  const [nodeNotice, setNodeNotice] = d(null);
   const [prefsStatus, setPrefsStatus] = d("loading");
   const [mediaOriginScope, setMediaOriginScope] = d(null);
   const [modelReturn, setModelReturn] = d(null);
@@ -520,7 +533,9 @@ function App() {
   y(() => {
     let cancelled = false;
     getConfig().then((cfg) => {
-      if (!cancelled && cfg.username) setUsername(cfg.username);
+      if (cancelled) return;
+      if (cfg.username) setUsername(cfg.username);
+      setNodeNotice(cfg.nodeNotice || null);
     }).catch(() => {
     });
     refreshUser().then((r) => {
@@ -546,7 +561,8 @@ function App() {
         stats,
         statsStatus,
         mediaScope: mediaOriginScope,
-        modelReturn
+        modelReturn,
+        nodeNotice
       }
     ),
     viewReady ? renderView(ViewComponent, route, {

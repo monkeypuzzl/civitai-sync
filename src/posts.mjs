@@ -14,7 +14,7 @@ import { joinPostedFileIfHashed } from './contentHashBackfill.mjs';
 import { postsDataDir, POST_DRAFTS_DIR, hasSavedPosts, postsNeedGenerationData, postsNeedImageResources, postsNeedGenerationResponse } from './postsPresence.mjs';
 import { withinLatestWindow } from './latestWindow.mjs';
 import { byteMissKeepsOpen, markContainerOpen, commitOpenContainer } from './downloadOpen.mjs';
-import { sameResourceUrl } from './signedUrl.mjs';
+import { comparableDownloadJson, sameResourceUrl } from './signedUrl.mjs';
 import { mapPool, API_POOL_WIDTH, MEDIA_POOL_WIDTH } from './requestScheduler.mjs';
 
 export { postsDataDir, POST_DRAFTS_DIR, hasSavedPosts, postsNeedGenerationData, postsNeedImageResources, postsNeedGenerationResponse };
@@ -345,11 +345,11 @@ export async function enrichPostDetail (post, { secretKey, signal } = {}) {
       availability: detail.availability ?? null
     };
 
-    const same = JSON.stringify({
+    const same = comparableDownloadJson({
       tags: post.tags ?? [],
       detail: post.detail ?? null,
       availability: post.availability ?? null
-    }) === JSON.stringify(enrichedFields);
+    }) === comparableDownloadJson(enrichedFields);
     if (same) return { changed: false };
 
     const enrichedPost = { ...post, ...enrichedFields };
@@ -880,8 +880,8 @@ export async function savePosts (apiResponse, {
         // branch, so latest-mode's stop condition is unaffected.
         if (overwriteIfModified && !(signal && signal.aborted)) {
           const reconciled = reconcilePost(savedJson, post);
-          const current = JSON.stringify(savedJson, null, 2);
-          const willWrite = JSON.stringify(withDerivedStatus(reconciled), null, 2);
+          const willWrite = comparableDownloadJson(withDerivedStatus(reconciled));
+          const current = comparableDownloadJson(savedJson);
 
           if (willWrite !== current) {
             progress({ phase: 'saving', index: postNum, total: totalItems });
@@ -951,17 +951,17 @@ export async function savePosts (apiResponse, {
           }
         }
         const applied = applyPostEdit(working, read.edit, post.images);
-        const willWrite = JSON.stringify(withDerivedStatus(applied), null, 2);
-        let currentText = '';
+        const willWrite = comparableDownloadJson(withDerivedStatus(applied));
+        let currentDoc = null;
         try {
-          currentText = await readFile(filepath);
+          currentDoc = JSON.parse(await readFile(filepath));
         } catch (ignoreErr) {
-          currentText = '';
+          currentDoc = null;
         }
 
         editById = refreshIds;
         report.editorIds.push(id);
-        if (willWrite !== currentText) {
+        if (currentDoc == null || willWrite !== comparableDownloadJson(currentDoc)) {
           const written = await writeRefreshedPost(applied, filepath);
 
           if (!written) {

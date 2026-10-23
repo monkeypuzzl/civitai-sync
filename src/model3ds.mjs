@@ -325,8 +325,10 @@ export async function saveModel3d (model, {
   let changed = !exists;
   if (exists) {
     try {
-      const prev = await readFile(filepath);
-      changed = comparableDownloadJson(JSON.parse(prev)) !== comparableDownloadJson(next);
+      const prev = JSON.parse(await readFile(filepath));
+      const contentChanged = comparableDownloadJson(prev) !== comparableDownloadJson(next);
+      const markChanged = (prev.downloadOpen === true) !== (next.downloadOpen === true);
+      changed = contentChanged || markChanged;
     } catch (ignoreErr) {
       changed = true;
     }

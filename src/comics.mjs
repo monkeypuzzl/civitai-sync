@@ -8,7 +8,7 @@ import { mapPool, MEDIA_POOL_WIDTH } from './requestScheduler.mjs';
 import { applyStorageFault } from './downloadFault.mjs';
 import { flushFetchMiss } from './fetchMiss.mjs';
 import { byteMissKeepsOpen, markContainerOpen, commitOpenContainer } from './downloadOpen.mjs';
-import { sameResourceUrl, resourceIdentity } from './signedUrl.mjs';
+import { comparableDownloadJson, sameResourceUrl, resourceIdentity } from './signedUrl.mjs';
 import { extractInputDescriptors, saveInputMedia } from './inputMedia.mjs';
 import { normalizeMediaId } from './mediaId.mjs';
 import { joinPostedFileIfHashed } from './contentHashBackfill.mjs';
@@ -617,7 +617,7 @@ export async function saveComic (comic, {
       previousPanelUrls = panelImageUrls(savedJson);
       if (overwriteIfModified) {
         const reconciled = reconcileComic(savedJson, comic);
-        if (JSON.stringify(reconciled, null, 2) !== JSON.stringify(savedJson, null, 2)) {
+        if (comparableDownloadJson(reconciled) !== comparableDownloadJson(savedJson)) {
           toWrite = reconciled;
           dataChanged = true;
         } else {

@@ -31,8 +31,10 @@ The software is:
 
 ## Installation
 
-Install [Node.js](https://nodejs.org)  
-If you already have Node, it requires version 20 or above.
+Install [Node.js](https://nodejs.org).
+This build runs on Node 18 and newer. It is tested on Node 20 and newer. Below Node 18, civitai-sync stops before it moves any files.
+
+To upgrade Node that you installed from nodejs.org, close civitai-sync. Download the current long-term support installer: the Windows Installer (`.msi`) on Windows, or the macOS Installer (`.pkg`) on a Mac. Run it and accept the defaults. It replaces the Node that installer put there before. Open a terminal, run `node -v`, and open civitai-sync again. If `node -v` is still the old version, Node is also installed another way. This installer did not replace that copy.
 
 Download the zip archive of the program from the model page.  
 Or download/clone the repository.

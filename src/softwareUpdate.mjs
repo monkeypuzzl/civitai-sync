@@ -1,6 +1,7 @@
 /*eslint no-unused-vars: ["error", { "caughtErrors": "all", "caughtErrorsIgnorePattern": "^ignore" }]*/
 /*eslint no-empty: ["error", { "allowEmptyCatch": true }]*/
 // import confirm from '@inquirer/confirm';
+import process from 'node:process';
 import { mkdirp } from 'mkdirp';
 import { fetchModel, fetchFile } from './civitaiApi.mjs';
 import { runAsBackground } from './requestScheduler.mjs';
@@ -309,6 +310,18 @@ export async function installSoftwareUpdate (version) {
 
       await writeFile(`${backupDirectory}/npm-log.txt`, npmLog);
 
+      const { formatStartupReport, npmFailureLine, redactHome, writeStartupReport } = await import('./startupReport.mjs');
+      const fields = {
+        version: CURRENT_VERSION,
+        node: process.version,
+        platform: process.platform,
+        phase: 'software-update',
+        operation: 'npm',
+        code: String(error?.code ?? 'npm'),
+        npm: redactHome(npmFailureLine(error?.stderr || ''))
+      };
+      console.error(formatStartupReport(fields));
+      await writeStartupReport(fields).catch(() => {});
       console.error(`Unable to install software dependencies. ${JSON.stringify(error, null, 2)}\nLog:\n${npmLog}`);
       return false;
     }

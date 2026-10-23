@@ -10,10 +10,9 @@ import { extractInputDescriptors, saveInputMedia } from './inputMedia.mjs';
 import { postedGenerationView } from './checkpointResolution.mjs';
 import { CONFIG, CURRENT_VERSION } from './cli.mjs';
 import { fileExists, listDirectory, listDirectories, isDate, rename, unlink, copyFile, removeDirectoryIfEmpty, writeFile, readFile } from './utils.mjs';
-import { backfillContentHashes } from './contentHashBackfill.mjs';
 import { waitForExplorerIdle, parkIfExplorerBusy } from './explorerIdle.mjs';
 import { loadPrepMarks, prepMarks, savePrepMarks, liveMarkKey } from './prepMarks.mjs';
-import { migrateStoredExportQueries } from './exports.mjs';
+import { isCloudSyncPath, migrateStoredExportQueries } from './exports.mjs';
 import { flushFetchMiss } from './fetchMiss.mjs';
 
 // Frozen historical tag-directory names. `migrateDirectoryLayout` (the v4→v5
@@ -129,6 +128,50 @@ const LEGACY_EXPORTS = [
 // the Exports capability probe in src/exports.mjs.
 const LINK_FALLBACK_CODES = new Set(['EXDEV', 'EPERM', 'ENOSYS', 'EOPNOTSUPP']);
 
+const LAYOUT_NO_SECOND_COPY = 'This folder cannot give one file two names, which is what OneDrive and some network drives do. The files stay in one place.';
+
+function layoutJournalPath () {
+  return `${CONFIG.dataPath}/index/migration.json`;
+}
+
+async function readLayoutJournal () {
+  try {
+    const parsed = JSON.parse(await readFile(layoutJournalPath()));
+    const dates = Array.isArray(parsed?.dates)
+      ? parsed.dates.filter(date => typeof date === 'string')
+      : [];
+    return { dates };
+  } catch {
+    return { dates: [] };
+  }
+}
+
+async function writeLayoutJournal (journal) {
+  await mkdirp(dirname(layoutJournalPath()));
+  await writeFile(layoutJournalPath(), JSON.stringify({ dates: journal.dates }, null, 2));
+}
+
+// One probe in the media tree. A refused link means the export projection
+// must not become a second copy of the file.
+async function probeLayoutLink (link) {
+  const dir = generationsMediaDir();
+  await mkdirp(dir);
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const src = `${dir}/.civsync-probe-${stamp}`;
+  const dest = `${src}-link`;
+  try {
+    await writeFile(src, '');
+    await link(src, dest);
+    return true;
+  } catch (error) {
+    if (LINK_FALLBACK_CODES.has(error?.code)) return false;
+    throw error;
+  } finally {
+    await unlink(src).catch(() => {});
+    await unlink(dest).catch(() => {});
+  }
+}
+
 async function sameInode (a, b) {
   try {
     const [sa, sb] = await Promise.all([fsStat(a), fsStat(b)]);
@@ -140,19 +183,46 @@ async function sameInode (a, b) {
 
 // Hard-link src → dest, falling back to a byte copy where hard links aren't
 // supported. Returns true when a hard link was made (inode shared), false when
-// the destination is a copy.
-async function linkInto (src, dest) {
+// the destination is a copy, 'skipped' when the export path is too long.
+// A too-long path is not copied: the copy is what made the path longer.
+async function linkInto (src, dest, link = fsLink) {
   try {
-    await fsLink(src, dest);
+    await link(src, dest);
     return true;
   } catch (error) {
     if (error?.code === 'EEXIST') return true;       // already linked — idempotent
+    if (error?.code === 'ENAMETOOLONG') return 'skipped';
     if (LINK_FALLBACK_CODES.has(error?.code)) {
-      await copyFile(src, dest);
-      return false;
+      try {
+        await copyFile(src, dest);
+        return false;
+      } catch (copyError) {
+        if (copyError?.code === 'ENAMETOOLONG') return 'skipped';
+        throw copyError;
+      }
     }
     throw error;
   }
+}
+
+async function renameEntry (src, dest, renameFn) {
+  try {
+    await mkdirp(dirname(dest));
+    await renameFn(src, dest);
+  } catch (error) {
+    if (error?.code === 'ENAMETOOLONG') {
+      error.operation = 'rename';
+      if (!error.path) error.path = dest;
+    }
+    throw error;
+  }
+}
+
+// Printed above the held report. Not a rename of the file.
+export function layoutTooLongNote (error) {
+  if (error?.code !== 'ENAMETOOLONG') return null;
+  if (error?.operation && error.operation !== 'rename') return null;
+  return 'The library folder is too deep for this file. Move the library to a shorter path, such as C:\\civitai\\media, and open civitai-sync again. The file name stays as it is.';
 }
 
 async function lstatKind (p) {
@@ -172,22 +242,21 @@ async function lstatKind (p) {
 // exist and src was renamed onto it. Never unlinks dest, and never unlinks a
 // source directory (unlink is EISDIR there). The media tree is a user-chosen
 // path other tools also write into — unknown entries are payload, not junk.
-async function relocateEntry (src, dest) {
+async function relocateEntry (src, dest, renameFn = rename) {
   const srcKind = await lstatKind(src);
   if (srcKind === 'missing') return false;
 
   const destKind = await lstatKind(dest);
 
   if (destKind === 'missing') {
-    await mkdirp(dirname(dest));
-    await rename(src, dest);
+    await renameEntry(src, dest, renameFn);
     return true;
   }
 
   if (srcKind === 'dir' && destKind === 'dir') {
     const children = await listDirectory(src, { withFileTypes: true });
     for (const child of children) {
-      await relocateEntry(`${src}/${child.name}`, `${dest}/${child.name}`);
+      await relocateEntry(`${src}/${child.name}`, `${dest}/${child.name}`, renameFn);
     }
     await removeDirectoryIfEmpty(src);
     return false;
@@ -203,37 +272,54 @@ async function relocateEntry (src, dest) {
 // keep tag-dir sidecar trees co-located with the export projection before
 // the source is relocated into the canonical store.
 async function mergeCopy (src, dest) {
-  const srcKind = await lstatKind(src);
-  if (srcKind === 'missing') return;
+  try {
+    const srcKind = await lstatKind(src);
+    if (srcKind === 'missing') return;
 
-  if (srcKind === 'dir') {
-    await mkdirp(dest);
-    const children = await listDirectory(src, { withFileTypes: true });
-    for (const child of children) {
-      await mergeCopy(`${src}/${child.name}`, `${dest}/${child.name}`);
+    if (srcKind === 'dir') {
+      await mkdirp(dest);
+      const children = await listDirectory(src, { withFileTypes: true });
+      for (const child of children) {
+        await mergeCopy(`${src}/${child.name}`, `${dest}/${child.name}`);
+      }
+      return;
     }
-    return;
-  }
 
-  if ((await lstatKind(dest)) === 'missing') {
-    await mkdirp(dirname(dest));
-    await copyFile(src, dest);
+    if ((await lstatKind(dest)) === 'missing') {
+      await mkdirp(dirname(dest));
+      await copyFile(src, dest);
+    }
+  } catch (error) {
+    if (error?.code === 'ENAMETOOLONG') return;
+    throw error;
   }
 }
 
 // Place one legacy tag-dir file into the new layout: ensure the canonical
 // store holds the single real copy, make the export entry a hard link to it,
 // then drop the duplicate source. Idempotent — a converged file is a no-op.
-async function placeTagFile (src, canonical, dest, report) {
+async function placeTagFile (src, canonical, dest, report, {
+  duplicate = 'hardlink',
+  renameFn = rename,
+  exportLink = fsLink,
+  skip
+} = {}) {
   // 1. Ensure the canonical store has this file. If it is absent — the
   //    download-filter exception, where the user downloaded only this reaction
   //    so the file never entered the canonical store — MOVE the only copy in.
   //    A cheap rename: no byte copy, the data is never duplicated or at risk.
   if (!(await fileExists(canonical))) {
     if (!(await fileExists(src))) return;            // nothing here (already migrated)
-    await mkdirp(dirname(canonical));
-    await rename(src, canonical);
+    await renameEntry(src, canonical, renameFn);
     report.canonicalPopulated++;
+  }
+
+  // A synced folder, or a volume that refuses hard links, keeps one copy.
+  // The export record is seeded separately. Sync on the Exports page is the
+  // later copy, and it asks first.
+  if (duplicate === 'none') {
+    if (await fileExists(src)) await unlink(src);
+    return;
   }
 
   // 2. Ensure the export entry is a hard link to the canonical file.
@@ -244,8 +330,21 @@ async function placeTagFile (src, canonical, dest, report) {
     return;
   }
   if (destExists) await unlink(dest);               // a stale copy (wrong inode)
-  await mkdirp(dirname(dest));
-  if (await linkInto(canonical, dest)) report.hardlinked++;
+  try {
+    await mkdirp(dirname(dest));
+    const linked = await linkInto(canonical, dest, exportLink);
+    if (linked === 'skipped') {
+      if (skip) skip.n += 1;
+      if (await fileExists(src)) await unlink(src);
+      return;
+    }
+    if (linked) report.hardlinked++;
+  } catch (error) {
+    if (error?.code !== 'ENAMETOOLONG') throw error;
+    if (skip) skip.n += 1;
+    if (await fileExists(src)) await unlink(src);
+    return;
+  }
   report.relocated++;
 
   // 3. Drop the now-duplicate source copy (reclaims the duplicated bytes).
@@ -257,34 +356,52 @@ async function placeTagFile (src, canonical, dest, report) {
 // `.comments/`, stray non-date dirs, symlinks) — relocate, never delete.
 // Merges into any existing dest; on a clash the already-present dest wins
 // (safe re-run). Directories merge children rather than being unlinked.
-async function flattenCanonical (allDir, mediaGen, report) {
-  const dateDirs = await listDirectories(allDir);
+async function flattenCanonical (allDir, mediaGen, report, journal, renameFn = rename) {
+  const dateDirs = (await listDirectories(allDir)).filter(isDate);
+  const done = new Set(journal.dates);
+  const pending = dateDirs.filter(date => !done.has(date));
+  const total = done.size + pending.length;
+  let index = done.size;
   for (const date of dateDirs) {
     if (!isDate(date)) continue;
+    if (done.has(date)) continue;
+    index += 1;
+    console.log(`Updating the library… ${date} (${index} of ${total})`);
     const srcDateDir = `${allDir}/${date}`;
     const destDateDir = `${mediaGen}/${date}`;
     const entries = await listDirectory(srcDateDir, { withFileTypes: true });
     for (const ent of entries) {
-      if (await relocateEntry(`${srcDateDir}/${ent.name}`, `${destDateDir}/${ent.name}`)) {
+      if (await relocateEntry(`${srcDateDir}/${ent.name}`, `${destDateDir}/${ent.name}`, renameFn)) {
         report.flattened++;
       }
     }
     await removeDirectoryIfEmpty(srcDateDir);
+    journal.dates.push(date);
+    await writeLayoutJournal(journal);
   }
   // Leftovers under all/ (non-date dirs, stray files, a date dir that
   // still held payload) move up as units.
   const leftover = await listDirectory(allDir, { withFileTypes: true });
   for (const ent of leftover) {
-    if (await relocateEntry(`${allDir}/${ent.name}`, `${mediaGen}/${ent.name}`)) {
+    if (await relocateEntry(`${allDir}/${ent.name}`, `${mediaGen}/${ent.name}`, renameFn)) {
       report.flattened++;
     }
   }
   await removeDirectoryIfEmpty(allDir);
 }
 
-async function relocateTagDir (tagDir, mediaGen, exportGenRoot, report) {
+async function relocateTagDir (tagDir, mediaGen, exportGenRoot, report, journal, {
+  duplicate = 'hardlink',
+  renameFn = rename,
+  exportLink = fsLink,
+  skip
+} = {}) {
   const dateDirs = await listDirectories(tagDir);
+  const total = dateDirs.length;
+  let index = 0;
   for (const date of dateDirs) {
+    index += 1;
+    console.log(`Updating the library… ${date} (${index} of ${total})`);
     const srcDateDir = `${tagDir}/${date}`;
     const canonicalDateDir = `${mediaGen}/${date}`;
     const exportDateDir = `${exportGenRoot}/${date}`;
@@ -294,18 +411,31 @@ async function relocateTagDir (tagDir, mediaGen, exportGenRoot, report) {
       if (ent.isDirectory()) {
         // Sidecar tree: copy into the export (co-located with the projection)
         // then relocate into the canonical store (next to the images).
-        await mergeCopy(src, `${exportDateDir}/${ent.name}`);
-        await relocateEntry(src, `${canonicalDateDir}/${ent.name}`);
+        // A no-second-copy migration only relocates. It does not duplicate.
+        if (duplicate !== 'none') {
+          try {
+            await mergeCopy(src, `${exportDateDir}/${ent.name}`);
+          } catch (error) {
+            if (error?.code !== 'ENAMETOOLONG') throw error;
+            if (skip) skip.n += 1;
+          }
+        }
+        await relocateEntry(src, `${canonicalDateDir}/${ent.name}`, renameFn);
         continue;
       }
       await placeTagFile(
         src,
         `${canonicalDateDir}/${ent.name}`,
         `${exportDateDir}/${ent.name}`,
-        report
+        report,
+        { duplicate, renameFn, exportLink, skip }
       );
     }
     await removeDirectoryIfEmpty(srcDateDir);
+    if (isDate(date) && !journal.dates.includes(date)) {
+      journal.dates.push(date);
+      await writeLayoutJournal(journal);
+    }
   }
   if (await removeDirectoryIfEmpty(tagDir)) report.dirsRemoved++;
 }
@@ -338,7 +468,13 @@ async function seedLegacyExport (le) {
 
 // The destructive cutover migration. Returns a per-op report so a test can
 // assert that a second run over already-migrated fixtures performs ZERO ops.
-export async function migrateExportsLayout () {
+// `link` defaults to fs.link. A test passes a function that throws EPERM to
+// lock the no-second-copy branch without a special volume.
+export async function migrateExportsLayout ({
+  link = fsLink,
+  exportLink = fsLink,
+  rename: renameFn = rename
+} = {}) {
   const report = {
     flattened: 0,
     canonicalPopulated: 0,
@@ -364,6 +500,15 @@ export async function migrateExportsLayout () {
     tagDirsPresent.includes(le) || configTags.includes(le.tag)
   );
 
+  if (!allPresent && tagDirsPresent.length === 0) {
+    return report;
+  }
+
+  const cloud = isCloudSyncPath(CONFIG.mediaPath);
+  let duplicate = 'hardlink';
+  if (cloud || !(await probeLayoutLink(link))) duplicate = 'none';
+  if (duplicate === 'none') console.log(LAYOUT_NO_SECOND_COPY);
+
   // Show the "Updating…" pause only when there is real file work to do — a
   // fresh install (canonical store only, no tag dirs) converges silently with
   // no dialog.
@@ -371,15 +516,30 @@ export async function migrateExportsLayout () {
     console.log('Updating media library, please wait...');
   }
 
+  const journal = await readLayoutJournal();
+  const skip = { n: 0 };
+
   // 1. Flatten the canonical store.
   if (allPresent) {
-    await flattenCanonical(allDir, mediaGen, report);
+    await flattenCanonical(allDir, mediaGen, report, journal, renameFn);
   }
 
   // 2-4. Relocate each tag dir into its export, populating the canonical store
   //      for the download-filter exception and converting copies → hard links.
+  //      A refused hard link seeds the export and keeps one canonical file.
   for (const le of tagDirsPresent) {
-    await relocateTagDir(`${mediaGen}/${le.dir}`, mediaGen, `${exportsBase}/${le.slug}/generations`, report);
+    await relocateTagDir(
+      `${mediaGen}/${le.dir}`,
+      mediaGen,
+      `${exportsBase}/${le.slug}/generations`,
+      report,
+      journal,
+      { duplicate, renameFn, exportLink, skip }
+    );
+  }
+
+  if (skip.n > 0) {
+    console.log('Some files were not placed in the export folder because the path is too long. They stay in the library folder.');
   }
 
   // 5. Seed an export definition for each prior non-'all' selection.
@@ -675,11 +835,10 @@ export async function migrate () {
     // orphans the index no longer references. This run still has `excludeImages`.
     await migrateSuppressedCovers();
 
-    // Live-window input capture (input-media leaf 3). Same version gate as
-    // the stamp below; re-running on a later bump re-attempts the then-current
-    // 30-day window. Additive, never unlinks.
-    await migrateCaptureLiveInputs();
-    await backfillContentHashes({ force: true });
+    // Live-input capture and the content hash run after the window is open
+    // (aceAudioBackfill, queueContentHashBackfill). They are not part of the
+    // version stamp. A forced hash here re-read every file before the menu,
+    // and on a Files On-Demand folder that read downloaded it.
     await migrateStoredExportQueries();
   }
 
