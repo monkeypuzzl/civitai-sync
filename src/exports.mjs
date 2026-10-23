@@ -52,7 +52,7 @@ import { applyFacets, mediaItemToFilterable } from './explorerQuery.mjs';
 import { exportLiftQuery } from './modelsQuery.mjs';
 import { hydratedResourceSlots, resolveResourceLineName, resolveResourceVersionName } from './checkpointResolution.mjs';
 import { getModelVersionFromCache } from './modelVersionCache.mjs';
-import { isRatingTagName } from '../dev/ui/src/lib/browsing-level.js';
+import { isRatingTagName } from './browsingLevel.mjs';
 import { getIndex, getMediaItemById, isProduced } from './serverIndex.mjs';
 import { currentOwnModels } from './ownModels.mjs';
 import { normalizeMediaId } from './mediaId.mjs';

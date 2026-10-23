@@ -3,21 +3,21 @@ import {
 } from "./chunk-YGDMMQ62.js";
 import {
   loadUiPrefs
-} from "./chunk-XSOBLT75.js";
+} from "./chunk-2JZ6NTGG.js";
 import {
   invalidateDetailCache
-} from "./chunk-4Z26PAQ4.js";
+} from "./chunk-5PKL4AOG.js";
 import {
   activateOriginTab
-} from "./chunk-SNTDJ2GX.js";
+} from "./chunk-XQFHA4YD.js";
 import {
   bumpOwnModelsRevision
-} from "./chunk-UASMX4HS.js";
-import "./chunk-JB7JSPAG.js";
+} from "./chunk-JLH4BCQU.js";
+import "./chunk-FK7RTYYB.js";
 import {
   noteSettleFrame,
   subscribeIndexEpoch
-} from "./chunk-TI5I7VA3.js";
+} from "./chunk-ECN4OFEF.js";
 import {
   CORPUS_CHANGE_EVENT,
   getRoute,
@@ -27,7 +27,7 @@ import {
   pushState,
   subscribe,
   visibleNavTabs
-} from "./chunk-CPLX52FD.js";
+} from "./chunk-K4YW4PKR.js";
 import {
   J,
   connectProgress,
@@ -41,7 +41,7 @@ import {
   u,
   useDocumentTitle,
   y
-} from "./chunk-OGIWOTNU.js";
+} from "./chunk-GOKE7NMO.js";
 
 // dev/ui/src/lib/download-mark.js
 var NONE = Object.freeze({ kind: "none", title: "" });
@@ -314,18 +314,18 @@ function viewWaitsForStickyPrefs(chunkKey) {
 
 // dev/ui/src/app.jsx
 var VIEW_LOADERS = {
-  overview: () => import("./OverviewView-OUSJZBXO.js").then((m) => m.OverviewView),
-  generations: () => import("./GenerationsView-FVTDRRY7.js").then((m) => m.GenerationsView),
-  generation: () => import("./BatchDetailView-KCS2I7LK.js").then((m) => m.BatchDetailView),
-  posts: () => import("./PostsView-VGGZ5EBK.js").then((m) => m.PostsView),
-  post: () => import("./PostDetailView-BZ5DNN6W.js").then((m) => m.PostDetailView),
-  comics: () => import("./ComicsView-3FUHH3RX.js").then((m) => m.ComicsView),
-  comic: () => import("./ComicDetailView-SFWTXUNC.js").then((m) => m.ComicDetailView),
-  model3ds: () => import("./Model3dsView-BGSKCJKK.js").then((m) => m.Model3dsView),
-  exports: () => import("./ExportsView-N3PGXAAM.js").then((m) => m.ExportsView),
-  models: () => import("./ModelsView-R25NFPW3.js").then((m) => m.ModelsView),
-  media: () => import("./MediaDetail-67TNUNN3.js").then((m) => m.MediaDetailView),
-  download: () => import("./DownloadView-DDESP4ZQ.js").then((m) => m.DownloadView)
+  overview: () => import("./OverviewView-NJNBMQPV.js").then((m) => m.OverviewView),
+  generations: () => import("./GenerationsView-RVVWE7F5.js").then((m) => m.GenerationsView),
+  generation: () => import("./BatchDetailView-GA55332C.js").then((m) => m.BatchDetailView),
+  posts: () => import("./PostsView-3IOL65YF.js").then((m) => m.PostsView),
+  post: () => import("./PostDetailView-CI2M27FY.js").then((m) => m.PostDetailView),
+  comics: () => import("./ComicsView-V3SULNTT.js").then((m) => m.ComicsView),
+  comic: () => import("./ComicDetailView-YLCNTDTH.js").then((m) => m.ComicDetailView),
+  model3ds: () => import("./Model3dsView-NYSAQX6J.js").then((m) => m.Model3dsView),
+  exports: () => import("./ExportsView-YBKBZOFW.js").then((m) => m.ExportsView),
+  models: () => import("./ModelsView-4KCQ3YCK.js").then((m) => m.ModelsView),
+  media: () => import("./MediaDetail-KH3UXGZT.js").then((m) => m.MediaDetailView),
+  download: () => import("./DownloadView-YI4ICIKJ.js").then((m) => m.DownloadView)
 };
 var resolvedChunks = /* @__PURE__ */ new Map();
 var inflightChunks = /* @__PURE__ */ new Map();

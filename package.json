@@ -1,6 +1,6 @@
 {
   "name": "civitai-sync",
-  "version": "6.1.1",
+  "version": "6.1.2",
   "license": "MIT",
   "scripts": {
     "setup": "npm ci --omit-dev && npm link",

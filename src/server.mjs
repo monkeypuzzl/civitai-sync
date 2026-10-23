@@ -15,7 +15,7 @@ import { postsMediaDir, postsDataDir, postFilepath, postsNeedGenerationData, pos
 import { comicsMediaDir, comicsDataDir, comicFilepath } from './comics.mjs';
 import { model3dsMediaDir, model3dsDataDir, model3dFilepath } from './model3ds.mjs';
 import { imageBrowsingLevel } from './imageBrowsingLevel.mjs';
-import { isRatingTagName } from '../dev/ui/src/lib/browsing-level.js';
+import { isRatingTagName } from './browsingLevel.mjs';
 import { readFile } from './utils.mjs';
 import { normalizeMediaId, MEDIA_FILE_EXTS } from './mediaId.mjs';
 import {

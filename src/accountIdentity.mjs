@@ -11,7 +11,7 @@ import { ensureIndexLoaded, getIndex } from './serverIndex.mjs';
 import { clearModelVersionCache } from './modelVersionCache.mjs';
 import { clearTagCache } from './tagCache.mjs';
 import { abortOwnModelsCheck, forgetOwnModels } from './ownModels.mjs';
-import { accountMismatchText } from '../dev/ui/src/lib/account-mismatch.js';
+import { accountMismatchText } from './accountMismatch.mjs';
 
 export { accountMismatchText };
 

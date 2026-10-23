@@ -7,8 +7,8 @@
 //   modelFlag          — boolean on nested model records (REST / tRPC cache)
 //   allowContent       — generation-level content flag (probe / 3D notes)
 //
-// Preact/esbuild already bundles src/*.mjs (safeHtml). The UI re-exports
-// browsingLevelOf from this module via dev/ui/src/lib/browsing-level.js.
+// Preact/esbuild already bundles src/*.mjs (safeHtml). src/browsingLevel.mjs
+// re-exports browsingLevelOf, and the UI file re-exports that.
 
 function fromCodes (...codes) {
   return String.fromCharCode(...codes);

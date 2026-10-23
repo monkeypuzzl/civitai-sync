@@ -37,7 +37,7 @@ import {
 } from './mediaAspect.mjs';
 import { ensureTagCacheLoaded, getTagNameFromCache, formatTagName } from './tagCache.mjs';
 import { browsingLevelOf } from './civitaiWire.mjs';
-import { isRatingTagName, ratingTagLabel, ratingTokenForLevel } from '../dev/ui/src/lib/browsing-level.js';
+import { isRatingTagName, ratingTagLabel, ratingTokenForLevel } from './browsingLevel.mjs';
 import { CONFIG } from './cli.mjs';
 import { civitaiUrl } from './civitaiDomain.mjs';
 import { getEcosystemDisplayName } from './ecosystemDisplay.mjs';

@@ -45,7 +45,7 @@ import {
   parseWorkflowFamily,
   remainderTypeOf
 } from './workflowFamily.mjs';
-import { isRatingTagName, ratingTokenForLevel } from '../dev/ui/src/lib/browsing-level.js';
+import { isRatingTagName, ratingTokenForLevel } from './browsingLevel.mjs';
 
 // --- Field extractors (shape-tolerant) -------------------------------------
 
